@@ -7,3 +7,6 @@
 [submodule "bash-fork"]
 	path = bash-fork
 	url = https://github.com/oyin-bo/washm-bash-fork
+[submodule "emscripten-core"]
+	path = emscripten-core
+	url = https://github.com/emscripten-core/emsdk.git
