@@ -1,15 +1,3 @@
-[submodule "pyodide-fork"]
-	path = pyodide-fork
-	url = https://github.com/oyin-bo/wasm-pyodide-fork
-[submodule "wasmer-sh-fork"]
-	path = wasmer-js-fork
-	url = https://github.com/oyin-bo/washm-wasmer-js-fork
-[submodule "bash-fork"]
-	path = bash-fork
-	url = https://github.com/oyin-bo/washm-bash-fork
 [submodule "emscripten-core"]
 	path = emscripten-core
 	url = https://github.com/emscripten-core/emsdk.git
-[submodule "wasmer-fork"]
-	path = wasmer-fork
-	url = https://github.com/oyin-bo/washm-wasmer-fork/
