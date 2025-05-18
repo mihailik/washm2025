@@ -10,3 +10,6 @@
 [submodule "emscripten-core"]
 	path = emscripten-core
 	url = https://github.com/emscripten-core/emsdk.git
+[submodule "wasmer-fork"]
+	path = wasmer-fork
+	url = https://github.com/oyin-bo/washm-wasmer-fork/
