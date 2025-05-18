@@ -2,7 +2,7 @@
 	path = pyodide-fork
 	url = https://github.com/oyin-bo/wasm-pyodide-fork
 [submodule "wasmer-sh-fork"]
-	path = wasmer-sh-fork
+	path = wasmer-js-fork
 	url = https://github.com/oyin-bo/washm-wasmer-js-fork
 [submodule "bash-fork"]
 	path = bash-fork
