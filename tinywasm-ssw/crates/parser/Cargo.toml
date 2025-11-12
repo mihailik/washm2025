@@ -1,0 +1,21 @@
+[package]
+name="tinywasm-parser"
+version.workspace=true
+description="TinyWasm parser"
+edition.workspace=true
+license.workspace=true
+authors.workspace=true
+repository.workspace=true
+rust-version.workspace=true
+keywords.workspace=true
+categories.workspace=true
+
+[dependencies]
+wasmparser={workspace=true, features=["validate", "features", "simd"]}
+log={workspace=true, optional=true}
+tinywasm-types={version="0.9.0-alpha.0", path="../types", default-features=false}
+
+[features]
+default=["std", "logging"]
+logging=["log"]
+std=["tinywasm-types/std", "wasmparser/std"]
