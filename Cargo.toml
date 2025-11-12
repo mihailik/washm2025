@@ -1,0 +1,9 @@
+[package]
+name = "washm"
+version = "0.1.0"
+edition = "2021"
+authors = ["Oleg Mihailik <mihailik@gmail.com>"]
+description = "A tiny placeholder washm crate (hello world)."
+license = "MIT"
+
+[dependencies]
