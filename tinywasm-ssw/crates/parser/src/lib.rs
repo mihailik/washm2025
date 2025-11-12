@@ -71,6 +71,9 @@ impl Parser {
             extended_const: false,
             wide_arithmetic: false,
             gc_types: true,
+            #[cfg(feature = "stack-switching")]
+            stack_switching: true,
+            #[cfg(not(feature = "stack-switching"))]
             stack_switching: false,
             component_model: false,
             exceptions: false,

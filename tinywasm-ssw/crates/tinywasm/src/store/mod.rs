@@ -13,7 +13,13 @@ mod global;
 mod memory;
 mod table;
 
+#[cfg(feature = "stack-switching")]
+mod stack;
+
 pub(crate) use {data::*, element::*, function::*, global::*, memory::*, table::*};
+
+#[cfg(feature = "stack-switching")]
+pub(crate) use stack::{StackInstance, StackState, SuspendContext, TagValue};
 
 // global store id counter
 static STORE_ID: AtomicUsize = AtomicUsize::new(0);
@@ -112,6 +118,8 @@ pub(crate) struct StoreData {
     pub(crate) globals: Vec<GlobalInstance>,
     pub(crate) elements: Vec<ElementInstance>,
     pub(crate) datas: Vec<DataInstance>,
+    #[cfg(feature = "stack-switching")]
+    pub(crate) stacks: Vec<Option<StackInstance>>,
 }
 
 impl Store {
@@ -477,6 +485,40 @@ impl Store {
             _ => return Err(Error::Other("unsupported const instruction".to_string())),
         };
         Ok(val)
+    }
+
+    /// Stack management functions for stack-switching proposal
+    #[cfg(feature = "stack-switching")]
+    pub(crate) fn add_stack(&mut self, stack: StackInstance) -> tinywasm_types::ContAddr {
+        self.data.stacks.push(Some(stack));
+        (self.data.stacks.len() - 1) as tinywasm_types::ContAddr
+    }
+
+    #[cfg(feature = "stack-switching")]
+    pub(crate) fn get_stack(&self, addr: tinywasm_types::ContAddr) -> Option<&StackInstance> {
+        self.data.stacks.get(addr as usize).and_then(|s| s.as_ref())
+    }
+
+    #[cfg(feature = "stack-switching")]
+    pub(crate) fn get_stack_mut(&mut self, addr: tinywasm_types::ContAddr) -> Option<&mut StackInstance> {
+        self.data.stacks.get_mut(addr as usize).and_then(|s| s.as_mut())
+    }
+
+    #[cfg(feature = "stack-switching")]
+    pub(crate) fn take_stack(&mut self, addr: tinywasm_types::ContAddr) -> Option<StackInstance> {
+        self.data.stacks.get_mut(addr as usize).and_then(|s| s.take())
+    }
+
+    #[cfg(feature = "stack-switching")]
+    pub(crate) fn replace_stack(&mut self, addr: tinywasm_types::ContAddr, stack: StackInstance) -> Option<StackInstance> {
+        self.data.stacks.get_mut(addr as usize).and_then(|s| s.replace(stack))
+    }
+
+    #[cfg(feature = "stack-switching")]
+    pub(crate) fn free_stack(&mut self, addr: tinywasm_types::ContAddr) {
+        if let Some(slot) = self.data.stacks.get_mut(addr as usize) {
+            *slot = None;
+        }
     }
 }
 

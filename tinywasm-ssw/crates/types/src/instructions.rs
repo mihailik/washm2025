@@ -1,6 +1,9 @@
 use super::{FuncAddr, GlobalAddr, LabelAddr, LocalAddr, TableAddr, TypeAddr, ValType};
 use crate::{ConstIdx, DataAddr, ElemAddr, ExternAddr, MemAddr};
 
+#[cfg(feature = "stack-switching")]
+use crate::ContAddr;
+
 /// Represents a memory immediate in a WebAssembly memory instruction.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "archive", derive(serde::Serialize, serde::Deserialize))]
@@ -182,6 +185,21 @@ pub enum Instruction {
     MemoryFill(MemAddr),
     DataDrop(DataAddr),
     ElemDrop(ElemAddr),
+
+    // > Stack Switching Instructions (experimental)
+    // See https://github.com/WebAssembly/stack-switching/
+    #[cfg(feature = "stack-switching")]
+    ContNew(TypeAddr),
+    #[cfg(feature = "stack-switching")]
+    ContBind(u32, u32), // argument_index, result_index
+    #[cfg(feature = "stack-switching")]
+    Suspend(u32), // tag index
+    #[cfg(feature = "stack-switching")]
+    Resume(TypeAddr), // cont_type_index - resume table stored separately
+    #[cfg(feature = "stack-switching")]
+    ResumeThrow(TypeAddr, u32), // cont_type_index, tag_index - resume table stored separately
+    #[cfg(feature = "stack-switching")]
+    Switch(TypeAddr, u32), // cont_type_index, tag_index
 
     // > SIMD Instructions
     V128Load(MemoryArg),

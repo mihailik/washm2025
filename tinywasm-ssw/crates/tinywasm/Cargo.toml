@@ -51,6 +51,9 @@ canonicalize_nans=[]
 # enable simd support (unstable / unfinished)
 unstable-simd=[]
 
+# enable stack-switching support (experimental)
+stack-switching=["tinywasm-parser?/stack-switching"]
+
 [[test]]
 name="test-wasm-1"
 harness=false

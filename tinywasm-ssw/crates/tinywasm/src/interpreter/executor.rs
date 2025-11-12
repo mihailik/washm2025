@@ -5,7 +5,6 @@ use super::no_std_floats::NoStdFloatExt;
 use alloc::{format, rc::Rc, string::ToString};
 use core::ops::ControlFlow;
 
-use interpreter::stack::CallFrame;
 use tinywasm_types::*;
 
 #[cfg(all(feature = "std", feature = "unstable-simd"))]
@@ -17,7 +16,10 @@ use core::simd::{cmp::*, num::*, *};
 use core::ops::{Index, IndexMut, Shl, Shr};
 
 use super::num_helpers::*;
-use super::stack::{BlockFrame, BlockType, Stack};
+#[cfg(feature = "stack-switching")]
+use super::stack::{BlockFrame, BlockType, Stack, CallFrame, Locals};
+#[cfg(not(feature = "stack-switching"))]
+use super::stack::{BlockFrame, BlockType, Stack, CallFrame};
 use super::values::*;
 use crate::*;
 
@@ -721,6 +723,32 @@ impl<'store, 'stack> Executor<'store, 'stack> {
             #[cfg(feature = "unstable-simd")] I16x8RelaxedDotI8x16I7x16S => unimplemented!(),
             #[cfg(feature = "unstable-simd")] I32x4RelaxedDotI8x16I7x16AddS => unimplemented!(),
 
+            // Stack switching instructions
+            #[cfg(feature = "stack-switching")]
+            ContNew(type_index) => {
+                if let Err(e) = self.exec_cont_new(*type_index) {
+                    return ControlFlow::Break(Some(e));
+                }
+            }
+            #[cfg(feature = "stack-switching")]
+            ContBind(argument_index, result_index) => {
+                if let Err(e) = self.exec_cont_bind(*argument_index, *result_index) {
+                    return ControlFlow::Break(Some(e));
+                }
+            }
+            #[cfg(feature = "stack-switching")]
+            Suspend(tag_index) => return self.exec_suspend(*tag_index),
+            #[cfg(feature = "stack-switching")]
+            Resume(cont_type_index) => return self.exec_resume(*cont_type_index),
+            #[cfg(feature = "stack-switching")]
+            ResumeThrow(cont_type_index, tag_index) => {
+                if let Err(e) = self.exec_resume_throw(*cont_type_index, *tag_index) {
+                    return ControlFlow::Break(Some(e));
+                }
+            }
+            #[cfg(feature = "stack-switching")]
+            Switch(cont_type_index, tag_index) => return self.exec_switch(*cont_type_index, *tag_index),
+
             #[allow(unreachable_patterns)]
             i => return ControlFlow::Break(Some(Error::UnsupportedFeature(format!("unimplemented opcode: {i:?}")))),
         };
@@ -1241,5 +1269,372 @@ impl<'store, 'stack> Executor<'store, 'stack> {
     fn exec_local_copy<T: InternalValue>(&mut self, from: u16, to: u16) {
         let v = self.cf.locals.get::<T>(from);
         self.cf.locals.set(to, v);
+    }
+
+    /// Create a dummy call frame for temporary use during stack swapping
+    #[cfg(feature = "stack-switching")]
+    fn create_dummy_frame() -> CallFrame {
+        use alloc::vec;
+        
+        CallFrame::new_raw(
+            Rc::new(WasmFunction {
+                ty: FuncType {
+                    params: vec![].into(),
+                    results: vec![].into(),
+                },
+                instructions: vec![Instruction::Unreachable].into(),
+                locals: ValueCounts::default(),
+                params: Default::default(),
+                data: Default::default(),
+            }),
+            0,
+            Locals {
+                locals_32: vec::Vec::new().into_boxed_slice(),
+                locals_64: vec::Vec::new().into_boxed_slice(),
+                locals_128: vec::Vec::new().into_boxed_slice(),
+                locals_ref: vec::Vec::new().into_boxed_slice(),
+            },
+            0,
+        )
+    }
+
+    /// Stack switching operations
+    #[cfg(feature = "stack-switching")]
+    fn exec_cont_new(&mut self, _cont_type_index: u32) -> Result<()> {
+        use crate::store::StackInstance;
+        
+        // Pop the function reference from the stack
+        let func_ref = self.stack.values.pop::<ValueRef>();
+        let func_addr = func_ref.ok_or_else(|| Error::Other("cont.new requires a function reference".to_string()))?;
+        
+        // Get the function from the store
+        let func_inst = self.store.get_func(func_addr);
+        let (wasm_func, module_addr) = match &func_inst.func {
+            Function::Wasm(wasm_func) => (wasm_func.clone(), func_inst.owner),
+            Function::Host(_) => return Err(Error::Other("cont.new cannot be used with host functions".to_string())),
+        };
+        
+        // Create a new call frame for this continuation (with empty parameters for now)
+        let call_frame = super::stack::CallFrame::new(wasm_func, module_addr, &[], 0);
+        
+        // Create a new stack with this frame
+        let stack = super::stack::Stack::new(call_frame, &self.store.config);
+        
+        // Create a stack instance
+        let stack_instance = StackInstance::new(stack, module_addr);
+        
+        // Add it to the store and get the address
+        let stack_addr = self.store.add_stack(stack_instance);
+        
+        // Push the continuation address onto the value stack as a reference
+        self.stack.values.push::<ValueRef>(Some(stack_addr));
+        
+        Ok(())
+    }
+
+    #[cfg(feature = "stack-switching")]
+    fn exec_cont_bind(&mut self, _argument_index: u32, _result_index: u32) -> Result<()> {
+        use crate::store::StackState;
+        
+        // Pop the continuation reference from the stack
+        let cont_ref = self.stack.values.pop::<ValueRef>();
+        let cont_addr = cont_ref.ok_or_else(|| Error::Other("cont.bind requires a continuation reference".to_string()))?;
+        
+        // Get the continuation from the store
+        let cont_instance = self.store.get_stack_mut(cont_addr)
+            .ok_or_else(|| Error::Other(format!("continuation {} not found", cont_addr)))?;
+        
+        // Check that the continuation is in a valid state
+        if cont_instance.state == StackState::Dead {
+            return Err(Error::Other("cannot bind to a dead continuation".to_string()));
+        }
+        
+        if cont_instance.state == StackState::Running {
+            return Err(Error::Other("cannot bind to a running continuation".to_string()));
+        }
+        
+        // Pop arguments from the current stack based on argument_index
+        // In a full implementation, this would:
+        // 1. Pop N arguments from the current stack
+        // 2. Push them onto the continuation's value stack as bound parameters
+        // 3. Adjust the continuation's function signature
+        
+        // For now, we validate and accept the operation
+        // A complete implementation would involve modifying the continuation's locals
+        
+        // Push the continuation back (or a new bound continuation)
+        self.stack.values.push::<ValueRef>(Some(cont_addr));
+        
+        Ok(())
+    }
+
+    #[cfg(feature = "stack-switching")]
+    fn exec_suspend(&mut self, tag_index: u32) -> ControlFlow<Option<Error>> {
+        use crate::store::{StackState, SuspendContext, TagValue};
+        use core::mem;
+        
+        // Pop target stack address where we should suspend to
+        let target_addr: i32 = self.stack.values.pop();
+        let target_addr = target_addr as ContAddr;
+        
+        // For now, collect no values (would normally be based on tag type)
+        let values = alloc::vec::Vec::new();
+        
+        // Verify target exists and is suspended
+        {
+            let target = self.store.get_stack(target_addr)
+                .ok_or_else(|| Error::Other(format!("suspend: invalid target address {}", target_addr)))
+                .to_cf()?;
+            
+            if target.state != StackState::Suspended {
+                return ControlFlow::Break(Some(Error::Other(
+                    format!("suspend: target not suspended (state: {:?})", target.state)
+                )));
+            }
+        }
+        
+        // Take target from store
+        let target_stack = self.store.take_stack(target_addr)
+            .ok_or_else(|| Error::Other("suspend: target disappeared".to_string()))
+            .to_cf()?;
+        
+        // Save current call frame
+        let push_res = self.stack.call_stack.push(
+            mem::replace(&mut self.cf, Self::create_dummy_frame())
+        );
+        if let ControlFlow::Break(e) = push_res {
+            self.store.data.stacks[target_addr as usize] = Some(target_stack);
+            return ControlFlow::Break(e);
+        }
+        
+        // Swap stacks using mem::replace
+        let current_module = self.cf.module_addr();
+        let old_stack = mem::replace(self.stack, target_stack.stack);
+        
+        // Create suspend context
+        let suspend_ctx = SuspendContext {
+            tag_index,
+            values: TagValue::new(values),
+            return_addr: None,
+        };
+        
+        // Store old stack with suspend context
+        let current_addr = self.store.add_stack(StackInstance::new_suspended(
+            old_stack,
+            current_module,
+            suspend_ctx,
+        ));
+        
+        // Restore call frame from new stack
+        self.cf = self.stack.call_stack.pop()
+            .expect("suspend: target has no call frame");
+        self.module.swap_with(self.cf.module_addr(), self.store);
+        
+        // Push return address so suspended stack knows where to resume
+        self.stack.values.push(current_addr as i32);
+        
+        self.cf.incr_instr_ptr();
+        ControlFlow::Continue(())
+    }
+
+    #[cfg(feature = "stack-switching")]
+    fn exec_resume(&mut self, _cont_type_index: u32) -> ControlFlow<Option<Error>> {
+        use crate::store::StackState;
+        use core::mem;
+        
+        // Pop the continuation reference from the stack
+        let cont_ref = self.stack.values.pop::<ValueRef>();
+        let cont_addr = cont_ref.ok_or_else(|| 
+            Error::Other("resume requires a continuation reference".to_string())
+        ).to_cf()?;
+        
+        // Verify continuation state
+        {
+            let cont = self.store.get_stack(cont_addr)
+                .ok_or_else(|| Error::Other(format!("resume: invalid continuation {}", cont_addr)))
+                .to_cf()?;
+            
+            if cont.state == StackState::Dead {
+                return ControlFlow::Break(Some(Error::Other(
+                    "cannot resume a dead continuation".to_string()
+                )));
+            }
+            
+            if cont.state == StackState::Running {
+                return ControlFlow::Break(Some(Error::Other(
+                    "cannot resume a running continuation".to_string()
+                )));
+            }
+        }
+        
+        // Take continuation from store
+        let mut cont_instance = self.store.take_stack(cont_addr)
+            .ok_or_else(|| Error::Other(format!("continuation {} disappeared", cont_addr)))
+            .to_cf()?;
+        
+        // Get suspend context and push values onto stack
+        if let Some(suspend_ctx) = cont_instance.resume() {
+            for value in suspend_ctx.values.values {
+                match value {
+                    WasmValue::I32(v) => self.stack.values.push(v),
+                    WasmValue::I64(v) => self.stack.values.push(v),
+                    WasmValue::F32(v) => self.stack.values.push(v),
+                    WasmValue::F64(v) => self.stack.values.push(v),
+                    WasmValue::V128(v) => self.stack.values.push(v),
+                    _ => {
+                        self.store.data.stacks[cont_addr as usize] = Some(cont_instance);
+                        return ControlFlow::Break(Some(Error::Other("unsupported value type".to_string())));
+                    }
+                }
+            }
+        }
+        
+        // Save current call frame
+        let push_res = self.stack.call_stack.push(
+            mem::replace(&mut self.cf, Self::create_dummy_frame())
+        );
+        if let ControlFlow::Break(e) = push_res {
+            self.store.data.stacks[cont_addr as usize] = Some(cont_instance);
+            return ControlFlow::Break(e);
+        }
+        
+        // Swap stacks
+        let current_module = self.cf.module_addr();
+        let old_stack = mem::replace(self.stack, cont_instance.stack);
+        
+        // Store old stack as suspended
+        let current_addr = self.store.add_stack(StackInstance {
+            stack: old_stack,
+            module_addr: current_module,
+            state: StackState::Suspended,
+            suspend_context: None,
+        });
+        
+        // Restore call frame
+        self.cf = self.stack.call_stack.pop()
+            .expect("resume: continuation has no call frame");
+        self.module.swap_with(self.cf.module_addr(), self.store);
+        
+        // Push return address
+        self.stack.values.push(current_addr as i32);
+        
+        self.cf.incr_instr_ptr();
+        ControlFlow::Continue(())
+    }
+
+    #[cfg(feature = "stack-switching")]
+    fn exec_resume_throw(&mut self, _cont_type_index: u32, _tag_index: u32) -> Result<()> {
+        use crate::store::{StackState, TagValue};
+        
+        // Pop the continuation reference from the stack
+        let cont_ref = self.stack.values.pop::<ValueRef>();
+        let cont_addr = cont_ref.ok_or_else(|| Error::Other("resume_throw requires a continuation reference".to_string()))?;
+        
+        // Take the continuation from the store
+        let mut cont_instance = self.store.take_stack(cont_addr)
+            .ok_or_else(|| Error::Other(format!("continuation {} not found", cont_addr)))?;
+        
+        // Check that the continuation is in a valid state
+        if cont_instance.state == StackState::Dead {
+            self.store.replace_stack(cont_addr, cont_instance);
+            return Err(Error::Other("cannot resume_throw to a dead continuation".to_string()));
+        }
+        
+        if cont_instance.state == StackState::Running {
+            self.store.replace_stack(cont_addr, cont_instance);
+            return Err(Error::Other("cannot resume_throw to a running continuation".to_string()));
+        }
+        
+        // Collect exception values from the stack
+        let _exception_values = TagValue::empty();
+        
+        // Resume the continuation
+        let _suspend_ctx = cont_instance.resume();
+        
+        // In a full implementation, this would:
+        // 1. Save the current stack state
+        // 2. Swap to the continuation's stack
+        // 3. Throw an exception with the tag_index and values
+        // 4. Let the continuation's exception handler process it
+        
+        // For now, mark as running and put it back
+        self.store.replace_stack(cont_addr, cont_instance);
+        
+        Ok(())
+    }
+
+    #[cfg(feature = "stack-switching")]
+    fn exec_switch(&mut self, _cont_type_index: u32, tag_index: u32) -> ControlFlow<Option<Error>> {
+        use crate::store::{StackState, SuspendContext, TagValue};
+        use core::mem;
+        
+        // Pop target stack address
+        let target_addr: i32 = self.stack.values.pop();
+        let target_addr = target_addr as ContAddr;
+        
+        // Collect values (would normally be based on tag type)
+        let values = alloc::vec::Vec::new();
+        
+        // Verify target
+        {
+            let target = self.store.get_stack(target_addr)
+                .ok_or_else(|| Error::Other(format!("switch: invalid target {}", target_addr)))
+                .to_cf()?;
+            
+            if target.state == StackState::Dead {
+                return ControlFlow::Break(Some(Error::Other("switch: target is dead".to_string())));
+            }
+        }
+        
+        // Take target
+        let target_stack = self.store.take_stack(target_addr)
+            .ok_or_else(|| Error::Other("switch: target disappeared".to_string()))
+            .to_cf()?;
+        
+        // Save current frame
+        let push_res = self.stack.call_stack.push(
+            mem::replace(&mut self.cf, Self::create_dummy_frame())
+        );
+        if let ControlFlow::Break(e) = push_res {
+            self.store.data.stacks[target_addr as usize] = Some(target_stack);
+            return ControlFlow::Break(e);
+        }
+        
+        // Swap stacks
+        let current_module = self.cf.module_addr();
+        let old_stack = mem::replace(self.stack, target_stack.stack);
+        
+        // Store old stack with suspend context (bidirectional switch)
+        let suspend_ctx = SuspendContext {
+            tag_index,
+            values: TagValue::new(values.clone()),
+            return_addr: Some(target_addr),
+        };
+        
+        let current_addr = self.store.add_stack(StackInstance::new_suspended(
+            old_stack,
+            current_module,
+            suspend_ctx,
+        ));
+        
+        // Restore from target
+        self.cf = self.stack.call_stack.pop()
+            .expect("switch: target has no call frame");
+        self.module.swap_with(self.cf.module_addr(), self.store);
+        
+        // Push values and return address
+        for value in values {
+            match value {
+                WasmValue::I32(v) => self.stack.values.push(v),
+                WasmValue::I64(v) => self.stack.values.push(v),
+                WasmValue::F32(v) => self.stack.values.push(v),
+                WasmValue::F64(v) => self.stack.values.push(v),
+                _ => return ControlFlow::Break(Some(Error::Other("unsupported value".to_string()))),
+            }
+        }
+        self.stack.values.push(current_addr as i32);
+        
+        self.cf.incr_instr_ptr();
+        ControlFlow::Continue(())
     }
 }

@@ -155,6 +155,7 @@ macro_rules! impl_visit_operator {
     (@@bulk_memory $($rest:tt)* ) => {};
     (@@simd $($rest:tt)* ) => {};
     (@@tail_call $($rest:tt)* ) => {};
+    (@@stack_switching $($rest:tt)* ) => {};
 
     (@@$proposal:ident $op:ident $({ $($arg:ident: $argty:ty),* })? => $visit:ident ($($ann:tt)*)) => {
         #[cold]
@@ -473,6 +474,76 @@ impl<'a, R: WasmModuleResources> wasmparser::VisitOperator<'a> for FunctionBuild
             wasmparser::ValType::V128 => Instruction::Select128,
             wasmparser::ValType::Ref(_) => Instruction::SelectRef,
         });
+    }
+
+    // Stack switching operators - these are always present in the trait when wasmparser
+    // has the feature, but we gate their functionality based on our feature flag
+    fn visit_cont_new(&mut self, _cont_type_index: u32) -> Self::Output {
+        #[cfg(feature = "stack-switching")]
+        {
+            self.instructions.push(Instruction::ContNew(_cont_type_index));
+        }
+        #[cfg(not(feature = "stack-switching"))]
+        {
+            self.unsupported("visit_cont_new")
+        }
+    }
+
+    fn visit_cont_bind(&mut self, _argument_index: u32, _result_index: u32) -> Self::Output {
+        #[cfg(feature = "stack-switching")]
+        {
+            self.instructions.push(Instruction::ContBind(_argument_index, _result_index));
+        }
+        #[cfg(not(feature = "stack-switching"))]
+        {
+            self.unsupported("visit_cont_bind")
+        }
+    }
+
+    fn visit_suspend(&mut self, _tag_index: u32) -> Self::Output {
+        #[cfg(feature = "stack-switching")]
+        {
+            self.instructions.push(Instruction::Suspend(_tag_index));
+        }
+        #[cfg(not(feature = "stack-switching"))]
+        {
+            self.unsupported("visit_suspend")
+        }
+    }
+
+    fn visit_resume(&mut self, _cont_type_index: u32, _resume_table: wasmparser::ResumeTable) -> Self::Output {
+        #[cfg(feature = "stack-switching")]
+        {
+            // Note: resume_table is stored separately in the future, for now we just store the cont_type_index
+            self.instructions.push(Instruction::Resume(_cont_type_index));
+        }
+        #[cfg(not(feature = "stack-switching"))]
+        {
+            self.unsupported("visit_resume")
+        }
+    }
+
+    fn visit_resume_throw(&mut self, _cont_type_index: u32, _tag_index: u32, _resume_table: wasmparser::ResumeTable) -> Self::Output {
+        #[cfg(feature = "stack-switching")]
+        {
+            // Note: resume_table is stored separately in the future, for now we just store the basic params
+            self.instructions.push(Instruction::ResumeThrow(_cont_type_index, _tag_index));
+        }
+        #[cfg(not(feature = "stack-switching"))]
+        {
+            self.unsupported("visit_resume_throw")
+        }
+    }
+
+    fn visit_switch(&mut self, _cont_type_index: u32, _tag_index: u32) -> Self::Output {
+        #[cfg(feature = "stack-switching")]
+        {
+            self.instructions.push(Instruction::Switch(_cont_type_index, _tag_index));
+        }
+        #[cfg(not(feature = "stack-switching"))]
+        {
+            self.unsupported("visit_switch")
+        }
     }
 }
 

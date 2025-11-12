@@ -154,6 +154,7 @@ pub type TypeAddr = Addr;
 pub type LocalAddr = u16; // there can't be more than 50.000 locals in a function
 pub type LabelAddr = Addr;
 pub type ModuleInstanceAddr = Addr;
+pub type ContAddr = Addr; // continuation/stack address for stack-switching proposal
 
 /// A WebAssembly External Value.
 ///
