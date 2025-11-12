@@ -91,9 +91,9 @@ Edge cases & Details to Consider
 - Stack address leaks: resuming invalid or dropped stacks must trap.
 - Concurrent stacks: the minimal implementation is single-threaded; thread-safe concurrency and shared stacks is deferred.
 
-Milestones & Implementation Plan (PR Sequence)
+Milestones & Implementation Plan (Stage Sequence)
 ---------------------------------------------
-Phase A — Research and scaffolding (small quick PRs)
+Phase A — Research and scaffolding (small quick stages)
   1. Update `crates/parser/src/lib.rs` to accept stack-switching features when `stack-switching` cargo feature is enabled.
   2. Add `Instruction` variants required for minimal parse support (no runtime behavior yet). Add `visit.rs` mapping for those operators and unit tests that parse modules including the new ops (not enabled in default CI).
   3. Add a `feature: stack-switching` cargo feature and update `Cargo.toml` features lists as necessary.
@@ -121,6 +121,126 @@ Phase F — Performance & Documentation
   2. Documentation updates and examples.
   3. Final review and merge request.
 
+Stage Breakdown (detailed)
+-----------------------
+This section expands the milestone list into explicit stages ready to be opened. Each stage should be small and testable. The files changed and acceptance criteria are described per stage.
+
+Stage: Feature gating & parser opt-in (Feature Scaffolding)
+   - Goal: Add a compile-time feature and opt-in wasmparser validator option for stack switching.
+   - Files to change:
+      - root Cargo.toml / workspace features (if workspace-level features are desired)
+      - crates/parser/Cargo.toml: add feature flag `stack-switching` that enables the wasmparser stack_switching feature.
+      - crates/parser/src/lib.rs: the Validator features toggling (currently `stack_switching: false`) should be enabled when the feature is on.
+      - crates/tinywasm/Cargo.toml: add `stack-switching` feature, expose the feature to crates needing the runtime/parse support.
+   - Tests:
+      - Unit tests in `crates/parser/tests` to confirm that enabling/disabling the feature toggles wasmparser‘s validator flag.
+   - Acceptance criteria:
+      - The repository compiles with the new feature disabled (default).
+      - Tests demonstrate that the wasmparser validator can be toggled on when `stack-switching` is enabled.
+
+Stage: Parse scaffolding (Parse-only instruction scaffolding)
+   - Goal: Add `Instruction` variants and `visit.rs` mapping so that the parser recognizes the new stack ops; do not implement runtime semantics yet.
+   - Files to change:
+      - crates/types/src/instructions.rs: add new variants (comment them with `// proposal` until names are finalized). Eg: `StackCreate`, `StackDrop`, `StackSwitch`, `StackSuspend`, `StackResume`.
+      - crates/parser/src/visit.rs: add mappings from the wasmparser visitor opcodes into the new `Instruction` variants; gate these mappings behind the `stack-switching` feature.
+      - crates/parser/src/lib.rs: ensure `Validator` feature gating works for parse tests.
+   - Tests:
+      - Parse-only tests that assert a module containing the new opcodes binds/validates when `stack-switching` is enabled, and fails when it's disabled.
+   - Acceptance criteria:
+      - Parser accepts a minimal module with the new instructions with the feature enabled.
+      - Minimal test coverage exists for compliance with wasmparser validation expectations.
+
+Stage: Runtime stubs (Runtime stubs - no semantics yet)
+   - Goal: Emit the new opcodes as `Instruction` during parsing and add placeholder opcode handling in the `Executor` that traps or returns an informative `UnsupportedFeature` error while preserving program correctness in the presence of the opcode.
+   - Files to change:
+      - crates/tinywasm/src/interpreter/executor.rs: add match arms for the new `Instruction` variants; these should currently return `Error::UnsupportedFeature("stack switching opcode unimplemented")` or trap.
+   - Tests:
+      - Execute a module containing the new opcodes; it should validate and then trap at run time with a descriptive message.
+   - Acceptance criteria:
+      - The project compiles with the new matching arms.
+      - Tests assert that running these opcodes traps with a consistent error message.
+
+Stage: Store registry & StackInstance scaffolding (Store-level stack registry)
+   - Goal: Add a `StackInstance` (aka TaskInstance) and a `stacks` registry in `Store` that can hold and manage multiple `Stack` instances.
+   - Files to change:
+      - crates/tinywasm/src/store/mod.rs:
+         - Add `pub(crate) stacks: Vec<Option<StackInstance>>` to `StoreData`.
+         - Add a `StackInstance` type that wraps `interpreter::stack::Stack` plus additional metadata (owner module, state, optional bound handle types, resource usage).
+         - Implement helper functions `add_stack`, `take_stack`, `replace_stack`, `get_stack`, `get_stack_mut`, `len` and `free_stack`.
+      - crates/tinywasm/src/lib.rs or types: add `StackAddr` and the API for host interaction if required.
+   - Tests:
+      - Unit tests for the store-level helper functions and state transitions (add -> take -> replace -> free).
+   - Acceptance criteria:
+      - No changes to the semantics of the current `CallStack`/`ValueStack` implementation.
+      - Add/Take/Replace operations move the `Stack` instance in and out of the store without aliasing problems.
+      - No borrow conflicts when performing basic operations.
+
+Stage: Stack creation (stack.create implementation & runtime handle return)
+   - Goal: Implement the `stack.create` instruction that allocates and registers a `StackInstance` in the `Store` and returns a `StackAddr` handle.
+   - Files to change:
+      - crates/tinywasm/src/interpreter/executor.rs: new handler `StackCreate` that allocates a new `StackInstance` and pushes a handle to the value stack.
+      - crates/tinywasm/src/interpreter/stack/* — ensure constructor `Stack::new(call_frame, &store.config)` is called with an initial `CallFrame` or empty frame, as design dictates.
+   - Tests:
+      - Integration test that executes `stack.create` and receives a `StackAddr` which the test uses in subsequent stack ops.
+   - Acceptance criteria:
+      - `stack.create` produces a non-zero handle (`StackAddr`) and a `StackInstance` is visible in the `Store`.
+      - The new `StackInstance` does not interfere with the `Store`'s existing runtime operations.
+
+Stage: Stack switching (stack.switch / stack.enter)
+   - Goal: Implement switching of the active execution stack with a minimal definition—move the `Stack` ownership into the running `Executor` and store back the active one when switching away.
+   - Files to change:
+      - crates/tinywasm/src/interpreter/executor.rs: implement a stack-swapping helper; add op handlers `StackSwitch` or `StackResume`.
+      - crates/tinywasm/src/store/mod.rs: ensure `take_stack`/`replace_stack` supports the active swap semantics.
+   - Tests:
+      - Integration test: create two stacks, push different local values, switch between them, and validate that locals and value stacks are preserved across transitions.
+   - Acceptance criteria:
+      - Stack swap changes the Executor’s current `Stack` to the selected one and returns to the prior one upon a later `stack.switch` (or as per the proposal's semantics).
+
+Stage: Suspend & resume (suspend/resume semantics & host-safe rules)
+   - Goal: Implement `suspend` and `resume` semantics and rules around host functions and validation.
+   - Files to change:
+      - crates/tinywasm/src/interpreter/executor.rs: implement `StackSuspend`, `StackResume` — persist `CallFrame`, `BlockStack`, `ValueStack` and bundle them as `StackInstance` state.
+      - crates/tinywasm/src/interpreter/stack/*: possibly add helper methods to serialize/deserialize a `Stack`'s runtime state if necessary.
+      - crates/parser/src/visit.rs: validator changes to ban illegal patterns (cross-stack calls, suspend while executing host functions if invalid).
+   - Tests:
+      - Nested suspend/resume tests across function calls and host call boundaries.
+      - Cases that are invalid should trap or fail validation as per proposal.
+   - Acceptance criteria:
+      - `suspend` stores the state of the current execution stack such that `resume` restores it.
+      - Host functions interacting with suspension must match the proposal behavior (e.g. disallowing resume within host functions if the proposal disallows it.)
+
+Stage: Validation & CI (validation & CI changes)
+   - Goal: Add validation, CI gating, docs and example tests.
+   - Files to change:
+      - crates/parser/src/lib.rs / crated parser validation for new opcodes.
+      - crates/tinywasm/tests/generated: add WAT examples (create, switch, suspend, resume; invalid resume scenarios).
+      - CI pipeline: add `stack-switching` feature job to test the new feature set.
+   - Tests:
+      - Full CI job runs feature on & executes all stack-switching related tests.
+   - Acceptance criteria:
+      - Tests pass on CI when feature is enabled.
+      - No regressions in default tests when the feature is off.
+
+Implementation notes & borrow-checker tips
+---------------------------------------
+- Keep `CallStack` and `ValueStack` unchanged — they're plain owned data and behave correctly per-instance.
+- Use a `Vec<Option<StackInstance>>` in `Store` to enable moving stacks in/out safely. `Option::take()` is the easiest way to move ownership of a `StackInstance` out of `Store` without borrow conflicts.
+- When the `Executor` needs to switch stacks, use `store.take_stack(target)` to acquire the target `StackInstance` and `store.replace_stack(current)` to put the old one back. Doing it this way keeps the borrow checker happy since only one `Stack` is mutable at a time.
+- If a stage needs simultaneous mutable access to two distinct `StackInstances`, implement a `get_pair_mut` helper similar to existing `get_pair_mut` for memory and tables.
+- Resource limits can be enforced per stack using `StackConfig` and constants like `MAX_CALL_STACK_SIZE` in `CallStack`.
+
+Stage process & size guidelines
+----------------------------
+- Keep stages small and self-contained: parse-only, stubs, and store scaffolding are good incremental commits.
+- Each stage should be accompanied by unit tests and a short, explicit acceptance criterion list in the stage description (see per-stage acceptance criteria above).
+- Avoid runtime semantics in early stages. Early stages should be feature-flagged and compile without runtime semantics.
+
+Open questions & follow-ups
+--------------------------
+- Precise host function semantics for suspension and resume (should be clarified before building deep host integration tests).
+- Proposal instruction names and encodings should be pinned to the latest official sources before merging the Stage: Parse scaffolding.
+- Consider a runtime
+
 Testing Strategy
 ----------------
 - Unit tests in `tinywasm` for call-stack operations & stack instance lifecycle.
@@ -137,14 +257,14 @@ Acceptance Criteria
 
 Risks & Rollbacks
 -----------------
-- Proposal changes: opcode names or semantic changes may land while the implementation is in progress. Mitigation: keep parser and mapping behind a cargo feature and split implementation into small PRs with feature flags.
-- Complexity: The runtime changes are invasive; to rollback we must keep changes behind the feature flag and revert staged PRs.
+- Proposal changes: opcode names or semantic changes may land while the implementation is in progress. Mitigation: keep parser and mapping behind a cargo feature and split implementation into small stages with feature flags.
+- Complexity: The runtime changes are invasive; to rollback we must keep changes behind the feature flag and revert staged changes.
 
 Next Steps (Immediate)
 ----------------------
-1. Create an initial PR that adds the `docs/0-tinywasm-ssw.md` plan (this file). — DONE
-2. Add a small parser change PR to enable wasmparser `stack_switching` feature behind a cargo feature and add parse-only instruction mapping tests.
-3. Add an incremental runtime PR (stubs) and tests that confirm compile and trap.
+1. Create an initial Stage that adds the `docs/0-tinywasm-ssw.md` plan (this file). — DONE
+2. Add a small parser change Stage to enable wasmparser `stack_switching` feature behind a cargo feature and add parse-only instruction mapping tests.
+3. Add an incremental runtime Stage (stubs) and tests that confirm compile and trap.
 
 Helpful References
 ------------------
@@ -156,7 +276,7 @@ Open Questions / Notes
 - Exact instruction names: we'll use the latest official proposal names (confirm before Phase B). If the proposal changes, map the original opcode names to the new names and record them.
 - Host function interaction semantics when suspending inside a host function call need spec clarification.
 
-If you want, I can open follow-up PRs to:
+If you want, I can open follow-up stages to:
 1. Add the cargo feature `stack-switching` and enable wasmparser feature toggling in `crates/parser/src/lib.rs`.
 2. Add `Instruction` enum entries and simple parsing & validation tests (no runtime VM semantics yet).
 
