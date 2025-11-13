@@ -192,7 +192,7 @@ impl ExternVal {
 /// The type of a WebAssembly Function.
 ///
 /// See <https://webassembly.github.io/spec/core/syntax/types.html#function-types>
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "archive", derive(serde::Serialize, serde::Deserialize))]
 pub struct FuncType {
     pub params: Box<[ValType]>,
@@ -261,6 +261,18 @@ pub struct WasmFunction {
 #[cfg_attr(feature = "archive", derive(serde::Serialize, serde::Deserialize))]
 pub struct WasmFunctionData {
     pub v128_constants: Box<[i128]>,
+    #[cfg(feature = "stack-switching")]
+    pub resume_tables: Box<[Box<[u32]>]>,
+}
+
+impl Default for WasmFunctionData {
+    fn default() -> Self {
+        Self {
+            v128_constants: alloc::vec::Vec::new().into_boxed_slice(),
+            #[cfg(feature = "stack-switching")]
+            resume_tables: alloc::vec::Vec::new().into_boxed_slice(),
+        }
+    }
 }
 
 /// A WebAssembly Module Export

@@ -53,7 +53,11 @@ pub(crate) fn process_operators_and_validate<R: WasmModuleResources>(
 
     Ok((
         builder.instructions.into_boxed_slice(),
-        WasmFunctionData { v128_constants: builder.v128_constants.into_boxed_slice() },
+        WasmFunctionData {
+            v128_constants: builder.v128_constants.into_boxed_slice(),
+            #[cfg(feature = "stack-switching")]
+            resume_tables: builder.resume_tables.into_boxed_slice(),
+        },
         builder.validator.into_allocations(),
     ))
 }
@@ -112,6 +116,8 @@ pub(crate) struct FunctionBuilder<R: WasmModuleResources> {
     validator: FuncValidator<R>,
     instructions: Vec<Instruction>,
     v128_constants: Vec<i128>,
+    #[cfg(feature = "stack-switching")]
+    resume_tables: Vec<Box<[u32]>>,
     label_ptrs: Vec<usize>,
     local_addr_map: Vec<u32>,
     errors: Vec<crate::ParseError>,
@@ -133,6 +139,8 @@ impl<R: WasmModuleResources> FunctionBuilder<R> {
             local_addr_map,
             instructions: Vec::with_capacity(instr_capacity),
             v128_constants: Vec::new(),
+            #[cfg(feature = "stack-switching")]
+            resume_tables: Vec::new(),
             label_ptrs: Vec::with_capacity(256),
             errors: Vec::new(),
         }
@@ -514,7 +522,19 @@ impl<'a, R: WasmModuleResources> wasmparser::VisitOperator<'a> for FunctionBuild
     fn visit_resume(&mut self, _cont_type_index: u32, _resume_table: wasmparser::ResumeTable) -> Self::Output {
         #[cfg(feature = "stack-switching")]
         {
-            // Note: resume_table is stored separately in the future, for now we just store the cont_type_index
+            // Store a local representation of the resume table entries
+            let mut entries = Vec::new();
+            for e in _resume_table.targets() {
+                match e {
+                    Ok(idx) => entries.push(idx),
+                    Err(_) => {
+                        self.unsupported("visit_resume");
+                        return;
+                    }
+                }
+            }
+
+            self.resume_tables.push(entries.into_boxed_slice());
             self.instructions.push(Instruction::Resume(_cont_type_index));
         }
         #[cfg(not(feature = "stack-switching"))]
@@ -526,7 +546,19 @@ impl<'a, R: WasmModuleResources> wasmparser::VisitOperator<'a> for FunctionBuild
     fn visit_resume_throw(&mut self, _cont_type_index: u32, _tag_index: u32, _resume_table: wasmparser::ResumeTable) -> Self::Output {
         #[cfg(feature = "stack-switching")]
         {
-            // Note: resume_table is stored separately in the future, for now we just store the basic params
+            // Store a local representation of the resume table entries
+            let mut entries = Vec::new();
+            for e in _resume_table.targets() {
+                match e {
+                    Ok(idx) => entries.push(idx),
+                    Err(_) => {
+                        self.unsupported("visit_resume_throw");
+                        return;
+                    }
+                }
+            }
+
+            self.resume_tables.push(entries.into_boxed_slice());
             self.instructions.push(Instruction::ResumeThrow(_cont_type_index, _tag_index));
         }
         #[cfg(not(feature = "stack-switching"))]

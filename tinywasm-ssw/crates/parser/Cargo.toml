@@ -20,3 +20,6 @@ default=["std", "logging"]
 logging=["log"]
 std=["tinywasm-types/std", "wasmparser/std"]
 stack-switching=["tinywasm-types/stack-switching"]
+
+[dev-dependencies]
+wat.workspace=true
