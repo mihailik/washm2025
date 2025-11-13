@@ -10,7 +10,7 @@ use std::{
 };
 
 mod run;
-mod util;
+pub mod util;
 
 use serde::{Deserialize, Serialize};
 

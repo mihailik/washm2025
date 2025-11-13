@@ -1,8 +1,10 @@
+mod testsuite;
+
 #[cfg(feature = "stack-switching")]
 mod cont_bind_tests {
     use eyre::Result;
     use tinywasm_types::WasmValue;
-    use crate::tests::testsuite::util;
+    use crate::testsuite::util;
 
     #[test]
     fn runtime_cont_bind_basic_returns_bound_value() -> Result<()> {
@@ -15,17 +17,20 @@ mod cont_bind_tests {
                     local.get 0
                 )
                 (func (type 0) (param i32) (result i32) ;; main function (index 0)
-                    local.get 0
-                    ref.func 1
-                    cont.new 0
-                    cont.bind 0 0
-                    resume 0 (resume_table 0)
+                    (local.get 0)
+                    (ref.func 1)
+                    (cont.new 0)
+                    (cont.bind 0 0)
+                    (resume 0 (resume_table 0))
                 )
                 (export "main" (func 0))
             )
         "#;
 
-        let wasm = wat::parse_str(wat).expect("parse wat");
+        let lexer = wasm_testsuite::wast::lexer::Lexer::new(wat);
+        let buf = wasm_testsuite::wast::parser::ParseBuffer::new_with_lexer(lexer).expect("failed to create parse buffer");
+        let mut wat_data = wasm_testsuite::wast::parser::parse::<wasm_testsuite::wast::Wat>(&buf).expect("failed to parse wat");
+        let wasm = wat_data.encode().expect("failed to encode module");
         let module = util::parse_module_bytes(&wasm)?;
         let res = util::exec_fn(Some(&module), "main", &[WasmValue::I32(42)], None)?;
         assert_eq!(res, vec![WasmValue::I32(42)]);
@@ -42,18 +47,21 @@ mod cont_bind_tests {
                     local.get 0
                 )
                 (func (type 0) (param i32) (result i32)
-                    local.get 0
-                    ref.func 1
-                    cont.new 0
+                    (local.get 0)
+                    (ref.func 1)
+                    (cont.new 0)
                     ;; bind to result index 999 which is out of range
-                    cont.bind 0 999
-                    resume 0 (resume_table 0)
+                    (cont.bind 0 999)
+                    (resume 0 (resume_table 0))
                 )
                 (export "main" (func 0))
             )
         "#;
 
-        let wasm = wat::parse_str(wat).expect("parse wat");
+        let lexer = wasm_testsuite::wast::lexer::Lexer::new(wat);
+        let buf = wasm_testsuite::wast::parser::ParseBuffer::new_with_lexer(lexer).expect("failed to create parse buffer");
+        let mut wat_data = wasm_testsuite::wast::parser::parse::<wasm_testsuite::wast::Wat>(&buf).expect("failed to parse wat");
+        let wasm = wat_data.encode().expect("failed to encode module");
         let module = util::parse_module_bytes(&wasm).expect("parse module");
         let res = util::exec_fn(Some(&module), "main", &[WasmValue::I32(1)], None);
         assert!(res.is_err());

@@ -1459,7 +1459,7 @@ impl<'store, 'stack> Executor<'store, 'stack> {
         }
         
         // Take target from store
-        let target_stack = self.store.take_stack(target_addr)
+        let mut target_stack = self.store.take_stack(target_addr)
             .ok_or_else(|| Error::Other("suspend: target disappeared".to_string()))
             .to_cf()?;
         
@@ -1474,9 +1474,11 @@ impl<'store, 'stack> Executor<'store, 'stack> {
             return ControlFlow::Break(e);
         }
         
-        // Swap stacks using mem::replace
+        // Swap stacks using mem::swap (safe, no move semantics) so cont_instance remains valid
         let current_module = self.cf.module_addr();
-        let old_stack = mem::replace(self.stack, target_stack.stack);
+        core::mem::swap(self.stack, &mut target_stack.stack);
+        // Move the old stack out of the target_stack for storing as a suspended stack
+        let old_stack = core::mem::replace(&mut target_stack.stack, Stack::new(Self::create_dummy_frame(), &self.store.config));
         
         // Create suspend context
         let suspend_ctx = SuspendContext {
@@ -1591,11 +1593,13 @@ impl<'store, 'stack> Executor<'store, 'stack> {
             return ControlFlow::Break(e);
         }
         
-        // Swap stacks
+        // Swap stacks using mem::swap to avoid moving cont_instance.stack out (no partial moves)
         let current_module = self.cf.module_addr();
-        let old_stack = mem::replace(self.stack, cont_instance.stack);
+        core::mem::swap(self.stack, &mut cont_instance.stack);
+        // Extract the old_stack from cont_instance now that it holds the previous runtime stack
+        let old_stack = core::mem::replace(&mut cont_instance.stack, Stack::new(Self::create_dummy_frame(), &self.store.config));
         
-        // Store old stack as suspended
+        // Store old stack as suspended (the stack extracted above)
         let current_addr = self.store.add_stack(StackInstance {
             stack: old_stack,
             module_addr: current_module,
@@ -1796,18 +1800,18 @@ impl<'store, 'stack> Executor<'store, 'stack> {
             return Err(e.unwrap_or_else(|| Error::Other("call stack push failed".to_string())));
         }
 
-        // Swap stacks
+        // Swap stacks using mem::swap to avoid partially moving cont_instance.stack
         let current_module = self.cf.module_addr();
-        let old_stack = mem::replace(self.stack, cont_instance.stack);
+        core::mem::swap(self.stack, &mut cont_instance.stack);
+        // `cont_instance.stack` now holds the previous runtime stack; extract it
+        let old_stack = core::mem::replace(&mut cont_instance.stack, Stack::new(Self::create_dummy_frame(), &self.store.config));
 
         // Store old stack as suspended
-        let current_addr = self.store.add_stack(StackInstance {
-            stack: old_stack,
-            module_addr: current_module,
-            state: StackState::Suspended,
-            suspend_context: None,
-            bound_args: None,
-        });
+        let current_addr = self.store.add_stack(StackInstance::new_suspended(
+            old_stack,
+            current_module,
+            SuspendContext { tag_index: 0, values: TagValue::empty(), return_addr: None },
+        ));
 
         // Restore call frame
         self.cf = self.stack.call_stack.pop()
@@ -1950,7 +1954,7 @@ impl<'store, 'stack> Executor<'store, 'stack> {
         }
         
         // Take target
-        let target_stack = self.store.take_stack(target_addr)
+        let mut target_stack = self.store.take_stack(target_addr)
             .ok_or_else(|| Error::Other("switch: target disappeared".to_string()))
             .to_cf()?;
         
