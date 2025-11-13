@@ -267,6 +267,8 @@ pub struct WasmFunctionData {
     pub v128_constants: Box<[i128]>,
     #[cfg(feature = "stack-switching")]
     pub resume_tables: Box<[Box<[u32]>]>,
+    #[cfg(feature = "stack-switching")]
+    pub resume_table_addrs: Box<[Box<[LocalAddr]>]>,
 }
 
 /// A WebAssembly Tag type.
@@ -281,6 +283,8 @@ impl Default for WasmFunctionData {
             v128_constants: alloc::vec::Vec::new().into_boxed_slice(),
             #[cfg(feature = "stack-switching")]
             resume_tables: alloc::vec::Vec::new().into_boxed_slice(),
+            #[cfg(feature = "stack-switching")]
+            resume_table_addrs: alloc::vec::Vec::new().into_boxed_slice(),
         }
     }
 }

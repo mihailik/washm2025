@@ -1373,13 +1373,60 @@ impl<'store, 'stack> Executor<'store, 'stack> {
     fn exec_suspend(&mut self, tag_index: u32) -> ControlFlow<Option<Error>> {
         use crate::store::{StackState, SuspendContext, TagValue};
         use core::mem;
+        use tinywasm_types::ValType;
         
         // Pop target continuation reference where we should suspend to
         let target_ref = self.stack.values.pop::<ValueRef>();
         let target_addr = target_ref.ok_or_else(|| Error::Other("suspend: invalid continuation ref".to_string()))?;
         
-        // For now, collect no values (would normally be based on tag type)
-        let values = alloc::vec::Vec::new();
+        // For now, collect values based on tag type if available
+        let mut values: alloc::vec::Vec<tinywasm_types::WasmValue> = alloc::vec::Vec::new();
+        #[cfg(feature = "stack-switching")]
+        {
+            // Use module-level tag definitions to determine how many values to pop
+            let tag = self.module.tag_type(tag_index);
+            // Pop values from current stack in reverse order and then reverse to preserve order
+            for ty in tag.params.iter().rev() {
+                match ty {
+                    ValType::I32 => {
+                        let v = self.stack.values.pop::<i32>();
+                        let v = v.ok_or_else(|| Error::Other("suspend: missing i32 value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::I32(v));
+                    }
+                    ValType::I64 => {
+                        let v = self.stack.values.pop::<i64>();
+                        let v = v.ok_or_else(|| Error::Other("suspend: missing i64 value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::I64(v));
+                    }
+                    ValType::F32 => {
+                        let v = self.stack.values.pop::<f32>();
+                        let v = v.ok_or_else(|| Error::Other("suspend: missing f32 value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::F32(v));
+                    }
+                    ValType::F64 => {
+                        let v = self.stack.values.pop::<f64>();
+                        let v = v.ok_or_else(|| Error::Other("suspend: missing f64 value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::F64(v));
+                    }
+                    ValType::V128 => {
+                        let v = self.stack.values.pop::<i128>();
+                        let v = v.ok_or_else(|| Error::Other("suspend: missing v128 value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::V128(v));
+                    }
+                    ValType::RefFunc => {
+                        let v = self.stack.values.pop::<tinywasm_types::FuncRef>();
+                        let v = v.ok_or_else(|| Error::Other("suspend: missing funcref value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::RefFunc(v));
+                    }
+                    ValType::RefExtern => {
+                        let v = self.stack.values.pop::<tinywasm_types::ExternRef>();
+                        let v = v.ok_or_else(|| Error::Other("suspend: missing externref value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::RefExtern(v));
+                    }
+                }
+            }
+            values.reverse();
+        }
         
         // Verify target exists and is suspended
         {
@@ -1526,6 +1573,7 @@ impl<'store, 'stack> Executor<'store, 'stack> {
     #[cfg(feature = "stack-switching")]
     fn exec_resume_throw(&mut self, _cont_type_index: u32, _tag_index: u32, _resume_table_idx: u32) -> Result<()> {
         use crate::store::{StackState, TagValue};
+        use tinywasm_types::ValType;
         
         // Pop the continuation reference from the stack
         let cont_ref = self.stack.values.pop::<ValueRef>();
@@ -1546,8 +1594,52 @@ impl<'store, 'stack> Executor<'store, 'stack> {
             return Err(Error::Other("cannot resume_throw to a running continuation".to_string()));
         }
         
-        // Collect exception values from the stack
-        let _exception_values = TagValue::empty();
+        // Collect exception values from the stack based on tag
+        let mut exception_values: alloc::vec::Vec<tinywasm_types::WasmValue> = alloc::vec::Vec::new();
+        #[cfg(feature = "stack-switching")]
+        {
+            let tag = self.module.tag_type(_tag_index);
+            for ty in tag.params.iter().rev() {
+                match ty {
+                    ValType::I32 => {
+                        let v = self.stack.values.pop::<i32>();
+                        let v = v.ok_or_else(|| Error::Other("resume_throw: missing i32 value for tag".to_string()))?;
+                        exception_values.push(tinywasm_types::WasmValue::I32(v));
+                    }
+                    ValType::I64 => {
+                        let v = self.stack.values.pop::<i64>();
+                        let v = v.ok_or_else(|| Error::Other("resume_throw: missing i64 value for tag".to_string()))?;
+                        exception_values.push(tinywasm_types::WasmValue::I64(v));
+                    }
+                    ValType::F32 => {
+                        let v = self.stack.values.pop::<f32>();
+                        let v = v.ok_or_else(|| Error::Other("resume_throw: missing f32 value for tag".to_string()))?;
+                        exception_values.push(tinywasm_types::WasmValue::F32(v));
+                    }
+                    ValType::F64 => {
+                        let v = self.stack.values.pop::<f64>();
+                        let v = v.ok_or_else(|| Error::Other("resume_throw: missing f64 value for tag".to_string()))?;
+                        exception_values.push(tinywasm_types::WasmValue::F64(v));
+                    }
+                    ValType::V128 => {
+                        let v = self.stack.values.pop::<i128>();
+                        let v = v.ok_or_else(|| Error::Other("resume_throw: missing v128 value for tag".to_string()))?;
+                        exception_values.push(tinywasm_types::WasmValue::V128(v));
+                    }
+                    ValType::RefFunc => {
+                        let v = self.stack.values.pop::<tinywasm_types::FuncRef>();
+                        let v = v.ok_or_else(|| Error::Other("resume_throw: missing funcref value for tag".to_string()))?;
+                        exception_values.push(tinywasm_types::WasmValue::RefFunc(v));
+                    }
+                    ValType::RefExtern => {
+                        let v = self.stack.values.pop::<tinywasm_types::ExternRef>();
+                        let v = v.ok_or_else(|| Error::Other("resume_throw: missing externref value for tag".to_string()))?;
+                        exception_values.push(tinywasm_types::WasmValue::RefExtern(v));
+                    }
+                }
+            }
+            exception_values.reverse();
+        }
         
         // Resume the continuation
         let _suspend_ctx = cont_instance.resume();
@@ -1567,14 +1659,59 @@ impl<'store, 'stack> Executor<'store, 'stack> {
     #[cfg(feature = "stack-switching")]
     fn exec_switch(&mut self, _cont_type_index: u32, tag_index: u32) -> ControlFlow<Option<Error>> {
         use crate::store::{StackState, SuspendContext, TagValue};
+        use tinywasm_types::ValType;
         use core::mem;
         
         // Pop target continuation reference
         let target_ref = self.stack.values.pop::<ValueRef>();
         let target_addr = target_ref.ok_or_else(|| Error::Other("switch: invalid continuation ref".to_string()))?;
         
-        // Collect values (would normally be based on tag type)
-        let values = alloc::vec::Vec::new();
+        // Collect values based on tag type
+        let mut values: alloc::vec::Vec<tinywasm_types::WasmValue> = alloc::vec::Vec::new();
+        #[cfg(feature = "stack-switching")]
+        {
+            let tag = self.module.tag_type(tag_index);
+            for ty in tag.params.iter().rev() {
+                match ty {
+                    ValType::I32 => {
+                        let v = self.stack.values.pop::<i32>();
+                        let v = v.ok_or_else(|| Error::Other("switch: missing i32 value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::I32(v));
+                    }
+                    ValType::I64 => {
+                        let v = self.stack.values.pop::<i64>();
+                        let v = v.ok_or_else(|| Error::Other("switch: missing i64 value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::I64(v));
+                    }
+                    ValType::F32 => {
+                        let v = self.stack.values.pop::<f32>();
+                        let v = v.ok_or_else(|| Error::Other("switch: missing f32 value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::F32(v));
+                    }
+                    ValType::F64 => {
+                        let v = self.stack.values.pop::<f64>();
+                        let v = v.ok_or_else(|| Error::Other("switch: missing f64 value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::F64(v));
+                    }
+                    ValType::V128 => {
+                        let v = self.stack.values.pop::<i128>();
+                        let v = v.ok_or_else(|| Error::Other("switch: missing v128 value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::V128(v));
+                    }
+                    ValType::RefFunc => {
+                        let v = self.stack.values.pop::<tinywasm_types::FuncRef>();
+                        let v = v.ok_or_else(|| Error::Other("switch: missing funcref value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::RefFunc(v));
+                    }
+                    ValType::RefExtern => {
+                        let v = self.stack.values.pop::<tinywasm_types::ExternRef>();
+                        let v = v.ok_or_else(|| Error::Other("switch: missing externref value for tag".to_string())).to_cf()?;
+                        values.push(tinywasm_types::WasmValue::RefExtern(v));
+                    }
+                }
+            }
+            values.reverse();
+        }
         
         // Verify target
         {

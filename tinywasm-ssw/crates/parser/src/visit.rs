@@ -3,7 +3,7 @@ use crate::Result;
 use crate::conversion::{convert_heaptype, convert_valtype};
 use alloc::string::ToString;
 use alloc::{boxed::Box, vec::Vec};
-use tinywasm_types::{Instruction, MemoryArg, WasmFunctionData};
+use tinywasm_types::{Instruction, MemoryArg, WasmFunctionData, LocalAddr};
 use wasmparser::{
     FuncValidator, FuncValidatorAllocations, FunctionBody, VisitOperator, VisitSimdOperator, WasmModuleResources,
 };
@@ -57,6 +57,12 @@ pub(crate) fn process_operators_and_validate<R: WasmModuleResources>(
             v128_constants: builder.v128_constants.into_boxed_slice(),
             #[cfg(feature = "stack-switching")]
             resume_tables: builder.resume_tables.into_boxed_slice(),
+            #[cfg(feature = "stack-switching")]
+            resume_table_addrs: builder.resume_table_addrs
+                .iter()
+                .map(|tbl| tbl.iter().map(|a| (*a as LocalAddr)).collect::<Vec<LocalAddr>>().into_boxed_slice())
+                .collect::<Vec<Box<[LocalAddr]>>>()
+                .into_boxed_slice(),
         },
         builder.validator.into_allocations(),
     ))
@@ -118,6 +124,8 @@ pub(crate) struct FunctionBuilder<R: WasmModuleResources> {
     v128_constants: Vec<i128>,
     #[cfg(feature = "stack-switching")]
     resume_tables: Vec<Box<[u32]>>,
+    #[cfg(feature = "stack-switching")]
+    resume_table_addrs: Vec<Box<[u32]>>,
     label_ptrs: Vec<usize>,
     local_addr_map: Vec<u32>,
     errors: Vec<crate::ParseError>,
@@ -141,6 +149,8 @@ impl<R: WasmModuleResources> FunctionBuilder<R> {
             v128_constants: Vec::new(),
             #[cfg(feature = "stack-switching")]
             resume_tables: Vec::new(),
+            #[cfg(feature = "stack-switching")]
+            resume_table_addrs: Vec::new(),
             label_ptrs: Vec::with_capacity(256),
             errors: Vec::new(),
         }
@@ -536,6 +546,17 @@ impl<'a, R: WasmModuleResources> wasmparser::VisitOperator<'a> for FunctionBuild
 
             let resume_table_idx = self.resume_tables.len() as u32;
             self.resume_tables.push(entries.into_boxed_slice());
+            // Also create the resolved local address table from local_addr_map
+            let mut addr_entries = Vec::new();
+            for wasm_idx in self.resume_tables[resume_table_idx as usize].iter() {
+                let wasm_local_idx = *wasm_idx as usize;
+                if wasm_local_idx >= self.local_addr_map.len() {
+                    self.unsupported("visit_resume: invalid local index for resume table");
+                    return;
+                }
+                addr_entries.push(self.local_addr_map[wasm_local_idx]);
+            }
+            self.resume_table_addrs.push(addr_entries.into_boxed_slice());
             self.instructions.push(Instruction::Resume(_cont_type_index, resume_table_idx));
         }
         #[cfg(not(feature = "stack-switching"))]
@@ -561,6 +582,17 @@ impl<'a, R: WasmModuleResources> wasmparser::VisitOperator<'a> for FunctionBuild
 
             let resume_table_idx = self.resume_tables.len() as u32;
             self.resume_tables.push(entries.into_boxed_slice());
+            // Also resolve to local addresses
+            let mut addr_entries = Vec::new();
+            for wasm_idx in self.resume_tables[resume_table_idx as usize].iter() {
+                let wasm_local_idx = *wasm_idx as usize;
+                if wasm_local_idx >= self.local_addr_map.len() {
+                    self.unsupported("visit_resume_throw: invalid local index for resume table");
+                    return;
+                }
+                addr_entries.push(self.local_addr_map[wasm_local_idx]);
+            }
+            self.resume_table_addrs.push(addr_entries.into_boxed_slice());
             self.instructions.push(Instruction::ResumeThrow(_cont_type_index, _tag_index, resume_table_idx));
         }
         #[cfg(not(feature = "stack-switching"))]

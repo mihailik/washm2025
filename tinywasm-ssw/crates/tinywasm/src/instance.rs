@@ -32,6 +32,8 @@ pub(crate) struct ModuleInstanceInner {
     pub(crate) func_start: Option<FuncAddr>,
     pub(crate) imports: Box<[Import]>,
     pub(crate) exports: Box<[Export]>,
+    #[cfg(feature = "stack-switching")]
+    pub(crate) tags: Box<[tinywasm_types::TagType]>,
 }
 
 impl ModuleInstance {
@@ -88,6 +90,8 @@ impl ModuleInstance {
             func_start: module.0.start_func,
             imports: module.0.imports,
             exports: module.0.exports,
+            #[cfg(feature = "stack-switching")]
+            tags: module.0.tags,
         };
 
         let instance = Self::new(instance);
@@ -113,6 +117,11 @@ impl ModuleInstance {
     }
 
     #[inline]
+    #[cfg(feature = "stack-switching")]
+    pub(crate) fn tag_type(&self, addr: u32) -> &tinywasm_types::TagType {
+        &self.0.tags[addr as usize]
+    }
+
     pub(crate) fn new(inner: ModuleInstanceInner) -> Self {
         Self(Rc::new(inner))
     }

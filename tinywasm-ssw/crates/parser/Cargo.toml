@@ -23,3 +23,4 @@ stack-switching=["tinywasm-types/stack-switching"]
 
 [dev-dependencies]
 wat.workspace=true
+wasm-encoder = "0.239.0"
