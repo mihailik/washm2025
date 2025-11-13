@@ -1373,9 +1373,9 @@ impl<'store, 'stack> Executor<'store, 'stack> {
         use crate::store::{StackState, SuspendContext, TagValue};
         use core::mem;
         
-        // Pop target stack address where we should suspend to
-        let target_addr: i32 = self.stack.values.pop();
-        let target_addr = target_addr as ContAddr;
+        // Pop target continuation reference where we should suspend to
+        let target_ref = self.stack.values.pop::<ValueRef>();
+        let target_addr = target_ref.ok_or_else(|| Error::Other("suspend: invalid continuation ref".to_string()))?;
         
         // For now, collect no values (would normally be based on tag type)
         let values = alloc::vec::Vec::new();
@@ -1568,9 +1568,9 @@ impl<'store, 'stack> Executor<'store, 'stack> {
         use crate::store::{StackState, SuspendContext, TagValue};
         use core::mem;
         
-        // Pop target stack address
-        let target_addr: i32 = self.stack.values.pop();
-        let target_addr = target_addr as ContAddr;
+        // Pop target continuation reference
+        let target_ref = self.stack.values.pop::<ValueRef>();
+        let target_addr = target_ref.ok_or_else(|| Error::Other("switch: invalid continuation ref".to_string()))?;
         
         // Collect values (would normally be based on tag type)
         let values = alloc::vec::Vec::new();

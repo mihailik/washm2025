@@ -105,7 +105,12 @@ pub(crate) fn convert_module_import(import: wasmparser::Import<'_>) -> Result<Im
 }
 
 #[cfg(feature = "stack-switching")]
-pub(crate) fn convert_module_tags(tags: wasmparser::SectionLimited<'_, wasmparser::Tag<'_>>) -> Result<Vec<TagType>> {
+pub(crate) fn convert_module_tags(
+    tags: wasmparser::SectionLimited<'_, wasmparser::Tag<'_>>,
+    func_types: &[tinywasm_types::FuncType],
+) -> Result<Vec<TagType>> {
+    // For now, keep payloads empty. We'll map against `func_types` here in the future.
+    let _ = func_types; // avoid unused warnings for now
     convert_module_tags_impl(tags.into_iter())
 }
 

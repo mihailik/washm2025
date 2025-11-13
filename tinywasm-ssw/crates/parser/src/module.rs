@@ -165,7 +165,7 @@ impl ModuleReader {
             TagSection(reader) => {
                 debug!("Found tag section");
                 validator.tag_section(&reader)?;
-                self.tags = conversion::convert_module_tags(reader)?;
+                self.tags = conversion::convert_module_tags(reader, &self.func_types)?;
             }
             End(offset) => {
                 debug!("Reached end of module");
@@ -194,6 +194,48 @@ impl ModuleReader {
 
         if self.code_type_addrs.len() != self.code.len() {
             return Err(ParseError::Other("Code and code type address count mismatch".to_string()));
+        }
+
+        // Basic post-parse validation for stack-switching instructions and tag indices.
+        #[cfg(feature = "stack-switching")]
+        {
+            // Validate tag and resume table indices in parsed instructions.
+            for (f_idx, ((instructions, data, _locals), _ty_idx)) in self.code.iter().zip(self.code_type_addrs).enumerate() {
+                for instr in instructions.iter() {
+                    use tinywasm_types::Instruction::*;
+                    match instr {
+                        Suspend(tag_idx) => {
+                            let t = *tag_idx as usize;
+                            if t >= self.tags.len() {
+                                return Err(ParseError::UnsupportedOperator(format!("suspend: invalid tag index {} in function {}", t, f_idx)));
+                            }
+                        }
+                        Resume(_ty, resume_idx) => {
+                            let ri = *resume_idx as usize;
+                            if ri >= data.resume_tables.len() {
+                                return Err(ParseError::UnsupportedOperator(format!("resume: invalid resume_table index {} in function {}", ri, f_idx)));
+                            }
+                        }
+                        ResumeThrow(_ty, tag_idx, resume_idx) => {
+                            let t = *tag_idx as usize;
+                            if t >= self.tags.len() {
+                                return Err(ParseError::UnsupportedOperator(format!("resume.throw: invalid tag index {} in function {}", t, f_idx)));
+                            }
+                            let ri = *resume_idx as usize;
+                            if ri >= data.resume_tables.len() {
+                                return Err(ParseError::UnsupportedOperator(format!("resume.throw: invalid resume_table index {} in function {}", ri, f_idx)));
+                            }
+                        }
+                        Switch(_ty, tag_idx) => {
+                            let t = *tag_idx as usize;
+                            if t >= self.tags.len() {
+                                return Err(ParseError::UnsupportedOperator(format!("switch: invalid tag index {} in function {}", t, f_idx)));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
 
         let funcs = self
