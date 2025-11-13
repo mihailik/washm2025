@@ -8,7 +8,7 @@ use tinywasm_types::{
 };
 use wasmparser::{FuncValidatorAllocations, Payload, Validator};
 
-pub(crate) type Code = (Box<[Instruction]>, WasmFunctionData, ValueCounts);
+pub(crate) type Code = (Box<[Instruction]>, WasmFunctionData, ValueCounts, Box<[tinywasm_types::ValType]>);
 
 #[derive(Default)]
 pub(crate) struct ModuleReader {
@@ -24,7 +24,7 @@ pub(crate) struct ModuleReader {
     pub(crate) table_types: Vec<TableType>,
     pub(crate) memory_types: Vec<MemoryType>,
     #[cfg(feature = "stack-switching")]
-    pub(crate) tags: Vec<crate::conversion::TagType>,
+    pub(crate) tags: Vec<tinywasm_types::TagType>,
     pub(crate) imports: Vec<Import>,
     pub(crate) data: Vec<Data>,
     pub(crate) elements: Vec<Element>,
@@ -200,7 +200,7 @@ impl ModuleReader {
         #[cfg(feature = "stack-switching")]
         {
             // Validate tag and resume table indices in parsed instructions.
-            for (f_idx, ((instructions, data, _locals), _ty_idx)) in self.code.iter().zip(self.code_type_addrs).enumerate() {
+            for (f_idx, ((instructions, data, _locals, _local_types), _ty_idx)) in self.code.iter().zip(self.code_type_addrs.iter().copied()).enumerate() {
                 for instr in instructions.iter() {
                     use tinywasm_types::Instruction::*;
                     match instr {
@@ -215,6 +215,13 @@ impl ModuleReader {
                             if ri >= data.resume_tables.len() {
                                 return Err(ParseError::UnsupportedOperator(format!("resume: invalid resume_table index {} in function {}", ri, f_idx)));
                             }
+                            // validate that resume table entries index into local_types
+                            for entry in data.resume_tables[ri].iter() {
+                                let e = *entry as usize;
+                                if e >= _local_types.len() {
+                                    return Err(ParseError::UnsupportedOperator(format!("resume: resume_table entry {} out of range in function {}", e, f_idx)));
+                                }
+                            }
                         }
                         ResumeThrow(_ty, tag_idx, resume_idx) => {
                             let t = *tag_idx as usize;
@@ -225,11 +232,34 @@ impl ModuleReader {
                             if ri >= data.resume_tables.len() {
                                 return Err(ParseError::UnsupportedOperator(format!("resume.throw: invalid resume_table index {} in function {}", ri, f_idx)));
                             }
+                            // Validate resume_table entries exist and match tag param types
+                            let tag_params = &self.tags[t].params;
+                            let entry_table = &data.resume_tables[ri];
+                            if entry_table.len() != tag_params.len() {
+                                return Err(ParseError::UnsupportedOperator(format!("resume.throw: resume_table entry length {} does not match tag params {} in function {}", entry_table.len(), tag_params.len(), f_idx)));
+                            }
+                            for (j, entry) in entry_table.iter().enumerate() {
+                                let e = *entry as usize;
+                                if e >= _local_types.len() {
+                                    return Err(ParseError::UnsupportedOperator(format!("resume.throw: resume_table entry {} out of range in function {}", e, f_idx)));
+                                }
+                                let local_ty = _local_types[e];
+                                if local_ty != tag_params[j] {
+                                    return Err(ParseError::UnsupportedOperator(format!("resume.throw: resume_table entry type mismatch local {:?} vs tag param {:?} in function {}", local_ty, tag_params[j], f_idx)));
+                                }
+                            }
                         }
                         Switch(_ty, tag_idx) => {
                             let t = *tag_idx as usize;
                             if t >= self.tags.len() {
                                 return Err(ParseError::UnsupportedOperator(format!("switch: invalid tag index {} in function {}", t, f_idx)));
+                            }
+                        }
+                        ContBind(arg_idx, result_idx) => {
+                            let a = *arg_idx as usize;
+                            let r = *result_idx as usize;
+                            if a >= _local_types.len() || r >= _local_types.len() {
+                                return Err(ParseError::UnsupportedOperator(format!("cont.bind: local index out of range (arg {}, res {}) in function {}", a, r, f_idx)));
                             }
                         }
                         _ => {}
@@ -242,10 +272,10 @@ impl ModuleReader {
             .code
             .into_iter()
             .zip(self.code_type_addrs)
-            .map(|((instructions, data, locals), ty_idx)| {
+            .map(|((instructions, data, locals, local_types), ty_idx)| {
                 let ty = self.func_types.get(ty_idx as usize).expect("No func type for func, this is a bug").clone();
                 let params = ValueCountsSmall::from(&ty.params);
-                WasmFunction { instructions, data, locals, params, ty }
+                WasmFunction { instructions, data, locals, params, ty, local_types }
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();

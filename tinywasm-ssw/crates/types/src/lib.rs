@@ -249,7 +249,7 @@ impl<'a, T: IntoIterator<Item = &'a ValType>> From<T> for ValueCountsSmall {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "archive", derive(serde::Serialize, serde::Deserialize))]
 pub struct WasmFunction {
     pub instructions: Box<[Instruction]>,
@@ -257,9 +257,11 @@ pub struct WasmFunction {
     pub locals: ValueCounts,
     pub params: ValueCountsSmall,
     pub ty: FuncType,
+    /// Full ordered list of local types (params + locals), used by parser/runtime
+    pub local_types: Box<[ValType]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "archive", derive(serde::Serialize, serde::Deserialize))]
 pub struct WasmFunctionData {
     pub v128_constants: Box<[i128]>,

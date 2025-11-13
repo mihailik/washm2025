@@ -1286,6 +1286,7 @@ impl<'store, 'stack> Executor<'store, 'stack> {
                 locals: ValueCounts::default(),
                 params: Default::default(),
                 data: Default::default(),
+                local_types: vec![].into_boxed_slice(),
             }),
             0,
             Locals {

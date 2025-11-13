@@ -524,7 +524,7 @@ impl<'a, R: WasmModuleResources> wasmparser::VisitOperator<'a> for FunctionBuild
         {
             // Store a local representation of the resume table entries
             let mut entries = Vec::new();
-            for e in _resume_table.targets() {
+            for e in _resume_table.into_iter() {
                 match e {
                     Ok(idx) => entries.push(idx),
                     Err(_) => {
@@ -549,7 +549,7 @@ impl<'a, R: WasmModuleResources> wasmparser::VisitOperator<'a> for FunctionBuild
         {
             // Store a local representation of the resume table entries
             let mut entries = Vec::new();
-            for e in _resume_table.targets() {
+            for e in _resume_table.into_iter() {
                 match e {
                     Ok(idx) => entries.push(idx),
                     Err(_) => {

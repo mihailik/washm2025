@@ -106,7 +106,7 @@ pub(crate) fn convert_module_import(import: wasmparser::Import<'_>) -> Result<Im
 
 #[cfg(feature = "stack-switching")]
 pub(crate) fn convert_module_tags(
-    tags: wasmparser::SectionLimited<'_, wasmparser::Tag<'_>>,
+    tags: wasmparser::SectionLimited<'_, wasmparser::TagType<'_>>,
     func_types: &[tinywasm_types::FuncType],
 ) -> Result<Vec<TagType>> {
     convert_module_tags_impl(tags.into_iter(), func_types)
@@ -195,30 +195,46 @@ pub(crate) fn convert_module_code(
         validator.define_locals(pos + i, local.0, local.1)?;
     }
 
+    // Also collect the complete local type sequence so we can validate resume table entries later
+    let mut local_types_vec: Vec<ValType> = Vec::with_capacity(validator.len_locals());
     for i in 0..validator.len_locals() {
         match validator.get_local_type(i) {
-            Some(wasmparser::ValType::I32 | wasmparser::ValType::F32) => {
+            Some(wasmparser::ValType::I32) => {
                 local_addr_map.push(local_counts.c32);
                 local_counts.c32 += 1;
+                local_types_vec.push(ValType::I32);
+            }
+            Some(wasmparser::ValType::F32) => {
+                local_addr_map.push(local_counts.c32);
+                local_counts.c32 += 1;
+                local_types_vec.push(ValType::F32);
             }
             Some(wasmparser::ValType::I64 | wasmparser::ValType::F64) => {
                 local_addr_map.push(local_counts.c64);
                 local_counts.c64 += 1;
+                // Push correct ValType based on whether it's I64 or F64
+                if let Some(wasmparser::ValType::I64) = validator.get_local_type(i) {
+                    local_types_vec.push(ValType::I64);
+                } else {
+                    local_types_vec.push(ValType::F64);
+                }
             }
             Some(wasmparser::ValType::V128) => {
                 local_addr_map.push(local_counts.c128);
                 local_counts.c128 += 1;
+                local_types_vec.push(ValType::V128);
             }
-            Some(wasmparser::ValType::Ref(_)) => {
+            Some(wasmparser::ValType::Ref(hty)) => {
                 local_addr_map.push(local_counts.cref);
                 local_counts.cref += 1;
+                local_types_vec.push(convert_reftype(hty));
             }
             None => return Err(crate::ParseError::UnsupportedOperator("Unknown local type".to_string())),
         }
     }
 
     let (body, data, allocations) = process_operators_and_validate(validator, func, local_addr_map)?;
-    Ok(((body, data, local_counts), allocations))
+    Ok(((body, data, local_counts, local_types_vec.into_boxed_slice()), allocations))
 }
 
 pub(crate) fn convert_module_type(ty: wasmparser::RecGroup) -> Result<FuncType> {

@@ -1,6 +1,7 @@
+#[cfg(feature = "stack-switching")]
 #[test]
 fn parse_simple_tiny_module_has_empty_resume_tables() {
-    let parser = crate::Parser::new();
+    let parser = tinywasm_parser::Parser::new();
     let wat = r#"(module (func))"#;
     let wasm = wat::parse_str(wat).expect("parse wat");
     let module = parser.parse_module_bytes(&wasm).expect("parse module");

@@ -1,6 +1,7 @@
+#[cfg(feature = "stack-switching")]
 #[test]
 fn parse_module_without_tags_has_empty_tags() {
-    let parser = crate::Parser::new();
+    let parser = tinywasm_parser::Parser::new();
     let wat = r#"(module (func))"#;
     let wasm = wat::parse_str(wat).expect("parse wat");
     let module = parser.parse_module_bytes(&wasm).expect("parse module");
@@ -8,9 +9,10 @@ fn parse_module_without_tags_has_empty_tags() {
     assert_eq!(module.tags.len(), 0usize);
 }
 
+#[cfg(feature = "stack-switching")]
 #[test]
 fn parse_module_with_tag_type_params() {
-    let parser = crate::Parser::new();
+    let parser = tinywasm_parser::Parser::new();
     let wat = r#"
         (module
             (type (func (param i32)))
