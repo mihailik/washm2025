@@ -1360,9 +1360,50 @@ impl<'store, 'stack> Executor<'store, 'stack> {
         // 2. Push them onto the continuation's value stack as bound parameters
         // 3. Adjust the continuation's function signature
         
-        // For now, we validate and accept the operation
+        // For now, we pop arguments from the current stack and store them as bound args
+        let arg_count = _argument_index as usize;
+        let mut args: alloc::vec::Vec<WasmValue> = alloc::vec::Vec::new();
+        for _ in 0..arg_count {
+            // pop from current stack and collect as WasmValue
+            // We choose to pop from value stack based on typed variants
+            let maybe_i32 = self.stack.values.pop::<i32>();
+            if let Some(v) = maybe_i32 {
+                args.push(WasmValue::I32(v));
+                continue;
+            }
+            let maybe_i64 = self.stack.values.pop::<i64>();
+            if let Some(v) = maybe_i64 {
+                args.push(WasmValue::I64(v));
+                continue;
+            }
+            let maybe_f32 = self.stack.values.pop::<f32>();
+            if let Some(v) = maybe_f32 {
+                args.push(WasmValue::F32(v));
+                continue;
+            }
+            let maybe_f64 = self.stack.values.pop::<f64>();
+            if let Some(v) = maybe_f64 {
+                args.push(WasmValue::F64(v));
+                continue;
+            }
+            let maybe_v128 = self.stack.values.pop::<i128>();
+            if let Some(v) = maybe_v128 {
+                args.push(WasmValue::V128(v));
+                continue;
+            }
+            let maybe_ref = self.stack.values.pop::<ValueRef>();
+            if let Some(v) = maybe_ref {
+                args.push(WasmValue::RefExtern(tinywasm_types::ExternRef::new(v)));
+                continue;
+            }
+            // If we didn't find a value, return error
+            return Err(Error::Other("cont.bind: not enough arguments on stack".to_string()));
+        }
         // A complete implementation would involve modifying the continuation's locals
         
+        // Store bound args on the continuation instance
+        cont_instance.bound_args = Some(args);
+
         // Push the continuation back (or a new bound continuation)
         self.stack.values.push::<ValueRef>(Some(cont_addr));
         
@@ -1520,22 +1561,14 @@ impl<'store, 'stack> Executor<'store, 'stack> {
             .ok_or_else(|| Error::Other(format!("continuation {} disappeared", cont_addr)))
             .to_cf()?;
         
-        // Get suspend context and push values onto stack
+        // Get suspend context but don't write to the stack yet; we will write into the
+        // target frame's locals after we swap stacks and restore the call frame.
+        let mut captured_values: alloc::vec::Vec<WasmValue> = alloc::vec::Vec::new();
         if let Some(suspend_ctx) = cont_instance.resume() {
-            for value in suspend_ctx.values.values {
-                match value {
-                    WasmValue::I32(v) => self.stack.values.push(v),
-                    WasmValue::I64(v) => self.stack.values.push(v),
-                    WasmValue::F32(v) => self.stack.values.push(v),
-                    WasmValue::F64(v) => self.stack.values.push(v),
-                    WasmValue::V128(v) => self.stack.values.push(v),
-                    _ => {
-                        self.store.data.stacks[cont_addr as usize] = Some(cont_instance);
-                        return ControlFlow::Break(Some(Error::Other("unsupported value type".to_string())));
-                    }
-                }
-            }
+            captured_values = suspend_ctx.values.values;
         }
+        // Extract bound args from the continuation instance, if any
+        let bound_args = cont_instance.bound_args.take();
         
         // Save current call frame
         let push_res = self.stack.call_stack.push(
@@ -1565,6 +1598,52 @@ impl<'store, 'stack> Executor<'store, 'stack> {
         
         // Push return address
         self.stack.values.push(current_addr as i32);
+
+        // Apply bound args (push to value stack) and captured values into locals per resume_table mapping
+        // First, push bound args onto resumed stack values if present.
+        if let Some(args) = bound_args {
+            for a in args {
+                match a {
+                    WasmValue::I32(x) => self.stack.values.push(x),
+                    WasmValue::I64(x) => self.stack.values.push(x),
+                    WasmValue::F32(x) => self.stack.values.push(x),
+                    WasmValue::F64(x) => self.stack.values.push(x),
+                    WasmValue::V128(x) => self.stack.values.push(x),
+                    WasmValue::RefFunc(r) => self.stack.values.push::<ValueRef>(r.addr()),
+                    WasmValue::RefExtern(r) => self.stack.values.push::<ValueRef>(r.addr()),
+                }
+            }
+        }
+
+        // Then apply captured values into locals per resume_table mapping
+        if !captured_values.is_empty() {
+            #[cfg(feature = "stack-switching")]
+            {
+                let func_data = self.cf.data();
+                let table_idx = _resume_table_idx as usize;
+                if table_idx >= func_data.resume_table_addrs.len() {
+                    self.store.data.stacks[cont_addr as usize] = Some(cont_instance);
+                    return ControlFlow::Break(Some(Error::Other(format!("resume: resume table idx {} out of range for function", table_idx))));
+                }
+                let addrs = &func_data.resume_table_addrs[table_idx];
+                if addrs.len() != captured_values.len() {
+                    self.store.data.stacks[cont_addr as usize] = Some(cont_instance);
+                    return ControlFlow::Break(Some(Error::Other(format!("resume: captured values length {} mismatch resume_table {} length {}", captured_values.len(), table_idx, addrs.len()))));
+                }
+                for (i, v) in captured_values.into_iter().enumerate() {
+                    let local_addr = addrs[i];
+                    match v {
+                        WasmValue::I32(x) => self.cf.locals.set::<i32>(local_addr, x),
+                        WasmValue::I64(x) => self.cf.locals.set::<i64>(local_addr, x),
+                        WasmValue::F32(x) => self.cf.locals.set::<f32>(local_addr, x),
+                        WasmValue::F64(x) => self.cf.locals.set::<f64>(local_addr, x),
+                        WasmValue::V128(x) => self.cf.locals.set::<i128>(local_addr, x),
+                        WasmValue::RefFunc(r) => self.cf.locals.set::<ValueRef>(local_addr, r.addr()),
+                        WasmValue::RefExtern(r) => self.cf.locals.set::<ValueRef>(local_addr, r.addr()),
+                    }
+                }
+            }
+        }
         
         self.cf.incr_instr_ptr();
         ControlFlow::Continue(())
@@ -1641,16 +1720,65 @@ impl<'store, 'stack> Executor<'store, 'stack> {
             exception_values.reverse();
         }
         
-        // Resume the continuation
-        let _suspend_ctx = cont_instance.resume();
-        
-        // In a full implementation, this would:
-        // 1. Save the current stack state
-        // 2. Swap to the continuation's stack
-        // 3. Throw an exception with the tag_index and values
-        // 4. Let the continuation's exception handler process it
-        
-        // For now, mark as running and put it back
+        // Resume the continuation: swap stacks and apply exception values to locals per resume table mapping
+        // Save current call frame
+        let push_res = self.stack.call_stack.push(
+            mem::replace(&mut self.cf, Self::create_dummy_frame())
+        );
+        if let ControlFlow::Break(e) = push_res {
+            self.store.replace_stack(cont_addr, cont_instance);
+            return Err(e);
+        }
+
+        // Swap stacks
+        let current_module = self.cf.module_addr();
+        let old_stack = mem::replace(self.stack, cont_instance.stack);
+
+        // Store old stack as suspended
+        let current_addr = self.store.add_stack(StackInstance {
+            stack: old_stack,
+            module_addr: current_module,
+            state: StackState::Suspended,
+            suspend_context: None,
+        });
+
+        // Restore call frame
+        self.cf = self.stack.call_stack.pop()
+            .expect("resume_throw: continuation has no call frame");
+        self.module.swap_with(self.cf.module_addr(), self.store);
+
+        // Apply exception values to locals using resume_table_addrs
+        if !exception_values.is_empty() {
+            #[cfg(feature = "stack-switching")]
+            {
+                let func_data = self.cf.data();
+                let table_idx = _resume_table_idx as usize;
+                if table_idx >= func_data.resume_table_addrs.len() {
+                    self.store.replace_stack(cont_addr, cont_instance);
+                    return Err(Error::Other(format!("resume_throw: resume table idx {} out of range for function", table_idx)));
+                }
+                let addrs = &func_data.resume_table_addrs[table_idx];
+                if addrs.len() != exception_values.len() {
+                    self.store.replace_stack(cont_addr, cont_instance);
+                    return Err(Error::Other(format!("resume_throw: exception values {} length mismatch resume_table {} length {}", exception_values.len(), table_idx, addrs.len())));
+                }
+                for (i, v) in exception_values.into_iter().enumerate() {
+                    let local_addr = addrs[i];
+                    match v {
+                        WasmValue::I32(x) => self.cf.locals.set::<i32>(local_addr, x),
+                        WasmValue::I64(x) => self.cf.locals.set::<i64>(local_addr, x),
+                        WasmValue::F32(x) => self.cf.locals.set::<f32>(local_addr, x),
+                        WasmValue::F64(x) => self.cf.locals.set::<f64>(local_addr, x),
+                        WasmValue::V128(x) => self.cf.locals.set::<i128>(local_addr, x),
+                        WasmValue::RefFunc(r) => self.cf.locals.set::<ValueRef>(local_addr, r.addr()),
+                        WasmValue::RefExtern(r) => self.cf.locals.set::<ValueRef>(local_addr, r.addr()),
+                    }
+                }
+            }
+        }
+
+        // For now mark as running and put it back in the store
+        cont_instance.state = StackState::Running;
         self.store.replace_stack(cont_addr, cont_instance);
         
         Ok(())

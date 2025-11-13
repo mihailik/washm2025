@@ -18,6 +18,8 @@ pub(crate) struct StackInstance {
     
     /// Suspend context - stores information when suspended
     pub(crate) suspend_context: Option<SuspendContext>,
+    /// Bound arguments created via `cont.bind`. These should be provided to the continuation when resumed.
+    pub(crate) bound_args: Option<Vec<WasmValue>>,
 }
 
 /// The state of a stack instance
@@ -73,6 +75,7 @@ impl StackInstance {
             module_addr,
             state: StackState::Suspended, // New stacks start suspended
             suspend_context: None,
+            bound_args: None,
         }
     }
     
@@ -88,6 +91,7 @@ impl StackInstance {
             module_addr,
             state: StackState::Suspended,
             suspend_context: Some(suspend_context),
+            bound_args: None,
         }
     }
     

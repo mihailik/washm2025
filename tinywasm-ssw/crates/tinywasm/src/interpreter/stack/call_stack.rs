@@ -35,6 +35,16 @@ impl CallStack {
         self.stack.push(call_frame);
         ControlFlow::Continue(())
     }
+
+    #[inline]
+    pub(crate) fn top(&self) -> Option<&CallFrame> {
+        self.stack.last()
+    }
+
+    #[inline]
+    pub(crate) fn top_mut(&mut self) -> Option<&mut CallFrame> {
+        self.stack.last_mut()
+    }
 }
 
 #[derive(Debug)]
