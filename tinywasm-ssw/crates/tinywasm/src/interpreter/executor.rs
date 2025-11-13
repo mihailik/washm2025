@@ -1360,48 +1360,29 @@ impl<'store, 'stack> Executor<'store, 'stack> {
         // 2. Push them onto the continuation's value stack as bound parameters
         // 3. Adjust the continuation's function signature
         
-        // For now, we pop arguments from the current stack and store them as bound args
-        let arg_count = _argument_index as usize;
-        let mut args: alloc::vec::Vec<WasmValue> = alloc::vec::Vec::new();
-        for _ in 0..arg_count {
-            // pop from current stack and collect as WasmValue
-            // We choose to pop from value stack based on typed variants
-            let maybe_i32 = self.stack.values.pop::<i32>();
-            if let Some(v) = maybe_i32 {
-                args.push(WasmValue::I32(v));
-                continue;
-            }
-            let maybe_i64 = self.stack.values.pop::<i64>();
-            if let Some(v) = maybe_i64 {
-                args.push(WasmValue::I64(v));
-                continue;
-            }
-            let maybe_f32 = self.stack.values.pop::<f32>();
-            if let Some(v) = maybe_f32 {
-                args.push(WasmValue::F32(v));
-                continue;
-            }
-            let maybe_f64 = self.stack.values.pop::<f64>();
-            if let Some(v) = maybe_f64 {
-                args.push(WasmValue::F64(v));
-                continue;
-            }
-            let maybe_v128 = self.stack.values.pop::<i128>();
-            if let Some(v) = maybe_v128 {
-                args.push(WasmValue::V128(v));
-                continue;
-            }
-            let maybe_ref = self.stack.values.pop::<ValueRef>();
-            if let Some(v) = maybe_ref {
-                args.push(WasmValue::RefExtern(tinywasm_types::ExternRef::new(v)));
-                continue;
-            }
-            // If we didn't find a value, return error
-            return Err(Error::Other("cont.bind: not enough arguments on stack".to_string()));
+        // Capture a single local (argument) from the current frame and store it as a bound argument
+        // The parser validates that _argument_index and _result_index are in-range for the current function.
+        let arg_idx = _argument_index as usize;
+        let res_idx = _result_index; // stored as runtime index to write into target locals on resume
+        let local_types = &self.cf.local_types();
+        if arg_idx >= local_types.len() {
+            return Err(Error::Other(format!("cont.bind: argument index out of range: {}", arg_idx)));
         }
+        let arg_ty = local_types[arg_idx];
+        let wasm_val = match arg_ty {
+            tinywasm_types::ValType::I32 => WasmValue::I32(self.cf.locals.get::<i32>(arg_idx as u16)),
+            tinywasm_types::ValType::I64 => WasmValue::I64(self.cf.locals.get::<i64>(arg_idx as u16)),
+            tinywasm_types::ValType::F32 => WasmValue::F32(self.cf.locals.get::<f32>(arg_idx as u16)),
+            tinywasm_types::ValType::F64 => WasmValue::F64(self.cf.locals.get::<f64>(arg_idx as u16)),
+            tinywasm_types::ValType::V128 => WasmValue::V128(self.cf.locals.get::<i128>(arg_idx as u16)),
+            tinywasm_types::ValType::RefFunc => WasmValue::RefFunc(tinywasm_types::FuncRef::new(self.cf.locals.get::<ValueRef>(arg_idx as u16))),
+            tinywasm_types::ValType::RefExtern => WasmValue::RefExtern(tinywasm_types::ExternRef::new(self.cf.locals.get::<ValueRef>(arg_idx as u16))),
+        };
+        let mut args: alloc::vec::Vec<(u32, WasmValue)> = alloc::vec::Vec::new();
+        args.push((res_idx, wasm_val));
         // A complete implementation would involve modifying the continuation's locals
         
-        // Store bound args on the continuation instance
+        // Store bound args on the continuation instance (as target_index -> value pairs)
         cont_instance.bound_args = Some(args);
 
         // Push the continuation back (or a new bound continuation)
@@ -1418,7 +1399,7 @@ impl<'store, 'stack> Executor<'store, 'stack> {
         
         // Pop target continuation reference where we should suspend to
         let target_ref = self.stack.values.pop::<ValueRef>();
-        let target_addr = target_ref.ok_or_else(|| Error::Other("suspend: invalid continuation ref".to_string()))?;
+        let target_addr = target_ref.ok_or_else(|| Error::Other("suspend: invalid continuation ref".to_string())).to_cf()?;
         
         // For now, collect values based on tag type if available
         let mut values: alloc::vec::Vec<tinywasm_types::WasmValue> = alloc::vec::Vec::new();
@@ -1431,38 +1412,33 @@ impl<'store, 'stack> Executor<'store, 'stack> {
                 match ty {
                     ValType::I32 => {
                         let v = self.stack.values.pop::<i32>();
-                        let v = v.ok_or_else(|| Error::Other("suspend: missing i32 value for tag".to_string())).to_cf()?;
                         values.push(tinywasm_types::WasmValue::I32(v));
                     }
                     ValType::I64 => {
                         let v = self.stack.values.pop::<i64>();
-                        let v = v.ok_or_else(|| Error::Other("suspend: missing i64 value for tag".to_string())).to_cf()?;
                         values.push(tinywasm_types::WasmValue::I64(v));
                     }
                     ValType::F32 => {
                         let v = self.stack.values.pop::<f32>();
-                        let v = v.ok_or_else(|| Error::Other("suspend: missing f32 value for tag".to_string())).to_cf()?;
                         values.push(tinywasm_types::WasmValue::F32(v));
                     }
                     ValType::F64 => {
                         let v = self.stack.values.pop::<f64>();
-                        let v = v.ok_or_else(|| Error::Other("suspend: missing f64 value for tag".to_string())).to_cf()?;
                         values.push(tinywasm_types::WasmValue::F64(v));
                     }
                     ValType::V128 => {
                         let v = self.stack.values.pop::<i128>();
-                        let v = v.ok_or_else(|| Error::Other("suspend: missing v128 value for tag".to_string())).to_cf()?;
                         values.push(tinywasm_types::WasmValue::V128(v));
                     }
                     ValType::RefFunc => {
-                        let v = self.stack.values.pop::<tinywasm_types::FuncRef>();
+                        let v = self.stack.values.pop::<ValueRef>();
                         let v = v.ok_or_else(|| Error::Other("suspend: missing funcref value for tag".to_string())).to_cf()?;
-                        values.push(tinywasm_types::WasmValue::RefFunc(v));
+                        values.push(tinywasm_types::WasmValue::RefFunc(tinywasm_types::FuncRef::new(Some(v))));
                     }
                     ValType::RefExtern => {
-                        let v = self.stack.values.pop::<tinywasm_types::ExternRef>();
+                        let v = self.stack.values.pop::<ValueRef>();
                         let v = v.ok_or_else(|| Error::Other("suspend: missing externref value for tag".to_string())).to_cf()?;
-                        values.push(tinywasm_types::WasmValue::RefExtern(v));
+                        values.push(tinywasm_types::WasmValue::RefExtern(tinywasm_types::ExternRef::new(Some(v))));
                     }
                 }
             }
@@ -1487,6 +1463,8 @@ impl<'store, 'stack> Executor<'store, 'stack> {
             .ok_or_else(|| Error::Other("suspend: target disappeared".to_string()))
             .to_cf()?;
         
+        
+
         // Save current call frame
         let push_res = self.stack.call_stack.push(
             mem::replace(&mut self.cf, Self::create_dummy_frame())
@@ -1569,6 +1547,40 @@ impl<'store, 'stack> Executor<'store, 'stack> {
         }
         // Extract bound args from the continuation instance, if any
         let bound_args = cont_instance.bound_args.take();
+
+        // Validate bound args / captured values against resumed function locals and resume table
+        // before swapping stacks, so we can reinstate the continuation intact in case of errors.
+        if let Some(args) = bound_args.as_ref() {
+            // If the continuation has no frame or a mismatch in local types, error out early
+            let target_frame = cont_instance.stack.call_stack.top().ok_or_else(|| Error::Other("resume: continuation has no call frame".to_string())).to_cf()?;
+            let target_local_types = target_frame.local_types().to_vec();
+            for (res_idx, a) in args.iter() {
+                if (*res_idx as usize) >= target_local_types.len() {
+                    self.store.data.stacks[cont_addr as usize] = Some(cont_instance);
+                    return ControlFlow::Break(Some(Error::Other(format!("resume: bound arg result index {} out of range for resumed function", res_idx))));
+                }
+                let local_ty = target_local_types[*res_idx as usize];
+                if a.val_type() != local_ty {
+                    self.store.data.stacks[cont_addr as usize] = Some(cont_instance);
+                    return ControlFlow::Break(Some(Error::Other(format!("resume: bound arg type mismatch for local {}: {:?} vs {:?}", res_idx, a.val_type(), local_ty))));
+                }
+            }
+        }
+
+        if !captured_values.is_empty() {
+            let func_top = cont_instance.stack.call_stack.top().ok_or_else(|| Error::Other("resume: continuation has no call frame".to_string())).to_cf()?;
+            let func_data = func_top.data();
+            let table_idx = _resume_table_idx as usize;
+            if table_idx >= func_data.resume_table_addrs.len() {
+                self.store.data.stacks[cont_addr as usize] = Some(cont_instance);
+                return ControlFlow::Break(Some(Error::Other(format!("resume: resume table idx {} out of range for function", table_idx))));
+            }
+            let addrs = func_data.resume_table_addrs[table_idx].to_vec();
+            if addrs.len() != captured_values.len() {
+                self.store.data.stacks[cont_addr as usize] = Some(cont_instance);
+                return ControlFlow::Break(Some(Error::Other(format!("resume: captured values length {} mismatch resume_table {} length {}", captured_values.len(), table_idx, addrs.len()))));
+            }
+        }
         
         // Save current call frame
         let push_res = self.stack.call_stack.push(
@@ -1589,6 +1601,7 @@ impl<'store, 'stack> Executor<'store, 'stack> {
             module_addr: current_module,
             state: StackState::Suspended,
             suspend_context: None,
+            bound_args: None,
         });
         
         // Restore call frame
@@ -1600,9 +1613,10 @@ impl<'store, 'stack> Executor<'store, 'stack> {
         self.stack.values.push(current_addr as i32);
 
         // Apply bound args (push to value stack) and captured values into locals per resume_table mapping
-        // First, push bound args onto resumed stack values if present.
+        // First, apply bound args onto resumed frame locals and push them onto the resumed stack values
         if let Some(args) = bound_args {
-            for a in args {
+            for (res_idx, a) in args {
+                // Push onto stack values
                 match a {
                     WasmValue::I32(x) => self.stack.values.push(x),
                     WasmValue::I64(x) => self.stack.values.push(x),
@@ -1611,6 +1625,28 @@ impl<'store, 'stack> Executor<'store, 'stack> {
                     WasmValue::V128(x) => self.stack.values.push(x),
                     WasmValue::RefFunc(r) => self.stack.values.push::<ValueRef>(r.addr()),
                     WasmValue::RefExtern(r) => self.stack.values.push::<ValueRef>(r.addr()),
+                }
+
+                // Write into resumed frame locals if possible (res_idx must be in range and types must match)
+                let local_types = self.cf.local_types().to_vec();
+                if (res_idx as usize) < local_types.len() {
+                    let res_local_idx = res_idx as u16;
+                    let local_ty = local_types[res_idx as usize];
+                    if a.val_type() != local_ty {
+                        return ControlFlow::Break(Some(Error::Other(format!("resume: bound arg type mismatch for local {}: {:?} vs {:?}", res_idx, a.val_type(), local_ty))));
+                    }
+                    match a {
+                        WasmValue::I32(x) => self.cf.locals.set::<i32>(res_local_idx, x),
+                        WasmValue::I64(x) => self.cf.locals.set::<i64>(res_local_idx, x),
+                        WasmValue::F32(x) => self.cf.locals.set::<f32>(res_local_idx, x),
+                        WasmValue::F64(x) => self.cf.locals.set::<f64>(res_local_idx, x),
+                        WasmValue::V128(x) => self.cf.locals.set::<i128>(res_local_idx, x),
+                        WasmValue::RefFunc(r) => self.cf.locals.set::<ValueRef>(res_local_idx, r.addr()),
+                        WasmValue::RefExtern(r) => self.cf.locals.set::<ValueRef>(res_local_idx, r.addr()),
+                    }
+                } else {
+                    // If result index is out of range for the resumed function, treat as an error and put the continuation back
+                    return ControlFlow::Break(Some(Error::Other(format!("resume: bound arg result index {} out of range for resumed function", res_idx))));
                 }
             }
         }
@@ -1622,12 +1658,10 @@ impl<'store, 'stack> Executor<'store, 'stack> {
                 let func_data = self.cf.data();
                 let table_idx = _resume_table_idx as usize;
                 if table_idx >= func_data.resume_table_addrs.len() {
-                    self.store.data.stacks[cont_addr as usize] = Some(cont_instance);
                     return ControlFlow::Break(Some(Error::Other(format!("resume: resume table idx {} out of range for function", table_idx))));
                 }
-                let addrs = &func_data.resume_table_addrs[table_idx];
+                let addrs = func_data.resume_table_addrs[table_idx].to_vec();
                 if addrs.len() != captured_values.len() {
-                    self.store.data.stacks[cont_addr as usize] = Some(cont_instance);
                     return ControlFlow::Break(Some(Error::Other(format!("resume: captured values length {} mismatch resume_table {} length {}", captured_values.len(), table_idx, addrs.len()))));
                 }
                 for (i, v) in captured_values.into_iter().enumerate() {
@@ -1653,6 +1687,7 @@ impl<'store, 'stack> Executor<'store, 'stack> {
     fn exec_resume_throw(&mut self, _cont_type_index: u32, _tag_index: u32, _resume_table_idx: u32) -> Result<()> {
         use crate::store::{StackState, TagValue};
         use tinywasm_types::ValType;
+        use core::mem;
         
         // Pop the continuation reference from the stack
         let cont_ref = self.stack.values.pop::<ValueRef>();
@@ -1662,6 +1697,9 @@ impl<'store, 'stack> Executor<'store, 'stack> {
         let mut cont_instance = self.store.take_stack(cont_addr)
             .ok_or_else(|| Error::Other(format!("continuation {} not found", cont_addr)))?;
         
+        // Take bound args (if any)
+        let bound_args = cont_instance.bound_args.take();
+
         // Check that the continuation is in a valid state
         if cont_instance.state == StackState::Dead {
             self.store.replace_stack(cont_addr, cont_instance);
@@ -1673,6 +1711,23 @@ impl<'store, 'stack> Executor<'store, 'stack> {
             return Err(Error::Other("cannot resume_throw to a running continuation".to_string()));
         }
         
+        // Validate bound args / captured exception values against resumed function locals and resume table
+        if let Some(args) = bound_args.as_ref() {
+            let target_frame = cont_instance.stack.call_stack.top().ok_or_else(|| Error::Other("resume_throw: continuation has no call frame".to_string()))?;
+            let target_local_types = target_frame.local_types().to_vec();
+            for (res_idx, a) in args.iter() {
+                if (*res_idx as usize) >= target_local_types.len() {
+                    self.store.replace_stack(cont_addr, cont_instance);
+                    return Err(Error::Other(format!("resume_throw: bound arg result index {} out of range for resumed function", res_idx)));
+                }
+                let local_ty = target_local_types[*res_idx as usize];
+                if a.val_type() != local_ty {
+                    self.store.replace_stack(cont_addr, cont_instance);
+                    return Err(Error::Other(format!("resume_throw: bound arg type mismatch for local {}: {:?} vs {:?}", res_idx, a.val_type(), local_ty)));
+                }
+            }
+        }
+
         // Collect exception values from the stack based on tag
         let mut exception_values: alloc::vec::Vec<tinywasm_types::WasmValue> = alloc::vec::Vec::new();
         #[cfg(feature = "stack-switching")]
@@ -1682,38 +1737,33 @@ impl<'store, 'stack> Executor<'store, 'stack> {
                 match ty {
                     ValType::I32 => {
                         let v = self.stack.values.pop::<i32>();
-                        let v = v.ok_or_else(|| Error::Other("resume_throw: missing i32 value for tag".to_string()))?;
                         exception_values.push(tinywasm_types::WasmValue::I32(v));
                     }
                     ValType::I64 => {
                         let v = self.stack.values.pop::<i64>();
-                        let v = v.ok_or_else(|| Error::Other("resume_throw: missing i64 value for tag".to_string()))?;
                         exception_values.push(tinywasm_types::WasmValue::I64(v));
                     }
                     ValType::F32 => {
                         let v = self.stack.values.pop::<f32>();
-                        let v = v.ok_or_else(|| Error::Other("resume_throw: missing f32 value for tag".to_string()))?;
                         exception_values.push(tinywasm_types::WasmValue::F32(v));
                     }
                     ValType::F64 => {
                         let v = self.stack.values.pop::<f64>();
-                        let v = v.ok_or_else(|| Error::Other("resume_throw: missing f64 value for tag".to_string()))?;
                         exception_values.push(tinywasm_types::WasmValue::F64(v));
                     }
                     ValType::V128 => {
                         let v = self.stack.values.pop::<i128>();
-                        let v = v.ok_or_else(|| Error::Other("resume_throw: missing v128 value for tag".to_string()))?;
                         exception_values.push(tinywasm_types::WasmValue::V128(v));
                     }
                     ValType::RefFunc => {
-                        let v = self.stack.values.pop::<tinywasm_types::FuncRef>();
+                        let v = self.stack.values.pop::<ValueRef>();
                         let v = v.ok_or_else(|| Error::Other("resume_throw: missing funcref value for tag".to_string()))?;
-                        exception_values.push(tinywasm_types::WasmValue::RefFunc(v));
+                        exception_values.push(tinywasm_types::WasmValue::RefFunc(tinywasm_types::FuncRef::new(Some(v))));
                     }
                     ValType::RefExtern => {
-                        let v = self.stack.values.pop::<tinywasm_types::ExternRef>();
+                        let v = self.stack.values.pop::<ValueRef>();
                         let v = v.ok_or_else(|| Error::Other("resume_throw: missing externref value for tag".to_string()))?;
-                        exception_values.push(tinywasm_types::WasmValue::RefExtern(v));
+                        exception_values.push(tinywasm_types::WasmValue::RefExtern(tinywasm_types::ExternRef::new(Some(v))));
                     }
                 }
             }
@@ -1721,13 +1771,29 @@ impl<'store, 'stack> Executor<'store, 'stack> {
         }
         
         // Resume the continuation: swap stacks and apply exception values to locals per resume table mapping
+        // Validate exception values against resume_table addresses before swapping stacks
+        if !exception_values.is_empty() {
+            let func_top = cont_instance.stack.call_stack.top().ok_or_else(|| Error::Other("resume_throw: continuation has no call frame".to_string()))?;
+            let func_data = func_top.data();
+            let table_idx = _resume_table_idx as usize;
+            if table_idx >= func_data.resume_table_addrs.len() {
+                self.store.replace_stack(cont_addr, cont_instance);
+                return Err(Error::Other(format!("resume_throw: resume table idx {} out of range for function", table_idx)));
+            }
+            let addrs = func_data.resume_table_addrs[table_idx].to_vec();
+            if addrs.len() != exception_values.len() {
+                self.store.replace_stack(cont_addr, cont_instance);
+                return Err(Error::Other(format!("resume_throw: exception values {} length mismatch resume_table {} length {}", exception_values.len(), table_idx, addrs.len())));
+            }
+        }
+
         // Save current call frame
         let push_res = self.stack.call_stack.push(
             mem::replace(&mut self.cf, Self::create_dummy_frame())
         );
         if let ControlFlow::Break(e) = push_res {
             self.store.replace_stack(cont_addr, cont_instance);
-            return Err(e);
+            return Err(e.unwrap_or_else(|| Error::Other("call stack push failed".to_string())));
         }
 
         // Swap stacks
@@ -1740,12 +1806,50 @@ impl<'store, 'stack> Executor<'store, 'stack> {
             module_addr: current_module,
             state: StackState::Suspended,
             suspend_context: None,
+            bound_args: None,
         });
 
         // Restore call frame
         self.cf = self.stack.call_stack.pop()
             .expect("resume_throw: continuation has no call frame");
         self.module.swap_with(self.cf.module_addr(), self.store);
+
+        // Apply bound args to locals and value stack
+        if let Some(args) = bound_args {
+            for (res_idx, a) in args {
+                // Push onto stack values
+                match a {
+                    WasmValue::I32(x) => self.stack.values.push(x),
+                    WasmValue::I64(x) => self.stack.values.push(x),
+                    WasmValue::F32(x) => self.stack.values.push(x),
+                    WasmValue::F64(x) => self.stack.values.push(x),
+                    WasmValue::V128(x) => self.stack.values.push(x),
+                    WasmValue::RefFunc(r) => self.stack.values.push::<ValueRef>(r.addr()),
+                    WasmValue::RefExtern(r) => self.stack.values.push::<ValueRef>(r.addr()),
+                }
+
+                // Also write into resumed locals if possible
+                let local_types = self.cf.local_types().to_vec();
+                if (res_idx as usize) < local_types.len() {
+                    let res_local_idx = res_idx as u16;
+                    let local_ty = local_types[res_idx as usize];
+                    if a.val_type() != local_ty {
+                        return Err(Error::Other(format!("resume_throw: bound arg type mismatch for local {}: {:?} vs {:?}", res_idx, a.val_type(), local_ty)));
+                    }
+                    match a {
+                        WasmValue::I32(x) => self.cf.locals.set::<i32>(res_local_idx, x),
+                        WasmValue::I64(x) => self.cf.locals.set::<i64>(res_local_idx, x),
+                        WasmValue::F32(x) => self.cf.locals.set::<f32>(res_local_idx, x),
+                        WasmValue::F64(x) => self.cf.locals.set::<f64>(res_local_idx, x),
+                        WasmValue::V128(x) => self.cf.locals.set::<i128>(res_local_idx, x),
+                        WasmValue::RefFunc(r) => self.cf.locals.set::<ValueRef>(res_local_idx, r.addr()),
+                        WasmValue::RefExtern(r) => self.cf.locals.set::<ValueRef>(res_local_idx, r.addr()),
+                    }
+                } else {
+                    return Err(Error::Other(format!("resume_throw: bound arg result index {} out of range for resumed function", res_idx)));
+                }
+            }
+        }
 
         // Apply exception values to locals using resume_table_addrs
         if !exception_values.is_empty() {
@@ -1754,12 +1858,10 @@ impl<'store, 'stack> Executor<'store, 'stack> {
                 let func_data = self.cf.data();
                 let table_idx = _resume_table_idx as usize;
                 if table_idx >= func_data.resume_table_addrs.len() {
-                    self.store.replace_stack(cont_addr, cont_instance);
                     return Err(Error::Other(format!("resume_throw: resume table idx {} out of range for function", table_idx)));
                 }
-                let addrs = &func_data.resume_table_addrs[table_idx];
+                let addrs = func_data.resume_table_addrs[table_idx].to_vec();
                 if addrs.len() != exception_values.len() {
-                    self.store.replace_stack(cont_addr, cont_instance);
                     return Err(Error::Other(format!("resume_throw: exception values {} length mismatch resume_table {} length {}", exception_values.len(), table_idx, addrs.len())));
                 }
                 for (i, v) in exception_values.into_iter().enumerate() {
@@ -1792,7 +1894,7 @@ impl<'store, 'stack> Executor<'store, 'stack> {
         
         // Pop target continuation reference
         let target_ref = self.stack.values.pop::<ValueRef>();
-        let target_addr = target_ref.ok_or_else(|| Error::Other("switch: invalid continuation ref".to_string()))?;
+        let target_addr = target_ref.ok_or_else(|| Error::Other("switch: invalid continuation ref".to_string())).to_cf()?;
         
         // Collect values based on tag type
         let mut values: alloc::vec::Vec<tinywasm_types::WasmValue> = alloc::vec::Vec::new();
@@ -1803,38 +1905,33 @@ impl<'store, 'stack> Executor<'store, 'stack> {
                 match ty {
                     ValType::I32 => {
                         let v = self.stack.values.pop::<i32>();
-                        let v = v.ok_or_else(|| Error::Other("switch: missing i32 value for tag".to_string())).to_cf()?;
                         values.push(tinywasm_types::WasmValue::I32(v));
                     }
                     ValType::I64 => {
                         let v = self.stack.values.pop::<i64>();
-                        let v = v.ok_or_else(|| Error::Other("switch: missing i64 value for tag".to_string())).to_cf()?;
                         values.push(tinywasm_types::WasmValue::I64(v));
                     }
                     ValType::F32 => {
                         let v = self.stack.values.pop::<f32>();
-                        let v = v.ok_or_else(|| Error::Other("switch: missing f32 value for tag".to_string())).to_cf()?;
                         values.push(tinywasm_types::WasmValue::F32(v));
                     }
                     ValType::F64 => {
                         let v = self.stack.values.pop::<f64>();
-                        let v = v.ok_or_else(|| Error::Other("switch: missing f64 value for tag".to_string())).to_cf()?;
                         values.push(tinywasm_types::WasmValue::F64(v));
                     }
                     ValType::V128 => {
                         let v = self.stack.values.pop::<i128>();
-                        let v = v.ok_or_else(|| Error::Other("switch: missing v128 value for tag".to_string())).to_cf()?;
                         values.push(tinywasm_types::WasmValue::V128(v));
                     }
                     ValType::RefFunc => {
-                        let v = self.stack.values.pop::<tinywasm_types::FuncRef>();
+                        let v = self.stack.values.pop::<ValueRef>();
                         let v = v.ok_or_else(|| Error::Other("switch: missing funcref value for tag".to_string())).to_cf()?;
-                        values.push(tinywasm_types::WasmValue::RefFunc(v));
+                        values.push(tinywasm_types::WasmValue::RefFunc(tinywasm_types::FuncRef::new(Some(v))));
                     }
                     ValType::RefExtern => {
-                        let v = self.stack.values.pop::<tinywasm_types::ExternRef>();
+                        let v = self.stack.values.pop::<ValueRef>();
                         let v = v.ok_or_else(|| Error::Other("switch: missing externref value for tag".to_string())).to_cf()?;
-                        values.push(tinywasm_types::WasmValue::RefExtern(v));
+                        values.push(tinywasm_types::WasmValue::RefExtern(tinywasm_types::ExternRef::new(Some(v))));
                     }
                 }
             }

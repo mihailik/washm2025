@@ -1,5 +1,7 @@
 use crate::Result;
 use alloc::boxed::Box;
+use alloc::format;
+use alloc::vec::Vec;
 use tinywasm_types::{TagType, FuncType};
 use wasmparser::TagType as WasmTagType;
 

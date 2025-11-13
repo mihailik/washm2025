@@ -273,6 +273,7 @@ pub struct WasmFunctionData {
 
 /// A WebAssembly Tag type.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "archive", derive(serde::Serialize, serde::Deserialize))]
 pub struct TagType {
     pub params: Box<[ValType]>,
 }

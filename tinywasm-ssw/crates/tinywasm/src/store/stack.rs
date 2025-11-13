@@ -19,7 +19,9 @@ pub(crate) struct StackInstance {
     /// Suspend context - stores information when suspended
     pub(crate) suspend_context: Option<SuspendContext>,
     /// Bound arguments created via `cont.bind`. These should be provided to the continuation when resumed.
-    pub(crate) bound_args: Option<Vec<WasmValue>>,
+    /// Each entry is (result_local_index, value) where the index is the local index in the target frame
+    /// where the bound argument should be applied.
+    pub(crate) bound_args: Option<Vec<(u32, WasmValue)>>,
 }
 
 /// The state of a stack instance

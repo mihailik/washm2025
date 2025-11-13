@@ -534,11 +534,12 @@ impl<'a, R: WasmModuleResources> wasmparser::VisitOperator<'a> for FunctionBuild
         {
             // Store a local representation of the resume table entries
             let mut entries = Vec::new();
-            for e in _resume_table.into_iter() {
-                match e {
-                    Ok(idx) => entries.push(idx),
-                    Err(_) => {
-                        self.unsupported("visit_resume");
+            for handler in _resume_table.handlers.iter() {
+                match handler {
+                    wasmparser::Handle::OnLabel { tag: _, label } => entries.push(*label),
+                    wasmparser::Handle::OnSwitch { tag: _ } => {
+                        // OnSwitch handler is not currently supported in tinywasm
+                        self.unsupported("visit_resume: OnSwitch handler not supported");
                         return;
                     }
                 }
@@ -570,11 +571,11 @@ impl<'a, R: WasmModuleResources> wasmparser::VisitOperator<'a> for FunctionBuild
         {
             // Store a local representation of the resume table entries
             let mut entries = Vec::new();
-            for e in _resume_table.into_iter() {
-                match e {
-                    Ok(idx) => entries.push(idx),
-                    Err(_) => {
-                        self.unsupported("visit_resume_throw");
+            for handler in _resume_table.handlers.iter() {
+                match handler {
+                    wasmparser::Handle::OnLabel { tag: _, label } => entries.push(*label),
+                    wasmparser::Handle::OnSwitch { tag: _ } => {
+                        self.unsupported("visit_resume_throw: OnSwitch handler not supported");
                         return;
                     }
                 }

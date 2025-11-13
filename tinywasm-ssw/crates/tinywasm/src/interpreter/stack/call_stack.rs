@@ -7,7 +7,7 @@ use crate::{Error, unlikely};
 
 use alloc::boxed::Box;
 use alloc::{rc::Rc, vec, vec::Vec};
-use tinywasm_types::{Instruction, LocalAddr, ModuleInstanceAddr, WasmFunction, WasmFunctionData, WasmValue};
+use tinywasm_types::{Instruction, LocalAddr, ModuleInstanceAddr, WasmFunction, WasmFunctionData, WasmValue, ValType};
 
 pub(crate) const MAX_CALL_STACK_SIZE: usize = 1024;
 
@@ -84,6 +84,12 @@ impl CallFrame {
     #[allow(dead_code)]
     pub(crate) fn data(&self) -> &WasmFunctionData {
         &self.func_instance.data
+    }
+
+    #[inline]
+    /// Get local_types slice (params + locals) from the function instance.
+    pub(crate) fn local_types(&self) -> &[ValType] {
+        &self.func_instance.local_types
     }
 
     #[inline]

@@ -106,7 +106,7 @@ pub(crate) fn convert_module_import(import: wasmparser::Import<'_>) -> Result<Im
 
 #[cfg(feature = "stack-switching")]
 pub(crate) fn convert_module_tags(
-    tags: wasmparser::SectionLimited<'_, wasmparser::TagType<'_>>,
+    tags: wasmparser::SectionLimited<'_, wasmparser::TagType>,
     func_types: &[tinywasm_types::FuncType],
 ) -> Result<Vec<TagType>> {
     convert_module_tags_impl(tags.into_iter(), func_types)
@@ -196,7 +196,7 @@ pub(crate) fn convert_module_code(
     }
 
     // Also collect the complete local type sequence so we can validate resume table entries later
-    let mut local_types_vec: Vec<ValType> = Vec::with_capacity(validator.len_locals());
+    let mut local_types_vec: Vec<ValType> = Vec::with_capacity(validator.len_locals().try_into().unwrap());
     for i in 0..validator.len_locals() {
         match validator.get_local_type(i) {
             Some(wasmparser::ValType::I32) => {
