@@ -739,10 +739,10 @@ impl<'store, 'stack> Executor<'store, 'stack> {
             #[cfg(feature = "stack-switching")]
             Suspend(tag_index) => return self.exec_suspend(*tag_index),
             #[cfg(feature = "stack-switching")]
-            Resume(cont_type_index) => return self.exec_resume(*cont_type_index),
+            Resume(cont_type_index, resume_table_idx) => return self.exec_resume(*cont_type_index, *resume_table_idx),
             #[cfg(feature = "stack-switching")]
-            ResumeThrow(cont_type_index, tag_index) => {
-                if let Err(e) = self.exec_resume_throw(*cont_type_index, *tag_index) {
+            ResumeThrow(cont_type_index, tag_index, resume_table_idx) => {
+                if let Err(e) = self.exec_resume_throw(*cont_type_index, *tag_index, *resume_table_idx) {
                     return ControlFlow::Break(Some(e));
                 }
             }
@@ -1438,7 +1438,7 @@ impl<'store, 'stack> Executor<'store, 'stack> {
     }
 
     #[cfg(feature = "stack-switching")]
-    fn exec_resume(&mut self, _cont_type_index: u32) -> ControlFlow<Option<Error>> {
+    fn exec_resume(&mut self, _cont_type_index: u32, _resume_table_idx: u32) -> ControlFlow<Option<Error>> {
         use crate::store::StackState;
         use core::mem;
         
@@ -1523,7 +1523,7 @@ impl<'store, 'stack> Executor<'store, 'stack> {
     }
 
     #[cfg(feature = "stack-switching")]
-    fn exec_resume_throw(&mut self, _cont_type_index: u32, _tag_index: u32) -> Result<()> {
+    fn exec_resume_throw(&mut self, _cont_type_index: u32, _tag_index: u32, _resume_table_idx: u32) -> Result<()> {
         use crate::store::{StackState, TagValue};
         
         // Pop the continuation reference from the stack

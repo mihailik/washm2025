@@ -3,6 +3,10 @@ use crate::{module::Code, visit::process_operators_and_validate};
 use alloc::{boxed::Box, format, string::ToString, vec::Vec};
 use tinywasm_types::*;
 use wasmparser::{FuncValidator, FuncValidatorAllocations, OperatorsReader, ValidatorResources};
+#[cfg(feature = "stack-switching")]
+mod conversion_tag;
+#[cfg(feature = "stack-switching")]
+use conversion_tag::convert_module_tags as convert_module_tags_impl;
 
 pub(crate) fn convert_module_elements<'a, T: IntoIterator<Item = wasmparser::Result<wasmparser::Element<'a>>>>(
     elements: T,
@@ -92,10 +96,17 @@ pub(crate) fn convert_module_import(import: wasmparser::Import<'_>) -> Result<Im
                 ImportKind::Global(GlobalType { mutable: ty.mutable, ty: convert_valtype(&ty.content_type) })
             }
             wasmparser::TypeRef::Tag(ty) => {
+                // convert tag import
+                // For now, treat as empty payload until we implement a full TagType conversion
                 return Err(crate::ParseError::UnsupportedOperator(format!("Unsupported import kind: {ty:?}")));
             }
         },
     })
+}
+
+#[cfg(feature = "stack-switching")]
+pub(crate) fn convert_module_tags(tags: wasmparser::SectionLimited<'_, wasmparser::Tag<'_>>) -> Result<Vec<TagType>> {
+    convert_module_tags_impl(tags.into_iter())
 }
 
 pub(crate) fn convert_module_memories<T: IntoIterator<Item = wasmparser::Result<wasmparser::MemoryType>>>(

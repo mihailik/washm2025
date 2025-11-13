@@ -195,9 +195,9 @@ pub enum Instruction {
     #[cfg(feature = "stack-switching")]
     Suspend(u32), // tag index
     #[cfg(feature = "stack-switching")]
-    Resume(TypeAddr), // cont_type_index - resume table stored separately
+    Resume(TypeAddr, u32), // cont_type_index, resume_table_index
     #[cfg(feature = "stack-switching")]
-    ResumeThrow(TypeAddr, u32), // cont_type_index, tag_index - resume table stored separately
+    ResumeThrow(TypeAddr, u32, u32), // cont_type_index, tag_index, resume_table_index
     #[cfg(feature = "stack-switching")]
     Switch(TypeAddr, u32), // cont_type_index, tag_index
 

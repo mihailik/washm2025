@@ -114,6 +114,8 @@ pub struct TinyWasmModule {
     ///
     /// Corresponds to the `elem` section of the original WebAssembly module.
     pub elements: Box<[Element]>,
+    #[cfg(feature = "stack-switching")]
+    pub tags: Box<[TagType]>,
 }
 
 /// A WebAssembly External Kind.
@@ -263,6 +265,12 @@ pub struct WasmFunctionData {
     pub v128_constants: Box<[i128]>,
     #[cfg(feature = "stack-switching")]
     pub resume_tables: Box<[Box<[u32]>]>,
+}
+
+/// A WebAssembly Tag type.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TagType {
+    pub params: Box<[ValType]>,
 }
 
 impl Default for WasmFunctionData {

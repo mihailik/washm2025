@@ -534,8 +534,9 @@ impl<'a, R: WasmModuleResources> wasmparser::VisitOperator<'a> for FunctionBuild
                 }
             }
 
+            let resume_table_idx = self.resume_tables.len() as u32;
             self.resume_tables.push(entries.into_boxed_slice());
-            self.instructions.push(Instruction::Resume(_cont_type_index));
+            self.instructions.push(Instruction::Resume(_cont_type_index, resume_table_idx));
         }
         #[cfg(not(feature = "stack-switching"))]
         {
@@ -558,8 +559,9 @@ impl<'a, R: WasmModuleResources> wasmparser::VisitOperator<'a> for FunctionBuild
                 }
             }
 
+            let resume_table_idx = self.resume_tables.len() as u32;
             self.resume_tables.push(entries.into_boxed_slice());
-            self.instructions.push(Instruction::ResumeThrow(_cont_type_index, _tag_index));
+            self.instructions.push(Instruction::ResumeThrow(_cont_type_index, _tag_index, resume_table_idx));
         }
         #[cfg(not(feature = "stack-switching"))]
         {

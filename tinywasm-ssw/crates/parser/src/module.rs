@@ -23,6 +23,8 @@ pub(crate) struct ModuleReader {
     pub(crate) globals: Vec<Global>,
     pub(crate) table_types: Vec<TableType>,
     pub(crate) memory_types: Vec<MemoryType>,
+    #[cfg(feature = "stack-switching")]
+    pub(crate) tags: Vec<crate::conversion::TagType>,
     pub(crate) imports: Vec<Import>,
     pub(crate) data: Vec<Data>,
     pub(crate) elements: Vec<Element>,
@@ -159,6 +161,12 @@ impl ModuleReader {
                 self.exports =
                     reader.into_iter().map(|e| conversion::convert_module_export(e?)).collect::<Result<Vec<_>>>()?;
             }
+            #[cfg(feature = "stack-switching")]
+            TagSection(reader) => {
+                debug!("Found tag section");
+                validator.tag_section(&reader)?;
+                self.tags = conversion::convert_module_tags(reader)?;
+            }
             End(offset) => {
                 debug!("Reached end of module");
                 if self.end_reached {
@@ -214,6 +222,8 @@ impl ModuleReader {
             exports: self.exports.into_boxed_slice(),
             elements: self.elements.into_boxed_slice(),
             memory_types: self.memory_types.into_boxed_slice(),
+            #[cfg(feature = "stack-switching")]
+            tags: self.tags.into_boxed_slice(),
         })
     }
 }
