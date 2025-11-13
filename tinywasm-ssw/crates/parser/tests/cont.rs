@@ -153,4 +153,55 @@ fn parse_cont_bind_out_of_range_is_rejected() {
     assert!(result.is_err());
 }
 
+#[cfg(feature = "stack-switching")]
+#[test]
+fn parse_cont_bind_type_mismatch_is_rejected() {
+    let parser = tinywasm_parser::Parser::new();
+    let wat = r#"
+        (module
+            (type (func (param i32) (result i32)))
+            (type (func (param i64) (result i64)))
+            (func (type 0) (param i32) (result i32)) ;; func 0
+            (func (type 1) (param i64) (result i64)) ;; func 1
+            (func (type 0)
+                (local i32)
+                (local.set 0 (i32.const 1))
+                (ref.func 1)
+                (cont.new 0)
+                (cont.bind 0 0)
+            )
+        )
+    "#;
+    let wasm = wat::parse_str(wat).expect("parse wat");
+    let result = parser.parse_module_bytes(&wasm);
+    assert!(result.is_err());
+}
+
+#[cfg(feature = "stack-switching")]
+#[test]
+fn parse_cont_bind_type_match_is_ok() {
+    let parser = tinywasm_parser::Parser::new();
+    let wat = r#"
+        (module
+            (type (func (param i32) (result i32)))
+            (func (type 0) (param i32) (result i32)) ;; func 0
+            (func (type 0)
+                (local i32)
+                (local.set 0 (i32.const 1))
+                (ref.func 1)
+                (cont.new 0)
+                (cont.bind 0 0)
+            )
+        )
+    "#;
+    let wasm = wat::parse_str(wat).expect("parse wat");
+    let module = parser.parse_module_bytes(&wasm).expect("parse module");
+    #[cfg(feature = "stack-switching")]
+    {
+        use tinywasm_types::Instruction;
+        let func = &module.funcs[2];
+        assert!(func.instructions.iter().any(|i| matches!(i, Instruction::ContBind(0, 0))));
+    }
+}
+
 

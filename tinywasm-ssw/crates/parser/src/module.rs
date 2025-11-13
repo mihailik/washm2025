@@ -200,6 +200,17 @@ impl ModuleReader {
         #[cfg(feature = "stack-switching")]
         {
             // Validate tag and resume table indices in parsed instructions.
+            // Build mapping from function index (imports + defined functions) to type index (TypeAddr)
+            let mut func_type_map: Vec<u32> = Vec::new();
+            for imp in &self.imports {
+                if let tinywasm_types::ImportKind::Function(ty_idx) = imp.kind {
+                    func_type_map.push(ty_idx);
+                }
+            }
+            for ty in &self.code_type_addrs {
+                func_type_map.push(*ty);
+            }
+
             for (f_idx, ((instructions, data, _locals, _local_types), _ty_idx)) in self.code.iter().zip(self.code_type_addrs.iter().copied()).enumerate() {
                 for instr in instructions.iter() {
                     use tinywasm_types::Instruction::*;
@@ -257,9 +268,34 @@ impl ModuleReader {
                         }
                         ContBind(arg_idx, result_idx) => {
                             let a = *arg_idx as usize;
-                            let r = *result_idx as usize;
-                            if a >= _local_types.len() || r >= _local_types.len() {
-                                return Err(ParseError::UnsupportedOperator(format!("cont.bind: local index out of range (arg {}, res {}) in function {}", a, r, f_idx)));
+                            if a >= _local_types.len() {
+                                return Err(ParseError::UnsupportedOperator(format!("cont.bind: argument index {} out of range in function {}", a, f_idx)));
+                            }
+                            // If the continuaton reference was produced by a direct ref.func just before the cont.bind
+                            // we can validate that the result index exists on the target function and that types match.
+                            if let Some(pos) = instructions.iter().position(|i| matches!(i, ContBind(_, _))) {
+                                if pos > 0 {
+                                    if let Instruction::RefFunc(fn_idx) = instructions[pos - 1] {
+                                        let fn_idx = fn_idx as usize;
+                                        if fn_idx >= func_type_map.len() {
+                                            return Err(ParseError::UnsupportedOperator(format!("cont.bind: referenced function index {} out of range in function {}", fn_idx, f_idx)));
+                                        }
+                                        let ty_idx = func_type_map[fn_idx] as usize;
+                                        if ty_idx >= self.func_types.len() {
+                                            return Err(ParseError::UnsupportedOperator(format!("cont.bind: referenced function type {} out of range in function {}", ty_idx, f_idx)));
+                                        }
+                                        let func_type = &self.func_types[ty_idx];
+                                        let r = *result_idx as usize;
+                                        if r >= func_type.results.len() {
+                                            return Err(ParseError::UnsupportedOperator(format!("cont.bind: result index {} out of range for target function {} in function {}", r, fn_idx, f_idx)));
+                                        }
+                                        let arg_ty = &_local_types[a];
+                                        let res_ty = &func_type.results[r];
+                                        if arg_ty != res_ty {
+                                            return Err(ParseError::UnsupportedOperator(format!("cont.bind: type mismatch: local {} is {:?} but target function {} result {} is {:?} in function {}", a, arg_ty, fn_idx, r, res_ty, f_idx)));
+                                        }
+                                    }
+                                }
                             }
                         }
                         _ => {}
