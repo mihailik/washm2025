@@ -1,3 +1,5 @@
+mod util;
+
 #[cfg(feature = "stack-switching")]
 #[test]
 fn parse_resume_table_addrs_resolved_correctly() {
@@ -8,7 +10,7 @@ fn parse_resume_table_addrs_resolved_correctly() {
             (func (type 0) (local i64) (resume 0 (resume_table 0)))
         )
     "#;
-    let wasm = wat::parse_str(wat).expect("parse wat");
+    let wasm = util::parse_wast_to_wasm_bytes(wat);
     let module = parser.parse_module_bytes(&wasm).expect("parse module");
     let func = &module.funcs[0];
     // resume_tables contains wasm local indices

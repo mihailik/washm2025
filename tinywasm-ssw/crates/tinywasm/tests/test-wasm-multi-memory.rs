@@ -9,6 +9,7 @@ fn main() -> Result<()> {
     let mut test_suite = TestSuite::new();
     test_suite.skip("simd_memory-multi.wast");
     test_suite.run_files(proposal(&Proposal::MultiMemory))?;
-    test_suite.save_csv("./tests/generated/wasm-multi-memory.csv", env!("CARGO_PKG_VERSION"))?;
+    let _csv = test_suite.generate_csv(env!("CARGO_PKG_VERSION"))?;
+    let _persist = test_suite.persist_csv_if_enabled(None, env!("CARGO_PKG_VERSION"))?;
     test_suite.report_status()
 }

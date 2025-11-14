@@ -5,7 +5,6 @@ resolver="2"
 
 [workspace.dependencies]
 wast="239"
-wat="1.239"
 wasmparser={version="0.239", default-features=false}
 eyre="0.6"
 log="0.4"
@@ -39,7 +38,8 @@ name="wasm-rust"
 test=false
 
 [dev-dependencies]
-wat.workspace=true
+wast.workspace=true
+# 'wat' removed; migrate to canonical 'wast' parsing
 eyre.workspace=true
 pretty_env_logger.workspace=true
 tinywasm={path="crates/tinywasm"}

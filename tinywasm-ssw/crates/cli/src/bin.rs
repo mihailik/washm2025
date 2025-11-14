@@ -89,7 +89,11 @@ fn main() -> Result<()> {
                 #[cfg(feature = "wat")]
                 true => {
                     let wat = std::fs::read_to_string(path)?;
-                    let wasm = wat::wat2wasm(&wat);
+                    // use wast encoder to parse the module first
+                    let lexer = wast::lexer::Lexer::new(&wat);
+                    let buf = wast::parser::ParseBuffer::new_with_lexer(lexer).expect("failed to create parse buffer");
+                    let mut wat_data = wast::parser::parse::<wast::Wat>(&buf).expect("failed to parse wat");
+                    let wasm = wat_data.encode().expect("failed to encode module");
                     tinywasm::Module::parse_bytes(&wasm)?
                 }
                 #[cfg(not(feature = "wat"))]

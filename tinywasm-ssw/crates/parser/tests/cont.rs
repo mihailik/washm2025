@@ -1,9 +1,11 @@
+mod util;
+
 #[cfg(feature = "stack-switching")]
 #[test]
 fn parse_module_with_cont_new_has_instruction() {
     let parser = tinywasm_parser::Parser::new();
     let wat = r#"(module (type (func)) (func (type 0) (cont.new 0)))"#;
-    let wasm = wat::parse_str(wat).expect("parse wat");
+    let wasm = util::parse_wast_to_wasm_bytes(wat);
     let module = parser.parse_module_bytes(&wasm).expect("parse module");
     #[cfg(feature = "stack-switching")]
     {
@@ -28,7 +30,7 @@ fn parse_module_with_cont_bind_has_instruction() {
             )
         )
     "#;
-    let wasm = wat::parse_str(wat).expect("parse wat");
+    let wasm = util::parse_wast_to_wasm_bytes(wat);
     let module = parser.parse_module_bytes(&wasm).expect("parse module");
     #[cfg(feature = "stack-switching")]
     {
@@ -49,7 +51,7 @@ fn parse_module_with_suspend_has_instruction() {
             (func (type 0) (suspend 0))
         )
     "#;
-    let wasm = wat::parse_str(wat).expect("parse wat");
+    let wasm = util::parse_wast_to_wasm_bytes(wat);
     let module = parser.parse_module_bytes(&wasm).expect("parse module");
     #[cfg(feature = "stack-switching")]
     {
@@ -70,7 +72,7 @@ fn parse_module_with_switch_has_instruction() {
             (func (type 0) (switch 0 0))
         )
     "#;
-    let wasm = wat::parse_str(wat).expect("parse wat");
+    let wasm = util::parse_wast_to_wasm_bytes(wat);
     let module = parser.parse_module_bytes(&wasm).expect("parse module");
     #[cfg(feature = "stack-switching")]
     {
@@ -91,7 +93,7 @@ fn parse_module_with_resume_has_resume_table_and_instruction() {
             (func (type 0))
         )
     "#;
-    let wasm = wat::parse_str(wat).expect("parse wat");
+    let wasm = util::parse_wast_to_wasm_bytes(wat);
     let module = parser.parse_module_bytes(&wasm).expect("parse module");
     #[cfg(feature = "stack-switching")]
     {
@@ -113,7 +115,7 @@ fn parse_module_with_two_resume_instructions_produces_two_resume_tables() {
             (func (type 0))
         )
     "#;
-    let wasm = wat::parse_str(wat).expect("parse wat");
+    let wasm = util::parse_wast_to_wasm_bytes(wat);
     let module = parser.parse_module_bytes(&wasm).expect("parse module");
     #[cfg(feature = "stack-switching")]
     {
@@ -148,7 +150,7 @@ fn parse_cont_bind_out_of_range_is_rejected() {
             )
         )
     "#;
-    let wasm = wat::parse_str(wat).expect("parse wat");
+    let wasm = util::parse_wast_to_wasm_bytes(wat);
     let result = parser.parse_module_bytes(&wasm);
     assert!(result.is_err());
 }
@@ -172,7 +174,7 @@ fn parse_cont_bind_type_mismatch_is_rejected() {
             )
         )
     "#;
-    let wasm = wat::parse_str(wat).expect("parse wat");
+    let wasm = util::parse_wast_to_wasm_bytes(wat);
     let result = parser.parse_module_bytes(&wasm);
     assert!(result.is_err());
 }
@@ -194,7 +196,7 @@ fn parse_cont_bind_type_match_is_ok() {
             )
         )
     "#;
-    let wasm = wat::parse_str(wat).expect("parse wat");
+    let wasm = util::parse_wast_to_wasm_bytes(wat);
     let module = parser.parse_module_bytes(&wasm).expect("parse module");
     #[cfg(feature = "stack-switching")]
     {

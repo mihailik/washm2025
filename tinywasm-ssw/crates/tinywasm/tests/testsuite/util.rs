@@ -78,6 +78,14 @@ pub fn encode_quote_wat(module: QuoteWat) -> (Option<String>, Vec<u8>) {
     }
 }
 
+/// Parse a WAT text string using the canonical WAST parser path and return wasm bytes.
+pub fn parse_wast_to_wasm_bytes(wat_text: &str) -> Vec<u8> {
+    let lexer = wast::lexer::Lexer::new(wat_text);
+    let buf = wast::parser::ParseBuffer::new_with_lexer(lexer).expect("failed to create parse buffer");
+    let mut wat_data = wast::parser::parse::<wast::Wat>(&buf).expect("failed to parse wat");
+    wat_data.encode().expect("failed to encode module")
+}
+
 pub fn parse_module_bytes(bytes: &[u8]) -> Result<TinyWasmModule> {
     let parser = tinywasm_parser::Parser::new();
     Ok(parser.parse_module_bytes(bytes)?)

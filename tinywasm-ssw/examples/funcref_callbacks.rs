@@ -50,7 +50,10 @@ fn by_func_ref_passed() -> Result<()> {
     )
     "#;
 
-    let wasm = wat::parse_str(WASM).expect("Failed to parse WAT");
+    let lexer = wast::lexer::Lexer::new(WASM);
+    let buf = wast::parser::ParseBuffer::new_with_lexer(lexer).expect("failed to create parse buffer");
+    let mut wat_data = wast::parser::parse::<wast::Wat>(&buf).expect("failed to parse wat");
+    let wasm = wat_data.encode().expect("failed to encode module");
     let module = Module::parse_bytes(&wasm)?;
     let mut store = Store::default();
     let mut imports = Imports::new();
@@ -125,7 +128,10 @@ fn by_func_ref_returned() -> Result<()> {
     )
     "#;
 
-    let wasm = wat::parse_str(WASM).expect("Failed to parse WAT");
+    let lexer = wast::lexer::Lexer::new(WASM);
+    let buf = wast::parser::ParseBuffer::new_with_lexer(lexer).expect("failed to create parse buffer");
+    let mut wat_data = wast::parser::parse::<wast::Wat>(&buf).expect("failed to parse wat");
+    let wasm = wat_data.encode().expect("failed to encode module");
     let module = Module::parse_bytes(&wasm)?;
     let mut store = Store::default();
     let mut imports = Imports::new();

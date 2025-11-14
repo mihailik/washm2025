@@ -22,5 +22,6 @@ std=["tinywasm-types/std", "wasmparser/std"]
 stack-switching=["tinywasm-types/stack-switching"]
 
 [dev-dependencies]
-wat.workspace=true
+ # removed 'wat' (deprecated) in favor of 'wast' canonical parsing
 wasm-encoder = "0.239.0"
+wast.workspace=true

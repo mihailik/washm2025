@@ -24,8 +24,14 @@ const WASM_IMPORT: &str = r#"
 "#;
 
 fn main() -> Result<()> {
-    let wasm_add = wat::parse_str(WASM_ADD).expect("failed to parse wat");
-    let wasm_import = wat::parse_str(WASM_IMPORT).expect("failed to parse wat");
+    let lexer = wast::lexer::Lexer::new(WASM_ADD);
+    let buf = wast::parser::ParseBuffer::new_with_lexer(lexer).expect("failed to create parse buffer");
+    let mut wat_data = wast::parser::parse::<wast::Wat>(&buf).expect("failed to parse wat");
+    let wasm_add = wat_data.encode().expect("failed to encode module");
+    let lexer = wast::lexer::Lexer::new(WASM_IMPORT);
+    let buf = wast::parser::ParseBuffer::new_with_lexer(lexer).expect("failed to create parse buffer");
+    let mut wat_data = wast::parser::parse::<wast::Wat>(&buf).expect("failed to parse wat");
+    let wasm_import = wat_data.encode().expect("failed to encode module");
 
     let add_module = Module::parse_bytes(&wasm_add)?;
     let import_module = Module::parse_bytes(&wasm_import)?;

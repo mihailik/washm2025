@@ -167,6 +167,9 @@ fn proxy_module(func_ty: &FuncType) -> Module {
     )
     "#
     );
-    let wasm = wat::parse_str(wasm_text).expect("failed to parse wat");
+    let lexer = wast::lexer::Lexer::new(&wasm_text);
+    let buf = wast::parser::ParseBuffer::new_with_lexer(lexer).expect("failed to create parse buffer");
+    let mut wat_data = wast::parser::parse::<wast::Wat>(&buf).expect("failed to parse wat");
+    let wasm = wat_data.encode().expect("failed to encode module");
     Module::parse_bytes(&wasm).expect("failed to make module")
 }

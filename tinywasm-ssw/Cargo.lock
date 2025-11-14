@@ -628,7 +628,6 @@ dependencies = [
  "tinywasm-types",
  "wasm-testsuite",
  "wast",
- "wat",
 ]
 
 [[package]]
@@ -651,7 +650,7 @@ dependencies = [
  "tinywasm-types",
  "wasm-encoder",
  "wasmparser",
- "wat",
+ "wast",
 ]
 
 [[package]]
@@ -661,7 +660,7 @@ dependencies = [
  "eyre",
  "pretty_env_logger",
  "tinywasm",
- "wat",
+ "wast",
 ]
 
 [[package]]
@@ -737,15 +736,6 @@ dependencies = [
  "memchr",
  "unicode-width",
  "wasm-encoder",
-]
-
-[[package]]
-name = "wat"
-version = "1.239.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e1c941927d34709f255558166f8901a2005f8ab4a9650432e9281b7cc6f3b75"
-dependencies = [
- "wast",
 ]
 
 [[package]]

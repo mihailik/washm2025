@@ -11,7 +11,10 @@ const WASM: &str = r#"
 "#;
 
 fn main() -> Result<()> {
-    let wasm = wat::parse_str(WASM).expect("failed to parse wat");
+    let lexer = wast::lexer::Lexer::new(WASM);
+    let buf = wast::parser::ParseBuffer::new_with_lexer(lexer).expect("failed to create parse buffer");
+    let mut wat_data = wast::parser::parse::<wast::Wat>(&buf).expect("failed to parse wat");
+    let wasm = wat_data.encode().expect("failed to encode module");
     let module = Module::parse_bytes(&wasm)?;
     let mut store = Store::default();
     let instance = module.instantiate(&mut store, None)?;
