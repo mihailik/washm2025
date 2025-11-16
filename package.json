@@ -16,6 +16,10 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "prep-pyodide": "cd pyodide-fork && conda env create -f environment.yml && conda activate pyodide-env && pip install -r requirements.txt",
-    "build-pyodide": "cd pyodide-fork && make"
+    "build-pyodide": "cd pyodide-fork && make",
+    "build:rust:native": "cargo build",
+    "build:rust:wasm-wasi": "set RUSTUP_TOOLCHAIN= && rustup target add wasm32-wasi && cargo build --target wasm32-wasi || exit 0",
+    "build:rust:wasm-unknown": "set RUSTUP_TOOLCHAIN= && rustup target add wasm32-unknown-unknown && cargo build --target wasm32-unknown-unknown || exit 0"
   }
+
 }

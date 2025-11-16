@@ -1,3 +1,9 @@
 [submodule "emscripten-core"]
 	path = emscripten-core
 	url = https://github.com/emscripten-core/emsdk.git
+[submodule "coreutils-fork"]
+	path = coreutils-fork
+	url = https://github.com/mavity/coreutils-fork
+[submodule "fish-shell-fork"]
+	path = fish-shell-fork
+	url = https://github.com/mavity/fish-shell-fork
