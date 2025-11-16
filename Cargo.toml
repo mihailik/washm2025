@@ -7,3 +7,5 @@ description = "A tiny placeholder washm crate (hello world)."
 license = "MIT"
 
 [dependencies]
+libc = "0.2"
+ion-shell = { path = "ion-fork" }

@@ -1,5 +1,6 @@
 mod command;
 mod uutils_bridge;
+mod ion_bridge;
 
 use command::Dispatcher;
 
@@ -31,6 +32,16 @@ fn main() {
     if cmd == "uutils" {
         let exit = uutils_bridge::UutilsBridge::run("uutils", &args[1..]);
         std::process::exit(exit);
+    }
+
+    // `fish` integration removed — prefer `ion` for embedding and WASI port.
+    
+    // If user asks to run `ion`, run the embedded (static) ion library in-process.
+    if cmd == "ion" {
+        match ion_bridge::run(&args[1..]) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => eprintln!("ion bridge error: {}", err),
+        }
     }
 
     match d.dispatch(&cmd, &args[1..]) {
