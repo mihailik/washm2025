@@ -16,8 +16,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build:rust:native": "cargo build",
-    "build:rust:wasm-wasi": "set RUSTUP_TOOLCHAIN= && rustup target add wasm32-wasi && cargo build --target wasm32-wasi || exit 0",
-    "build:rust:wasm-unknown": "set RUSTUP_TOOLCHAIN= && rustup target add wasm32-unknown-unknown && cargo build --target wasm32-unknown-unknown || exit 0"
+    "build:rust:wasm-wasi": "cargo build --target wasm32-wasi",
+    "build:rust:wasm-unknown": "cargo build --target wasm32-unknown-unknown"
   }
 
 }

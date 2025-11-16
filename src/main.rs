@@ -1,13 +1,15 @@
 mod command;
-mod uutils_bridge;
 mod ion_bridge;
+mod uutils_bridge;
 
 use command::Dispatcher;
 
 struct Echo;
 
 impl command::Command for Echo {
-    fn name(&self) -> &'static str { "echo" }
+    fn name(&self) -> &'static str {
+        "echo"
+    }
 
     fn run(&self, args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
         println!("{}", args.join(" "));
@@ -35,7 +37,7 @@ fn main() {
     }
 
     // `fish` integration removed — prefer `ion` for embedding and WASI port.
-    
+
     // If user asks to run `ion`, run the embedded (static) ion library in-process.
     if cmd == "ion" {
         match ion_bridge::run(&args[1..]) {
