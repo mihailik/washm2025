@@ -8,4 +8,11 @@ license = "MIT"
 
 [dependencies]
 libc = "0.2"
-ion-shell = { path = "ion-fork" }
+# ion-shell removed from default dependencies for wasm builds and PoC; it can be added back as
+# path = "ion-fork" for local development. If you need ion, add it as a submodule at the
+# root path with `git submodule add`.
+
+[features]
+# No default feature is included to keep wasm builds minimal.
+default = []
+ion = []

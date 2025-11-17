@@ -17,7 +17,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "build:rust:native": "cargo build",
     "build:rust:wasm-wasi": "cargo build --target wasm32-wasi",
+    "run:node-host": "node host/node-host/host.js",
+    "test:smoke": "node smoke_test_node.js",
     "build:rust:wasm-unknown": "cargo build --target wasm32-unknown-unknown"
   }
-
 }

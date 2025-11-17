@@ -1,6 +1,8 @@
 mod command;
+#[cfg(feature = "ion")]
 mod ion_bridge;
 mod uutils_bridge;
+mod wasm_async;
 
 use command::Dispatcher;
 
@@ -40,9 +42,18 @@ fn main() {
 
     // If user asks to run `ion`, run the embedded (static) ion library in-process.
     if cmd == "ion" {
-        match ion_bridge::run(&args[1..]) {
-            Ok(code) => std::process::exit(code),
-            Err(err) => eprintln!("ion bridge error: {}", err),
+        #[cfg(feature = "ion")]
+        {
+            match ion_bridge::run(&args[1..]) {
+                Ok(code) => std::process::exit(code),
+                Err(err) => eprintln!("ion bridge error: {}", err),
+            }
+        }
+
+        #[cfg(not(feature = "ion"))]
+        {
+            eprintln!("ion feature not enabled");
+            std::process::exit(1);
         }
     }
 
