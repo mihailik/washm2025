@@ -1,10 +1,3 @@
-Here is a strategic plan for the delivery of the **Axy Shell** (the "Corutils-Ion" fusion) inside a WASM environment, built "using perfection."  
-This document and roadmap have been updated to adopt Ion as the preferred shell core for Axy; Ion's design makes it better suited for WASI and for embedding.
-
-This plan prioritizes security, performance, and a clean-room implementation that "axes" the POSIX process model from day one.
-
----
-
 # 🚀 Project Axy: A Strategic Plan for the WASI Shell
 
 **Mission:** To create the reference implementation for a secure, high-performance, and portable systems shell for the WebAssembly (WASI) ecosystem. Axy will fuse a modern, asynchronous REPL (the "Ion-Lite" head) with a memory-safe, synchronous core (the "uutils" library) via an internal function-call architecture — but replace Fish with Ion as the canonical front-end for portability and WASI fitness.
