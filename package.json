@@ -2,14 +2,7 @@
   "name": "washm",
   "description": "WASM shell: Bash inside WASM",
   "version": "0.1.2",
-  "keywords": [
-    "MIT",
-    "WASM",
-    "WebAssembly",
-    "WASI",
-    "Python",
-    "Pyodide"
-  ],
+  "keywords": ["MIT", "WASM", "WebAssembly", "WASI", "Python", "Pyodide"],
   "author": "Oleg Mihailik",
   "license": "MIT",
   "main": "index.js",
@@ -17,8 +10,11 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "build:rust:native": "cargo build",
     "build:rust:wasm-wasi": "cargo build --target wasm32-wasi",
+    "build:rust:wasm-wasip1-minimal": "cargo build --target wasm32-wasip1 -p washm --no-default-features --features wasm-minimal",
     "run:node-host": "node host/node-host/host.js",
     "test:smoke": "node smoke_test_node.js",
-    "build:rust:wasm-unknown": "cargo build --target wasm32-unknown-unknown"
-  }
+    "build:rust:wasm-unknown": "cargo build --target wasm32-unknown-unknown",
+    "check:wasm-exports": "npm run build:rust:wasm-wasip1-minimal && node tools/check_wasm_exports.js ./target/wasm32-wasip1/debug/washm.wasm"
+  },
+  "devDependencies": { "wasmparser": "^1.0.3" }
 }

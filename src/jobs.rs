@@ -73,6 +73,7 @@ impl Default for JobManager {
     }
 }
 
+#[cfg(feature = "coreutils")]
 pub fn execute_command_sync(command: &str, args: &[String]) -> i32 {
     let args_os: Vec<OsString> = args.iter().map(|s| OsString::from(s)).collect();
     
@@ -119,6 +120,29 @@ pub fn execute_command_sync(command: &str, args: &[String]) -> i32 {
             0
         }
         
+        _ => {
+            eprintln!("axy: command not found: {}", command);
+            127
+        }
+    }
+}
+
+#[cfg(not(feature = "coreutils"))]
+pub fn execute_command_sync(command: &str, args: &[String]) -> i32 {
+    // Minimal stub for wasm builds: only builtins implemented.
+    match command {
+        // Built-ins
+        "echo" => {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            if args.len() > 1 {
+                let _ = writeln!(&mut out, "{}", args[1..].join(" "));
+            } else {
+                let _ = writeln!(&mut out);
+            }
+            let _ = out.flush();
+            0
+        }
         _ => {
             eprintln!("axy: command not found: {}", command);
             127

@@ -82,21 +82,6 @@ pub extern "C" fn _continue(cookie: u32) {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub extern "C" fn send_eval() -> i32 {
-    // Quick PoC: write a JS request to /dev/host/eval/{cookie}.js and return 0 on success.
-    let cookie = next_cookie();
-    let path = Path::new("/dev/host/eval");
-    if !path.exists() {
-        let _ = fs::create_dir_all(path);
-    }
-    let req = path.join(format!("{}.js", cookie));
-    let _ = fs::write(req, b"1+2");
-    0
-}
-
-
 
 #[cfg(not(target_arch = "wasm32"))]
 #[no_mangle]

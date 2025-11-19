@@ -11,11 +11,13 @@
 | Crucial Action | Description | Perfection Metric |
 | :--- | :--- | :--- |
 | **1. `uutils` as a Library** | Import `uutils/coreutils` not as binaries, but as a Rust **library crate**. | `cargo build` produces a single library, not 100+ binaries. |
-| **2. Reactor Entrypoint** | Create a library entrypoint (e.g., `axy_submit`) instead of a blocking `main` loop. | The Host can call `axy_submit("echo hi")` and get a result. |
+| **2. Guest REPL Entrypoint** | The guest runs its own REPL using standard WASI entrypoints (`_start` / `_initialize`), and manages stdin via WASI I/O. | The Host is passive and must not invoke guest REPL logic; guests write requests to the VFS (`/dev/host/eval`) when they need host services. |
 | **3. Internal Command Dispatcher** | Implement the core `eval` function. This must be a `match` statement or `HashMap` that maps a string (e.g., "ls") directly to an internal Rust function call (e.g., `uutils::ls::main(args)`). | **Zero calls** to `std::process::Command`. All execution is a function call within the same process. |
-| **4. WASI-Reactor Compilation** | Compile the entire monolith (`REPL + uutils`) to a single `wasm32-wasi` **reactor** module (library). | The `.wasm` file exports `axy_submit` and `_initialize`, allowing the Host to drive the loop. |
+| **4. WASI-Reactor Compilation** | Compile the entire monolith (`REPL + uutils`) to a single `wasm32-wasi` **reactor** module (library). | The `.wasm` file exports standard WASI init (`_start` / `_initialize`) and the single custom export `_continue(cookie)`; the Host is a passive launcher. |
 
 **Perfection Milestone (P1):** A working but "dumb" Axy shell that has **successfully axed `fork/exec`**. It proves the core, tightly-coupled architecture works for core utilities.
+
+> Canonical API: The only required non-WASI export in the minimal launcher is `_continue(cookie: i32)`. The host must not write to WASM memory or call guest allocators. Any other host-facing exports are either optional compatibility shims or deprecated.
 
 ---
 
@@ -39,6 +41,8 @@
 
 **Goal:** Solve the external command problem *without* `fork/exec`, using the official WASI standards for secure, sandboxed execution.
 
+> Note: The "secure, sandboxed execution" described here refers explicitly to running *external* WASM components using the WASI Component Model and is not a proposal for the canonical `host_eval` JS execution flow. The canonical `host_eval` flow remains: guests write raw JS to `/dev/host/eval`, and the launcher executes this JS in the host runtime scope.
+
 | Crucial Action | Description | Perfection Metric |
 | :--- | :--- | :--- |
 | **1. Adopt the Component Model** | Re-architect Axy to be a **WASM Component**. Its API (imports/exports) must be defined using **WIT (WASI Interface Types)**. | Axy is no longer a "core module" but a "component" that imports `wasi:cli/run` and `wasi:io/streams`. |
@@ -47,7 +51,7 @@
 
 
 
-**Perfection Milestone (P3):** Axy is the **reference implementation** for a `wasi-cli` shell. It seamlessly blends high-speed internal commands with secure, sandboxed external component execution.
+**Perfection Milestone (P3):** Axy is the **reference implementation** for a `wasi-cli` shell. It seamlessly blends high-speed internal commands with secure, sandboxed external component execution for *external* WASM components (not the host's canonical JS eval path).
 
 ---
 
@@ -59,6 +63,6 @@
 | :--- | :--- | :--- |
 | **1. `no_std` Investigation** | As the "perfection" goal, investigate a **`no_std` build**. This would require `uutils` and the REPL to be alloc-only, removing all OS dependencies. | A `no_std`-compatible build of Axy that can run on a microcontroller or in-browser. |
 | **2. Binary Size Optimization** | Relentlessly apply `wasm-opt`, LTO (Link Time Optimization), and code-stripping to minimize the final `.wasm` file size. | The Axy monolith (REPL + all `uutils`) is significantly smaller than a traditional C-based `busybox`. |
-| **3. Security & Capability Audit** | Fuzz the parser and command dispatcher. **Verify** that Axy *never* attempts to access a file or network socket that wasn't explicitly granted to it by the host runtime. | Axy passes a full security audit, proving it is 100% compliant with the WASI capability-based security model. |
+| **3. Security & Capability Audit** | Fuzz the parser and command dispatcher. **Verify** that Axy *never* attempts to access a file or network socket that wasn't explicitly granted to it by the host runtime. The canonical model assumes that guests allowed to write to `/dev/host/eval` are trusted by design; audits validate that Axy respects the host-provided capabilities and does not attempt to escalate privileges. | Axy passes a full security audit, proving it is compliant with the WASI capability-based security model. |
 
-**Perfection Milestone (P4):** Axy is released as the gold standard for secure, embedded, and high-performance systems interaction in the WebAssembly era.
+**Perfection Milestone (P4):** Axy is released as the gold standard for secure, embedded, and high-performance systems interaction in the WebAssembly era, under the canonical trusted-by-design runtime model (guests permitted to use `/dev/host/eval` are trusted and their JS executes inline in the host runtime).
