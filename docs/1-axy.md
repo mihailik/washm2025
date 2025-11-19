@@ -11,9 +11,9 @@
 | Crucial Action | Description | Perfection Metric |
 | :--- | :--- | :--- |
 | **1. `uutils` as a Library** | Import `uutils/coreutils` not as binaries, but as a Rust **library crate**. | `cargo build` produces a single library, not 100+ binaries. |
-| **2. Minimal REPL Scaffolding** | Create a simple, blocking `read-eval-print-loop` in Rust. No async, no threads. | The REPL can read one line of text from `stdin`. |
+| **2. Reactor Entrypoint** | Create a library entrypoint (e.g., `axy_submit`) instead of a blocking `main` loop. | The Host can call `axy_submit("echo hi")` and get a result. |
 | **3. Internal Command Dispatcher** | Implement the core `eval` function. This must be a `match` statement or `HashMap` that maps a string (e.g., "ls") directly to an internal Rust function call (e.g., `uutils::ls::main(args)`). | **Zero calls** to `std::process::Command`. All execution is a function call within the same process. |
-| **4. WASI-Core Compilation** | Compile the entire monolith (`REPL + uutils`) to a single `wasm32-wasi` module. | The `.wasm` file runs in a WASI runtime (e.g., Wasmtime) and can execute `ls` on a pre-opened directory. |
+| **4. WASI-Reactor Compilation** | Compile the entire monolith (`REPL + uutils`) to a single `wasm32-wasi` **reactor** module (library). | The `.wasm` file exports `axy_submit` and `_initialize`, allowing the Host to drive the loop. |
 
 **Perfection Milestone (P1):** A working but "dumb" Axy shell that has **successfully axed `fork/exec`**. It proves the core, tightly-coupled architecture works for core utilities.
 
