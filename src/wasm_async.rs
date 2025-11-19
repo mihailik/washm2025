@@ -49,12 +49,10 @@ impl Future for WasmHostFuture {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let cookie = self.cookie;
-        // check result
         let results = RESULTS.get_or_init(|| Mutex::new(HashMap::new()));
         if let Some(res) = results.lock().unwrap().remove(&cookie) {
             return Poll::Ready(Ok(res));
         }
-        // register waker
         let conts = CONTINUATIONS.get_or_init(|| Mutex::new(HashMap::new()));
         conts.lock().unwrap().insert(cookie, cx.waker().clone());
         Poll::Pending
@@ -77,19 +75,16 @@ pub extern "C" fn guest_alloc(size: i32) -> i32 {
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
 pub extern "C" fn _continue(ptr: i32) {
-    // meta: 16 bytes
     if ptr == 0 { return; }
     unsafe {
         let meta = std::slice::from_raw_parts(ptr as *const u8, 16);
         let cookie = u32::from_le_bytes([meta[0], meta[1], meta[2], meta[3]]);
-        // let status = u32::from_le_bytes([meta[4],meta[5],meta[6],meta[7]]);
         let result_size = u32::from_le_bytes([meta[8],meta[9],meta[10],meta[11]]) as usize;
         let result_ptr = u32::from_le_bytes([meta[12],meta[13],meta[14],meta[15]]) as usize;
         let result_slice = std::slice::from_raw_parts(result_ptr as *const u8, result_size);
         let res_string = String::from_utf8_lossy(result_slice).into_owned();
         let results = RESULTS.get_or_init(|| Mutex::new(HashMap::new()));
         results.lock().unwrap().insert(cookie, res_string);
-        // wake
         if let Some(waker) = CONTINUATIONS.get().and_then(|m| m.lock().unwrap().remove(&cookie)) {
             waker.wake();
         }

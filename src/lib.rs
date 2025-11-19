@@ -3,6 +3,7 @@ mod command;
 mod ion_bridge;
 mod uutils_bridge;
 mod wasm_async;
+mod async_test;
 
 use std::slice;
 use std::str;
@@ -35,6 +36,9 @@ pub unsafe extern "C" fn axy_submit(ptr: *const u8, len: usize) -> i32 {
                     }
                     let _ = out.flush();
                     0
+                }
+                "test-async" => {
+                    unsafe { crate::async_test::test_async_callback() }
                 }
                 _ => {
                     eprintln!("axy: command not found: {}", args[0]);
