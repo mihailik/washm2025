@@ -22,7 +22,14 @@ async function ensureEvalDir() {
 async function run(wasmPath) {
   await ensureEvalDir();
 
-  const wasi = new WASI({ preopens: { '/dev/host/eval': EVAL_DIR }, version: 'preview1' });
+  const wasi = new WASI({
+    args: ['washm'],
+    preopens: {
+      '/dev/host/eval': EVAL_DIR,
+      '.': process.cwd()
+    },
+    version: 'preview1'
+  });
   const wasm = await fs.readFile(wasmPath);
   const module = await WebAssembly.compile(wasm);
   const instance = await WebAssembly.instantiate(module, { wasi_snapshot_preview1: wasi.wasiImport });

@@ -9,13 +9,17 @@ license = "MIT"
 [lib]
 crate-type = ["cdylib"]
 
-[dependencies]
-libc = "0.2"
-# ion-shell removed from default dependencies for wasm builds and PoC; it can be added back as
-# path = "ion-fork" for local development. If you need ion, add it as a submodule at the
-# root path with `git submodule add`.
-
 [features]
 # No default feature is included to keep wasm builds minimal.
 default = []
 ion = []
+
+[dependencies]
+libc = "0.2"
+# uutils dependencies
+uu_ls = { path = "coreutils-fork/src/uu/ls" }
+uucore = { path = "coreutils-fork/src/uucore" }
+
+[patch.crates-io]
+hostname = { path = "stubs/hostname" }
+
