@@ -6,6 +6,9 @@ authors = ["Oleg Mihailik <mihailik@gmail.com>"]
 description = "A tiny placeholder washm crate (hello world)."
 license = "MIT"
 
+[lib]
+crate-type = ["cdylib"]
+
 [dependencies]
 libc = "0.2"
 # ion-shell removed from default dependencies for wasm builds and PoC; it can be added back as
