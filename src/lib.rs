@@ -4,6 +4,7 @@ mod ion_bridge;
 mod uutils_bridge;
 mod wasm_async;
 mod async_test;
+mod jobs;
 
 use std::slice;
 use std::str;

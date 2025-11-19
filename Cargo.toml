@@ -19,6 +19,8 @@ libc = "0.2"
 # uutils dependencies
 uu_ls = { path = "coreutils-fork/src/uu/ls" }
 uucore = { path = "coreutils-fork/src/uucore" }
+# ion shell parser
+ion-shell = { path = "ion-fork", optional = true }
 
 [patch.crates-io]
 hostname = { path = "stubs/hostname" }
