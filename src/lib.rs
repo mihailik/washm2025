@@ -19,7 +19,14 @@ mod jobs;
 #[no_mangle]
 pub extern "C" fn _initialize() {
     // Initialization logic here
+    #[cfg(feature = "ion")]
+    {
+        // Start the Ion REPL immediately after initialization.
+        // Errors are ignored; the REPL runs until stdin is closed.
+        let _ = ion_bridge::run(&[]);
+    }
 }
+
 
 // Re-export _continue from wasm_async for the Host
 pub use wasm_async::_continue;
