@@ -59,32 +59,23 @@ impl Future for WasmHostFuture {
     }
 }
 
-// Note: only compiled for wasm32 targets when exported
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub extern "C" fn guest_alloc(size: i32) -> i32 {
-    init_maps();
-    if size <= 0 { return 0; }
-    let vec = vec![0u8; size as usize].into_boxed_slice();
-    let ptr = vec.as_ptr() as usize as i32;
-    // leak allocation so host may write into memory safely
-    LEAKED_ALLOCS.get().unwrap().lock().unwrap().push(vec);
-    ptr
-}
+// Note: guest_alloc removed - host uses VFS-only communication
 
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
-pub extern "C" fn _continue(ptr: i32) {
-    if ptr == 0 { return; }
-    unsafe {
-        let meta = std::slice::from_raw_parts(ptr as *const u8, 16);
-        let cookie = u32::from_le_bytes([meta[0], meta[1], meta[2], meta[3]]);
-        let result_size = u32::from_le_bytes([meta[8],meta[9],meta[10],meta[11]]) as usize;
-        let result_ptr = u32::from_le_bytes([meta[12],meta[13],meta[14],meta[15]]) as usize;
-        let result_slice = std::slice::from_raw_parts(result_ptr as *const u8, result_size);
-        let res_string = String::from_utf8_lossy(result_slice).into_owned();
+pub extern "C" fn _continue(cookie: u32) {
+    // Read result from VFS file
+    let path = std::path::Path::new("/dev/host/eval");
+    let result_file = path.join(format!("{}.json", cookie));
+    
+    if let Ok(result_json) = std::fs::read_to_string(&result_file) {
         let results = RESULTS.get_or_init(|| Mutex::new(HashMap::new()));
-        results.lock().unwrap().insert(cookie, res_string);
+        results.lock().unwrap().insert(cookie, result_json);
+        
+        // Clean up the result file
+        let _ = std::fs::remove_file(&result_file);
+        
+        // Wake the corresponding future
         if let Some(waker) = CONTINUATIONS.get().and_then(|m| m.lock().unwrap().remove(&cookie)) {
             waker.wake();
         }
@@ -105,10 +96,8 @@ pub extern "C" fn send_eval() -> i32 {
     0
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[no_mangle]
-pub extern "C" fn guest_alloc(_size: i32) -> i32 { 0 }
+
 
 #[cfg(not(target_arch = "wasm32"))]
 #[no_mangle]
-pub extern "C" fn _continue(_ptr: i32) { }
+pub extern "C" fn _continue(_cookie: u32) { }

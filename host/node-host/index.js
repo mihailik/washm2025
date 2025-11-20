@@ -24,9 +24,6 @@ async function startHostInstance(wasmPath) {
 
   try { wasi.start(instance); } catch (e) { /* ignore */ }
 
-  const memory = instance.exports.memory;
-  const enc = new TextEncoder();
-
   let stopped = false;
   async function runLoop() {
     while (!stopped) {
@@ -48,28 +45,9 @@ async function startHostInstance(wasmPath) {
             const json = JSON.stringify({ ok: true, result });
             await fs.writeFile(path.join(EVAL_DIR, cookie + '.json'), json, 'utf8');
 
-            const alloc = instance.exports.guest_alloc;
-            let resultPtr = 0;
-            if (typeof alloc === 'function') {
-              resultPtr = alloc(json.length);
-              const buf = new Uint8Array(memory.buffer, resultPtr, json.length);
-              buf.set(enc.encode(json));
-            } else {
-              const fallbackPtr = 8192;
-              const buf = new Uint8Array(memory.buffer, fallbackPtr, json.length);
-              buf.set(enc.encode(json));
-              resultPtr = fallbackPtr;
-            }
-
-            const metaPtr = typeof alloc === 'function' ? alloc(16) : 8360;
-            const dv = new DataView(memory.buffer, metaPtr, 16);
-            dv.setUint32(0, Number(cookie), true);
-            dv.setUint32(4, 0, true);
-            dv.setUint32(8, json.length, true);
-            dv.setUint32(12, resultPtr, true);
-
+            // Notify WASM that result is ready - just pass cookie ID
             if (typeof instance.exports._continue === 'function') {
-              instance.exports._continue(metaPtr);
+              instance.exports._continue(Number(cookie));
             }
 
             await fs.unlink(path.join(EVAL_DIR, f));

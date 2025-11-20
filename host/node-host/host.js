@@ -43,10 +43,6 @@ async function run(wasmPath) {
     // But for random_get to work, wasi must be initialized.
   }
 
-  const memory = instance.exports.memory;
-  const enc = new TextEncoder();
-  const alloc = instance.exports.guest_alloc;
-
   // Background async eval loop
   let stopped = false;
   async function evalLoop() {
@@ -69,26 +65,9 @@ async function run(wasmPath) {
             const json = JSON.stringify({ ok: true, result });
             await fs.writeFile(path.join(EVAL_DIR, cookie + '.json'), json, 'utf8');
 
-            let resultPtr = 0;
-            if (typeof alloc === 'function') {
-              resultPtr = alloc(json.length);
-              const buf = new Uint8Array(memory.buffer, resultPtr, json.length);
-              buf.set(enc.encode(json));
-            } else {
-              resultPtr = 8192;
-              const buf = new Uint8Array(memory.buffer, resultPtr, json.length);
-              buf.set(enc.encode(json));
-            }
-
-            const metaPtr = typeof alloc === 'function' ? alloc(16) : 8360;
-            const dv = new DataView(memory.buffer, metaPtr, 16);
-            dv.setUint32(0, Number(cookie), true);
-            dv.setUint32(4, 0, true);
-            dv.setUint32(8, json.length, true);
-            dv.setUint32(12, resultPtr, true);
-
+            // Notify WASM that result is ready - just pass cookie ID
             if (typeof instance.exports._continue === 'function') {
-              instance.exports._continue(metaPtr);
+              instance.exports._continue(Number(cookie));
             }
 
             await fs.unlink(path.join(EVAL_DIR, f));
@@ -103,56 +82,11 @@ async function run(wasmPath) {
     }
   }
 
+  // Start the passive eval loop
   evalLoop();
-
-  // Input Loop
-  const readline = require('readline');
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: 'axy> '
-  });
-
-  rl.prompt();
-
-  rl.on('line', (line) => {
-    const cmd = line.trim();
-    if (!cmd) {
-      rl.prompt();
-      return;
-    }
-
-    if (typeof instance.exports.axy_submit !== 'function') {
-      console.error('Error: axy_submit export not found in WASM module.');
-      process.exit(1);
-    }
-
-    // Allocate and write string to guest memory
-    const buf = enc.encode(cmd);
-    let ptr = 0;
-    if (typeof alloc === 'function') {
-      ptr = alloc(buf.length);
-    } else {
-      // Fallback (unsafe)
-      ptr = 8192;
-    }
-
-    const memBuf = new Uint8Array(memory.buffer, ptr, buf.length);
-    memBuf.set(buf);
-
-    // Call Reactor
-    try {
-      const exitCode = instance.exports.axy_submit(ptr, buf.length);
-      // console.log(`[Host] Command exited with: ${exitCode}`);
-    } catch (e) {
-      console.error('[Host] Exception in axy_submit:', e);
-    }
-
-    rl.prompt();
-  }).on('close', () => {
-    stopped = true;
-    process.exit(0);
-  });
+  
+  // WASM will handle stdin and REPL - host is now passive
+  console.log('[Host] Starting passive mode - WASM owns all logic');
 }
 
 if (require.main === module) {

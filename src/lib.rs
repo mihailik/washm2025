@@ -60,7 +60,6 @@ pub extern "C" fn _initialize() {
     // Initialization logic here
 }
 
-// Re-export guest_alloc and _continue from wasm_async for the Host
-pub use wasm_async::guest_alloc;
+// Re-export _continue from wasm_async for the Host
 pub use wasm_async::_continue;
 
