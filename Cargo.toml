@@ -7,85 +7,8 @@ description = "A tiny placeholder washm crate (hello world)."
 license = "MIT"
 
 [lib]
-# Also produce `rlib` so other rust crates (e.g. brush-builtins) can link to
-# `washm` types during compilation. Keep `cdylib` for wasm cdylib output.
 crate-type = ["cdylib", "rlib"]
 
-[features]
-# No default feature is included to keep wasm builds minimal.
-default = []
-wasm-minimal = []
-coreutils = [
-	"uu_cat",
-	"uu_cp",
-	"uu_mv",
-	"uu_rm",
-	"uu_mkdir",
-	"uu_touch",
-	"uu_chmod",
-	"uu_chown",
-	"uu_head",
-	"uu_tail",
-	"uu_wc",
-	"uu_sort",
-	"uu_uniq",
-	"uu_cut",
-	"uu_tr",
-	"uu_pwd",
-	"uu_whoami",
-	"uu_date",
-	"uu_env",
-	"uu_basename",
-	"uu_dirname",
-	"uu_ls",
-	"uucore",
-]
-
-
 [dependencies]
-
-# Tier 1 coreutils - File operations
-uu_cat = { path = "coreutils-fork/src/uu/cat", optional = true }
-uu_cp = { path = "coreutils-fork/src/uu/cp", optional = true }
-uu_mv = { path = "coreutils-fork/src/uu/mv", optional = true }
-uu_rm = { path = "coreutils-fork/src/uu/rm", optional = true }
-uu_mkdir = { path = "coreutils-fork/src/uu/mkdir", optional = true }
-uu_touch = { path = "coreutils-fork/src/uu/touch", optional = true }
-uu_chmod = { path = "coreutils-fork/src/uu/chmod", optional = true }
-uu_chown = { path = "coreutils-fork/src/uu/chown", optional = true }
-
-# Tier 1 coreutils - Text processing
-# uu_grep = { path = "coreutils-fork/src/uu/grep" }  # Not in fork
-uu_head = { path = "coreutils-fork/src/uu/head", optional = true }
-uu_tail = { path = "coreutils-fork/src/uu/tail", optional = true }
-uu_wc = { path = "coreutils-fork/src/uu/wc", optional = true }
-uu_sort = { path = "coreutils-fork/src/uu/sort", optional = true }
-uu_uniq = { path = "coreutils-fork/src/uu/uniq", optional = true }
-uu_cut = { path = "coreutils-fork/src/uu/cut", optional = true }
-uu_tr = { path = "coreutils-fork/src/uu/tr", optional = true }
-
-# Tier 1 coreutils - System info
-uu_pwd = { path = "coreutils-fork/src/uu/pwd", optional = true }
-uu_whoami = { path = "coreutils-fork/src/uu/whoami", optional = true }
-uu_date = { path = "coreutils-fork/src/uu/date", optional = true }
-uu_env = { path = "coreutils-fork/src/uu/env", optional = true }
-uu_basename = { path = "coreutils-fork/src/uu/basename", optional = true }
-uu_dirname = { path = "coreutils-fork/src/uu/dirname", optional = true }
-
-# Previously added
-uu_ls = { path = "coreutils-fork/src/uu/ls", optional = true }
-uucore = { path = "coreutils-fork/src/uucore", optional = true }
-
-# Brush shell parser (required)
-# Point to the brush-shell package directory rather than the workspace root
-# so Cargo resolves only the sub-crate and does not attempt to build the entire
-# workspace (which can pull in unrelated crates).
-# Removed `brush-shell` dependency (it created a cyclic workspace dependency). `washm` should
-# be independent and expose the wasm bridge for brush-builtins directly instead of 
-# depending on the brush-shell crate. If necessary, add an optional dev-dependency or a
-# target-specific dependency that doesn't create cycles.
-
-[patch.crates-io]
-hostname = { path = "stubs/hostname" }
-ctrlc = { path = "stubs/ctrlc" }
+# Clean slate: add dependencies back as needed
 
