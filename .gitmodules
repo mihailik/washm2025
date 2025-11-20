@@ -5,6 +5,3 @@
 	path = coreutils-fork
 	url = https://github.com/mavity/coreutils-fork
 ## fish-shell-fork removed; was previously a submodule
-[submodule "ion-fork"]
-	path = ion-fork
-	url = https://github.com/mavity/ion-fork
