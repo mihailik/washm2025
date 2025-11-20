@@ -16,12 +16,43 @@ ion = []
 
 [dependencies]
 libc = "0.2"
-# uutils dependencies
+
+# Tier 1 coreutils - File operations
+uu_cat = { path = "coreutils-fork/src/uu/cat" }
+uu_cp = { path = "coreutils-fork/src/uu/cp" }
+uu_mv = { path = "coreutils-fork/src/uu/mv" }
+uu_rm = { path = "coreutils-fork/src/uu/rm" }
+uu_mkdir = { path = "coreutils-fork/src/uu/mkdir" }
+uu_touch = { path = "coreutils-fork/src/uu/touch" }
+uu_chmod = { path = "coreutils-fork/src/uu/chmod" }
+uu_chown = { path = "coreutils-fork/src/uu/chown" }
+
+# Tier 1 coreutils - Text processing
+# uu_grep = { path = "coreutils-fork/src/uu/grep" }  # Not in fork
+uu_head = { path = "coreutils-fork/src/uu/head" }
+uu_tail = { path = "coreutils-fork/src/uu/tail" }
+uu_wc = { path = "coreutils-fork/src/uu/wc" }
+uu_sort = { path = "coreutils-fork/src/uu/sort" }
+uu_uniq = { path = "coreutils-fork/src/uu/uniq" }
+uu_cut = { path = "coreutils-fork/src/uu/cut" }
+uu_tr = { path = "coreutils-fork/src/uu/tr" }
+
+# Tier 1 coreutils - System info
+uu_pwd = { path = "coreutils-fork/src/uu/pwd" }
+uu_whoami = { path = "coreutils-fork/src/uu/whoami" }
+uu_date = { path = "coreutils-fork/src/uu/date" }
+uu_env = { path = "coreutils-fork/src/uu/env" }
+uu_basename = { path = "coreutils-fork/src/uu/basename" }
+uu_dirname = { path = "coreutils-fork/src/uu/dirname" }
+
+# Previously added
 uu_ls = { path = "coreutils-fork/src/uu/ls" }
 uucore = { path = "coreutils-fork/src/uucore" }
+
 # ion shell parser
 ion-shell = { path = "ion-fork", optional = true }
 
 [patch.crates-io]
 hostname = { path = "stubs/hostname" }
+ctrlc = { path = "stubs/ctrlc" }
 
