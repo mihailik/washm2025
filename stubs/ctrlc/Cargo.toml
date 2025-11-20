@@ -1,8 +1,0 @@
-[package]
-name = "ctrlc"
-version = "3.5.1"
-edition = "2021"
-
-[features]
-default = []
-termination = []
