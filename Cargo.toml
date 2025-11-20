@@ -10,5 +10,16 @@ license = "MIT"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Clean slate: add dependencies back as needed
+# Local Brush fork (submodule at ./brush-fork)
+brush-shell = { path = "brush-fork/brush-shell", package = "brush-shell", default-features = false, features = ["minimal"] }
 
+# uutils/coreutils: import the core library (uucore) directly from the Git repo.
+# This uses the uutils/coreutils repository's "uucore" library crates (common internal crate).
+uucore = { git = "https://github.com/uutils/coreutils.git", package = "uucore", default-features = false }
+
+# Small, platform-neutral runtime helpers used by the guest (JSON I/O + error handling).
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+
+# Selected coreutils crates removed for now; keep the `uucore` library available.

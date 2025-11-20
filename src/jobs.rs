@@ -73,65 +73,19 @@ impl Default for JobManager {
     }
 }
 
-#[cfg(feature = "coreutils")]
-pub fn execute_command_sync(command: &str, args: &[String]) -> i32 {
-    let args_os: Vec<OsString> = args.iter().map(|s| OsString::from(s)).collect();
-    
-    match command {
-        // Tier 1: File operations
-        "cat" => uu_cat::uumain(args_os.into_iter()),
-        "cp" => uu_cp::uumain(args_os.into_iter()),
-        "mv" => uu_mv::uumain(args_os.into_iter()),
-        "rm" => uu_rm::uumain(args_os.into_iter()),
-        "mkdir" => uu_mkdir::uumain(args_os.into_iter()),
-        "touch" => uu_touch::uumain(args_os.into_iter()),
-        "chmod" => uu_chmod::uumain(args_os.into_iter()),
-        "chown" => uu_chown::uumain(args_os.into_iter()),
-        "ls" => uu_ls::uumain(args_os.into_iter()),
-        
-        // Tier 1: Text processing
-        // "grep" => uu_grep::uumain(args_os.into_iter()),  // Not in fork
-        "head" => uu_head::uumain(args_os.into_iter()),
-        "tail" => uu_tail::uumain(args_os.into_iter()),
-        "wc" => uu_wc::uumain(args_os.into_iter()),
-        "sort" => uu_sort::uumain(args_os.into_iter()),
-        "uniq" => uu_uniq::uumain(args_os.into_iter()),
-        "cut" => uu_cut::uumain(args_os.into_iter()),
-        "tr" => uu_tr::uumain(args_os.into_iter()),
-        
-        // Tier 1: System info
-        "pwd" => uu_pwd::uumain(args_os.into_iter()),
-        "whoami" => uu_whoami::uumain(args_os.into_iter()),
-        "date" => uu_date::uumain(args_os.into_iter()),
-        "env" => uu_env::uumain(args_os.into_iter()),
-        "basename" => uu_basename::uumain(args_os.into_iter()),
-        "dirname" => uu_dirname::uumain(args_os.into_iter()),
-        
-        // Built-ins
-        "echo" => {
-            use std::io::Write;
-            let mut out = std::io::stdout();
-            if args.len() > 1 {
-                let _ = writeln!(&mut out, "{}", args[1..].join(" "));
-            } else {
-                let _ = writeln!(&mut out);
-            }
-            let _ = out.flush();
-            0
-        }
-        
-        _ => {
-            eprintln!("axy: command not found: {}", command);
-            127
-        }
-    }
-}
+// Primary `execute_command_sync` now lives below (always uses coreutils/uucore crates as required)
 
-#[cfg(not(feature = "coreutils"))]
+// Keep a minimal set of `uu_*` utilities wired directly; others route to the UutilsBridge
 pub fn execute_command_sync(command: &str, args: &[String]) -> i32 {
-    // Minimal stub for wasm builds: only builtins implemented.
+    let _args_os: Vec<OsString> = args.iter().map(|s| OsString::from(s)).collect();
+
     match command {
-        // Built-ins
+        // Tier 1: File operations (a small subset)
+        "cat" => crate::uutils_bridge::UutilsBridge::run("cat", args),
+        // For now, `ls` delegates to the bridge to avoid heavy crate features for wasm.
+        "ls" => crate::uutils_bridge::UutilsBridge::run("ls", args),
+
+        // Built-ins and simpler utilities
         "echo" => {
             use std::io::Write;
             let mut out = std::io::stdout();
@@ -143,9 +97,12 @@ pub fn execute_command_sync(command: &str, args: &[String]) -> i32 {
             let _ = out.flush();
             0
         }
+
+        "pwd" => crate::uutils_bridge::UutilsBridge::run("pwd", args),
+
+        // Fallback: delegate to UutilsBridge if configured
         _ => {
-            eprintln!("axy: command not found: {}", command);
-            127
+            crate::uutils_bridge::UutilsBridge::run(command, args)
         }
     }
 }
