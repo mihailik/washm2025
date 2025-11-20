@@ -1,8 +1,7 @@
 #[cfg(not(feature = "wasm-minimal"))]
 mod command;
 #[cfg(not(feature = "wasm-minimal"))]
-#[cfg(feature = "ion")]
-mod ion_bridge;
+pub mod brush_bridge;
 #[cfg(not(feature = "wasm-minimal"))]
 mod uutils_bridge;
 mod wasm_async;
@@ -19,11 +18,10 @@ mod jobs;
 #[no_mangle]
 pub extern "C" fn _initialize() {
     // Initialization logic here
-    #[cfg(feature = "ion")]
     {
-        // Start the Ion REPL immediately after initialization.
+        // Start the Brush REPL immediately after initialization.
         // Errors are ignored; the REPL runs until stdin is closed.
-        let _ = ion_bridge::run(&[]);
+        let _ = brush_bridge::run(&[]);
     }
 }
 
