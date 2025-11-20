@@ -1,6 +1,6 @@
 # 🚀 Project Axy: A Strategic Plan for the WASI Shell
 
-**Mission:** To create the reference implementation for a secure, high-performance, and portable systems shell for the WebAssembly (WASI) ecosystem. Axy will fuse a modern, asynchronous REPL (the "Ion-Lite" head) with a memory-safe, synchronous core (the "uutils" library) via an internal function-call architecture — but replace Fish with Ion as the canonical front-end for portability and WASI fitness.
+**Mission:** To create the reference implementation for a secure, high-performance, and portable systems shell for the WebAssembly (WASI) ecosystem. Axy will fuse a modern, asynchronous REPL (the "Brush" head, provided from `brush-fork/`) with a memory-safe, synchronous core (the "uutils" library) via an internal function-call architecture — adopting the Brush shell as the canonical front-end for portability and WASI fitness.
 
 ---
 
@@ -21,18 +21,18 @@
 
 ---
 
-## Phase 2: The Asynchronous Head (Ion-Lite Integration)
+## Phase 2: The Asynchronous Head (Brush Integration)
 
-**Goal:** Integrate the user-friendly, asynchronous REPL features from Fish to create a modern, non-blocking user experience.
+**Goal:** Integrate the user-friendly, asynchronous REPL features from Brush to create a modern, non-blocking user experience.
 
 | Crucial Action | Description | Perfection Metric |
 | :--- | :--- | :--- |
-| **1. Ion Component Isolation** | **Isolate and adapt** the core REPL components from Ion and the UX ecosystem: the parser, history manager, prompt rendering, and completion engine — remove Unix-specific dependencies and make them async-friendly. | Port the useful pieces to idiomatic, `unsafe`-free Rust and compile them as part of the Axy crate.
+| **1. Brush Component Isolation** | **Isolate and adapt** the core REPL components from Brush (in `brush-fork/`) and the UX ecosystem: the parser, history manager, prompt rendering, and completion engine — remove Unix-specific dependencies and make them async-friendly. | Port the useful pieces to idiomatic, `unsafe`-free Rust and compile them as part of the Axy crate.
 | **2. Async REPL Architecture** | Re-architect the Phase 1 REPL to be **asynchronous**. The main loop now `await`s user input, while background tasks (like prompt generation) can run concurrently. | The Axy prompt can display (for example) `git` status without blocking user input. |
 | **3. Feature Integration** | Wire the asynchronous REPL to the **synchronous command dispatcher** from Phase 1. The shell *feels* fast, but the execution of `uutils` commands remains simple, blocking function calls. | The shell provides full syntax highlighting and tab-completion for its *internal* `uutils` commands. |
 
 
 
-**Perfection Milestone (P2):** The Axy shell **feels** like a modern, responsive shell — an `Ion`-centric async head on a `uutils` sync core.
+**Perfection Milestone (P2):** The Axy shell **feels** like a modern, responsive shell — a Brush-centric async head on a `uutils` sync core.
 
 ---
