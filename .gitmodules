@@ -5,3 +5,6 @@
 	path = coreutils-fork
 	url = https://github.com/mavity/coreutils-fork
 ## fish-shell-fork removed; was previously a submodule
+[submodule "brush-fork"]
+	path = brush-fork
+	url = https://github.com/mavity/brush-fork
