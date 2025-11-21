@@ -20,18 +20,27 @@ global.process = process;
 async function run() {
 
   let wasmPath = process.argv[2];
-  if (!wasmPath) {
-    wasmPath = path.resolve(__dirname, 'target/wasm32-wasip1/debug/washm.wasm');
+  // If argv[2] is missing or looks like a flag (starts with -), assume it's not the wasm file
+  if (!wasmPath || wasmPath.startsWith('-')) {
+    // Try release first as it is likely more up-to-date in this workflow
+    wasmPath = path.resolve(__dirname, 'target/wasm32-wasip1/release/washm.wasm');
     try {
       await fs.access(wasmPath);
     } catch (e) {
-      wasmPath = path.resolve(__dirname, 'washm.wasm');
+      // Fallback to debug
+      wasmPath = path.resolve(__dirname, 'target/wasm32-wasip1/debug/washm.wasm');
       try {
         await fs.access(wasmPath);
       } catch (e) {
-        console.error('usage: node axy.js <guest.wasm>');
-        process.exit(2);
-        return;
+        // Fallback to local file
+        wasmPath = path.resolve(__dirname, 'washm.wasm');
+        try {
+          await fs.access(wasmPath);
+        } catch (e) {
+          console.error('usage: node axy.js <guest.wasm>');
+          process.exit(2);
+          return;
+        }
       }
     }
   }

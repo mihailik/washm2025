@@ -1,6 +1,5 @@
 use crate::wasm_async::WasmHostFuture;
-use std::future::Future;
-use brush_shell::brush_core::builtins::{self, SimpleCommand, ContentType};
+use brush_shell::brush_core::builtins::{SimpleCommand, ContentType};
 use brush_shell::brush_core::{commands, results, error};
 
 struct CatCommand;
@@ -29,7 +28,7 @@ pub async fn host_eval(js: &str) -> Result<String, &'static str> {
     WasmHostFuture::new(js).await
 }
 
-pub fn run(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
+pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     // When brush-fork is added, register `host_eval` and start the interactive
     // shell. For now, this is a no-op stub that returns success.
     {
@@ -75,7 +74,7 @@ pub fn run(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
                 brush_shell::brush_core::builtins::simple_builtin::<CatCommand>(),
             ));
 
-            brush_shell::entry::run_custom(args, extra_builtins);
+            brush_shell::embedded::run_custom(args, extra_builtins);
         }
     }
 
