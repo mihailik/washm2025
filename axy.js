@@ -8,7 +8,10 @@
 
 const fs = require('fs/promises');
 const path = require('path');
-const { WASI } = require('wasi');
+// NOTE: `require('wasi')` triggers a Node experimental warning when loaded.
+// We want to be able to suppress that warning early if the user didn't pass
+// `--verbose`. We therefore delay requiring `wasi` until after we've examined
+// command-line args and temporarily patched `process.emitWarning`.
 const { TextDecoder, TextEncoder } = require('util');
 
 // Expose require and process globally for AsyncFunction access
@@ -21,31 +24,54 @@ async function run() {
 
   // support a `--check` flag to print module summary before instantiating
   const cliArgs = process.argv.slice(2);
+  const isVerbose = cliArgs.includes("--verbose");
+
+  // If the user didn't pass `--verbose`, temporarily override
+  // `process.emitWarning` to quietly drop ExperimentalWarning messages while
+  // we require and initialize the `wasi` module. We restore the original
+  // implementation immediately afterwards so other relevant warnings still
+  // surface.
+  let _origEmitWarning = null;
+  let _didOverride = false;
+  if (!isVerbose && typeof process !== 'undefined' && typeof process.emitWarning === 'function') {
+    _origEmitWarning = process.emitWarning;
+    process.emitWarning = function (warning, ...rest) {
+      try {
+        const name = warning && typeof warning === 'object' && warning.name ? warning.name : undefined;
+        const msg = typeof warning === 'string' ? warning : (warning && warning.message) || '';
+        if ((name && name === 'ExperimentalWarning') || (msg && /WASI is an experimental feature/i.test(msg))) {
+          // Drop this specific Node experimental warning silently.
+          return;
+        }
+      } catch (e) {
+        // Fall through to the original handler on failure.
+      }
+      return _origEmitWarning.call(process, warning, ...rest);
+    };
+    _didOverride = true;
+  }
   const hasCheck = cliArgs.includes('--check');
   const checkOnly = cliArgs.includes('--check-only');
   // detect wasm path as the first non-flag argument; otherwise we'll use defaults later
   let wasmPath = cliArgs.find(a => !a.startsWith('-'));
   // If argv[2] is missing or looks like a flag (starts with -), assume it's not the wasm file
   if (!wasmPath || wasmPath.startsWith('-')) {
-    // Try release first as it is likely more up-to-date in this workflow
-    wasmPath = path.resolve(__dirname, 'target/wasm32-wasip1/release/washm.wasm');
-    try {
-      await fs.access(wasmPath);
-    } catch (e) {
-      // Fallback to debug
-      wasmPath = path.resolve(__dirname, 'target/wasm32-wasip1/debug/washm.wasm');
+    const viablePaths = ['.', 'target/wasm32-wasip1/release', 'target/wasm32-wasip1/debug'];
+    for (let i = 0; i < viablePaths.length; i++) {
+      const p = viablePaths[i];
+      const candidate = path.resolve(__dirname, p, 'washm.wasm');
+      if (i === viablePaths.length - 1) {
+        // Last candidate, if not found, we'll error out later
+        await fs.access(candidate);
+        wasmPath = candidate;
+      }
+
       try {
-        await fs.access(wasmPath);
+        await fs.access(candidate);
+        wasmPath = candidate;
+        break;
       } catch (e) {
-        // Fallback to local file
-        wasmPath = path.resolve(__dirname, 'washm.wasm');
-        try {
-          await fs.access(wasmPath);
-        } catch (e) {
-          console.error('usage: node axy.js <guest.wasm>');
-          process.exit(2);
-          return;
-        }
+        // continue
       }
     }
   }
@@ -63,6 +89,12 @@ async function run() {
     guestArgs = [];
   }
   const wasiArgs = guestArgs;
+  let WASI = require('wasi').WASI;
+  if (_didOverride && _origEmitWarning) {
+    // restore original `process.emitWarning` now that `wasi` has been required
+    process.emitWarning = _origEmitWarning;
+  }
+
   const wasi = new WASI({
     args: wasiArgs,
     preopens: { [process.cwd()]: process.cwd() },
@@ -107,7 +139,7 @@ async function run() {
       const fd = nextFakeFd++;
       fdToVfs.set(fd, { path: p, pos: 0, mode: 'rw' });
       if (!evalVfs.has(p)) evalVfs.set(p, { js: '', json: null });
-      try { writeU32(fd_out_ptr, fd); } catch (e) {}
+      try { writeU32(fd_out_ptr, fd); } catch (e) { }
       return 0;
     }
     return orig.path_open(dirfd, dirflags, path_ptr, path_len, oflags, fs_rights_base, fs_rights_inheriting, fdflags, fd_out_ptr);
@@ -124,7 +156,7 @@ async function run() {
         entry.js += text; evalVfs.set(fdToVfs.get(fd).path, entry);
         total += bufLen;
       }
-      try { writeU32(nwritten_ptr, total); } catch (e) {}
+      try { writeU32(nwritten_ptr, total); } catch (e) { }
       return 0;
     }
     return orig.fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr);
@@ -141,7 +173,7 @@ async function run() {
         new Uint8Array(mem.buffer, bufPtr, toWrite).set(bytes);
         total += toWrite;
       }
-      try { writeU32(nread_ptr, total); } catch (e) {}
+      try { writeU32(nread_ptr, total); } catch (e) { }
       return 0;
     }
     return orig.fd_read(fd, iovs_ptr, iovs_len, nread_ptr);
@@ -157,7 +189,7 @@ async function run() {
           try {
             let isAsync = false;
             try { new Function(jsText); } catch (e) { if (e instanceof SyntaxError) isAsync = true; else throw e; }
-            if (isAsync) { const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor; const fn = new AsyncFunction(jsText); result = await fn(); }
+            if (isAsync) { const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor; const fn = new AsyncFunction(jsText); result = await fn(); }
             else result = eval(jsText);
             if (result instanceof Promise) result = await result;
           } catch (err) { result = { error: String(err) }; }
@@ -318,7 +350,7 @@ function printWasmSummary(wasmPath, wasmBuffer) {
         const snippet = snippetForCustomSection(new Uint8Array(raw[0]));
         console.log(`    sample: ${snippet}`);
       }
-    } catch (_) {}
+    } catch (_) { }
   });
   if (customSections.length > customLimit) console.log(`  ... and ${customSections.length - customLimit} more`);
 
