@@ -32,6 +32,13 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     // When brush-fork is added, register `host_eval` and start the interactive
     // shell. For now, this is a no-op stub that returns success.
     {
+        // Try to get terminal size to verify TTY integration
+        if let Ok((cols, rows)) = crate::tty::size() {
+            println!("TTY Size: {}x{}", cols, rows);
+        } else {
+            println!("TTY Size: unavailable");
+        }
+
         // Start brush's `run()` entrypoint. `brush-shell` exposes `entry::run`.
         // Note: this will process arguments and may call `process::exit` in
         // some configurations; we catch and map it into a return value.

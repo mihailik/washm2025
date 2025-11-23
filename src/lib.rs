@@ -2,6 +2,7 @@ mod command;
 pub mod brush_bridge;
 mod uutils_bridge;
 mod wasm_async;
+pub mod tty;
 mod async_test;
 mod jobs;
 

@@ -59,6 +59,26 @@ impl Future for WasmHostFuture {
     }
 }
 
+pub fn eval_blocking(js: &str) -> Result<String, String> {
+    init_maps();
+    let cookie = next_cookie();
+    let path = Path::new("/dev/host/eval");
+    if !path.exists() {
+        let _ = fs::create_dir_all(path);
+    }
+    let req = path.join(format!("{}.js", cookie));
+    let _ = fs::write(req, js.as_bytes());
+    
+    loop {
+        let mut results = RESULTS.get().unwrap().lock().unwrap();
+        if let Some(res) = results.remove(&cookie) {
+            return Ok(res);
+        }
+        drop(results);
+        std::thread::yield_now();
+    }
+}
+
 // Note: guest_alloc removed - host uses VFS-only communication
 
 #[cfg(target_arch = "wasm32")]
