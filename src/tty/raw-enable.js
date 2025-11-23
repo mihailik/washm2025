@@ -1,10 +1,11 @@
+// raw-enable.js
+// Enables raw mode.
+// This is a stub. In a real implementation, this would call the host's setRawMode.
 try {
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
-    ({ ok: true })
-  } else {
-    ({ ok: false, error: "not a tty" })
-  }
+    if (process.stdin.setRawMode) {
+        process.stdin.setRawMode(true);
+    }
+    return { ok: true };
 } catch (e) {
-  ({ ok: false, error: String(e) })
+    return { ok: false, error: e.toString() };
 }

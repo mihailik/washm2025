@@ -1,0 +1,17 @@
+[package]
+name = "crossterm"
+version = "0.29.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"], optional = true }
+bitflags = "2.0"
+parking_lot = "0.12"
+# The crossterm shim shouldn't depend on the runtime; it exposes delegate setters that other
+# crates (like `brush-shell`) can use to register platform-specific implementations.
+
+[features]
+default = []
+serde = ["dep:serde"]
+event-stream = []
+bracketed-paste = []

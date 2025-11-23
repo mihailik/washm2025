@@ -15,18 +15,7 @@ struct TtyResult {
 
 pub fn enable_raw_mode() -> Result<(), String> {
     let res_json = eval_blocking(RAW_ENABLE_JS)?;
-    // The result from eval is a JS object, which axy.js serializes to JSON.
-    // Wait, axy.js does: entry.json = JSON.stringify({ ok: true, result });
-    // So the result we get in Rust is `{ "ok": true, "result": { "ok": true, ... } }`.
-    // We need to parse that wrapper first?
-    // Let's check axy.js again.
-    
-    // axy.js:
-    // entry.json = JSON.stringify({ ok: true, result });
-    
-    // So the string we read in Rust is `{"ok":true,"result":...}`.
-    // But `eval_blocking` returns that string.
-    
+
     #[derive(Deserialize)]
     struct HostResult {
         ok: bool,

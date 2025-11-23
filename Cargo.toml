@@ -22,9 +22,13 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
 
-# Selected coreutils crates removed for now; keep the `uucore` library available.
+# Allow washm to register platform delegates into the crossterm shim.
+crossterm = { path = "shims/crossterm" }
 
 [profile.release]
 opt-level = "z"
 codegen-units = 1
 panic = "abort"
+
+[patch.crates-io]
+crossterm = { path = "shims/crossterm" }
