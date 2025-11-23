@@ -2,16 +2,24 @@
   "name": "washm",
   "description": "WASM shell: Bash inside WASM",
   "version": "0.1.2",
-  "keywords": ["MIT", "WASM", "WebAssembly", "WASI", "Python", "Pyodide"],
+  "keywords": [
+    "MIT",
+    "WASM",
+    "WebAssembly",
+    "WASI",
+    "Python",
+    "Pyodide"
+  ],
   "author": "Oleg Mihailik",
   "license": "MIT",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "cross-env \"RUSTFLAGS=-C opt-level=z -C codegen-units=1 -C panic=abort\" cargo build -p washm --release --target wasm32-wasip1 && wasm-strip target/wasm32-wasip1/release/washm.wasm && wasm-opt --all-features -Oz target/wasm32-wasip1/release/washm.wasm -o ./washm.wasm"
+    "build": "cargo build -p washm --release --target wasm32-wasip1 && echo wasm-strip && npx wasm-strip target/wasm32-wasip1/release/washm.wasm && echo wasm-opt && npx wasm-opt --all-features -Oz target/wasm32-wasip1/release/washm.wasm -o ./washm.wasm"
   },
   "devDependencies": {
-    "wasmparser": "*",
-    "cross-env": "*"
+     "binaryen": "125.0.0",
+     "wabt": "*",
+     "wasmparser": "*"
   }
 }
