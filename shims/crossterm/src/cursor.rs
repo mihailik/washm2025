@@ -64,3 +64,51 @@ impl Command for Show {
         write!(f, "\x1b[?25h")
     }
 }
+
+pub struct SavePosition;
+impl Command for SavePosition {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "\x1b[s")
+    }
+}
+
+pub struct RestorePosition;
+impl Command for RestorePosition {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "\x1b[u")
+    }
+}
+
+pub fn position() -> std::io::Result<(u16, u16)> {
+    // Return a default position (0,0) for environments that cannot query the cursor.
+    Ok((0, 0))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorShape {
+    Default,
+    BlinkingBlock,
+    SteadyBlock,
+    BlinkingUnderline,
+    SteadyUnderline,
+    BlinkingBar,
+    SteadyBar,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SetCursorStyle(pub CursorShape);
+impl SetCursorStyle {
+    pub const DefaultUserShape: SetCursorStyle = SetCursorStyle(CursorShape::Default);
+    pub const BlinkingBlock: SetCursorStyle = SetCursorStyle(CursorShape::BlinkingBlock);
+    pub const SteadyBlock: SetCursorStyle = SetCursorStyle(CursorShape::SteadyBlock);
+    pub const BlinkingUnderline: SetCursorStyle = SetCursorStyle(CursorShape::BlinkingUnderline);
+    pub const SteadyUnderline: SetCursorStyle = SetCursorStyle(CursorShape::SteadyUnderline);
+    pub const BlinkingBar: SetCursorStyle = SetCursorStyle(CursorShape::BlinkingBar);
+    pub const SteadyBar: SetCursorStyle = SetCursorStyle(CursorShape::SteadyBar);
+}
+impl Command for SetCursorStyle {
+    fn write_ansi(&self, _f: &mut impl fmt::Write) -> fmt::Result {
+        // No-op in the wasm shim. Some terminals support setting styles via CSI sequences.
+        Ok(())
+    }
+}

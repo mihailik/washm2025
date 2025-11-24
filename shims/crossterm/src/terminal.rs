@@ -14,6 +14,11 @@ pub fn size() -> std::io::Result<(u16, u16)> {
     platform::size()
 }
 
+pub fn supports_keyboard_enhancement() -> std::io::Result<bool> {
+    // WASM environment may not support keyboard enhancement queries; return false by default.
+    Ok(false)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClearType {
     All,

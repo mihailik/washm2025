@@ -2,6 +2,7 @@ use std::time::Duration;
 use std::io;
 use crate::Command;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum KeyCode {
     Backspace,
@@ -33,6 +34,7 @@ pub enum KeyCode {
     Modifier(ModifierKeyCode),
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum MediaKeyCode {
     Play,
@@ -50,6 +52,7 @@ pub enum MediaKeyCode {
     MuteVolume,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum ModifierKeyCode {
     LeftShift,
@@ -81,6 +84,7 @@ bitflags::bitflags! {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum KeyEventKind {
     Press,
@@ -96,6 +100,7 @@ bitflags::bitflags! {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
 pub struct KeyEvent {
     pub code: KeyCode,
@@ -144,6 +149,7 @@ impl From<KeyCode> for KeyEvent {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum MouseButton {
     Left,
@@ -151,6 +157,7 @@ pub enum MouseButton {
     Middle,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum MouseEventKind {
     Down(MouseButton),
@@ -163,6 +170,7 @@ pub enum MouseEventKind {
     ScrollRight,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
 pub struct MouseEvent {
     pub kind: MouseEventKind,
@@ -171,6 +179,7 @@ pub struct MouseEvent {
     pub modifiers: KeyModifiers,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Hash)]
 pub enum Event {
     FocusGained,
@@ -240,6 +249,51 @@ pub fn poll(_timeout: Duration) -> io::Result<bool> {
     // But wait, if we are the only thread, blocking is fine?
     
     Ok(true)
+}
+
+// Manual serde impls for bitflag types when the `serde` feature is enabled.
+#[cfg(feature = "serde")]
+mod serde_impls {
+    use super::*;
+    use serde::{Serialize, Serializer, Deserialize, Deserializer};
+
+    impl Serialize for KeyModifiers {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            serializer.serialize_u8(self.bits())
+        }
+    }
+
+    impl<'de> Deserialize<'de> for KeyModifiers {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let v = u8::deserialize(deserializer)?;
+            Ok(KeyModifiers::from_bits_truncate(v))
+        }
+    }
+
+    impl Serialize for KeyEventState {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            serializer.serialize_u8(self.bits())
+        }
+    }
+
+    impl<'de> Deserialize<'de> for KeyEventState {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let v = u8::deserialize(deserializer)?;
+            Ok(KeyEventState::from_bits_truncate(v))
+        }
+    }
 }
 
 // Commands
