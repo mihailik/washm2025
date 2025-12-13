@@ -49,14 +49,15 @@ fluent = "0.17"
 fluent-syntax = "0.12"
 fluent-bundle = "0.16"
 unic-langid = "0.9"
-crossterm = "0.29.0"
 # Wasm specific
 getrandom = { version = "0.3", features = ["wasm_js"] }
 uuid = { version = "1.18", features = ["js"] }
+once_cell = "1.21"
 walkdir = "2.5"
 peg = "0.8"
 indenter = "0.3"
 utf8-chars = "3.0"
+crossterm = "0.29.0"
 
 
 [target.'cfg(unix)'.dependencies]
@@ -79,4 +80,5 @@ codegen-units = 1
 panic = "abort"
 
 [patch.crates-io]
-# removed local shims: resolved to crates.io versions
+# Patch crossterm to local small shim for WASM targets to avoid building upstream with unix code
+crossterm = { path = "patches/crossterm" }

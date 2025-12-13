@@ -1,4 +1,5 @@
 use std::io;
+use std::sync::Arc;
 use crossterm::platform::{TtyDelegates, set_tty_delegates};
 
 // Include transformed sources from OUT_DIR
@@ -18,6 +19,8 @@ mod jobs;
 pub mod wasm_async;
 pub mod tty;
 
+// platform shim crate is provided by patches/crossterm via [patch.crates-io]
+
 // Guest REPL and command handling are implemented internally. Host-driven axy_submit removed.
 
 // Host-driven `axy_submit` removed. The guest runs its own REPL via WASI `_start`.
@@ -35,13 +38,13 @@ pub extern "C" fn _initialize() {
     // Register the platform delegates with the crossterm shim so it can
     // call into `washm::tty` without creating a dependency cycle.
     set_tty_delegates(TtyDelegates {
-        enable_raw_mode: Box::new(|| {
+        enable_raw_mode: Arc::new(|| {
             crate::tty::enable_raw_mode().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
         }),
-        disable_raw_mode: Box::new(|| {
+        disable_raw_mode: Arc::new(|| {
             crate::tty::disable_raw_mode().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
         }),
-        size: Box::new(|| {
+        size: Arc::new(|| {
             crate::tty::size().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
         }),
     });
