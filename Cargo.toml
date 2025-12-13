@@ -49,7 +49,7 @@ fluent = "0.17"
 fluent-syntax = "0.12"
 fluent-bundle = "0.16"
 unic-langid = "0.9"
-crossterm = { path = "shims/crossterm" }
+crossterm = "0.29.0"
 # Wasm specific
 getrandom = { version = "0.3", features = ["wasm_js"] }
 uuid = { version = "1.18", features = ["js"] }
@@ -79,5 +79,4 @@ codegen-units = 1
 panic = "abort"
 
 [patch.crates-io]
-crossterm = { path = "shims/crossterm" }
-fd-lock = { path = "shims/fd-lock" }
+# removed local shims: resolved to crates.io versions
