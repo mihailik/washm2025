@@ -148,7 +148,10 @@ fn patch_files(dir: &Path) {
                 format!("{}crate::{}::", &caps[1], &caps[2])
             }).to_string();
 
-                    // No longer redirecting crossterm usage here. We provide a local crate patch instead.
+            // Patch: Redirect crossterm to our local shim
+            new_content = new_content.replace("crossterm::", "crate::crossterm_shim::");
+            new_content = new_content.replace("use crossterm;", "use crate::crossterm_shim as crossterm;");
+            new_content = new_content.replace("use crossterm ", "use crate::crossterm_shim ");
 
             // 4. Special case: Disable conflicting blanket impl in brush-core/src/error.rs
             if path.to_string_lossy().ends_with("brush-core/src/error.rs") {

@@ -1,4 +1,4 @@
-// Minimal patch crate implementing a subset of Crossterm API so our project
+// Minimal patch module implementing a subset of Crossterm API so our project
 // and dependencies compile for WASM targets. It intentionally provides no-op
 // implementations or stubs for platform-specific functionality.
 use std::io;
@@ -76,6 +76,6 @@ impl<W: std::io::Write + ?Sized> QueueableCommand for W {
 }
 
 #[macro_export]
-macro_rules! execute { ($writer:expr, $($command:expr),* $(,)?) => {{ use $crate::ExecutableCommand; let mut res = Ok(&mut $writer); $( if res.is_ok() { res = res.unwrap().execute($command); } )* res.map(|_| ()) }} }
+macro_rules! execute { ($writer:expr, $($command:expr),* $(,)?) => {{ use $crate::crossterm_shim::ExecutableCommand; let mut res = Ok(&mut $writer); $( if res.is_ok() { res = res.unwrap().execute($command); } )* res.map(|_| ()) }} }
 #[macro_export]
-macro_rules! queue { ($writer:expr, $($command:expr),* $(,)?) => {{ use $crate::QueueableCommand; let mut res = Ok(&mut $writer); $( if res.is_ok() { res = res.unwrap().queue($command); } )* res.map(|_| ()) }} }
+macro_rules! queue { ($writer:expr, $($command:expr),* $(,)?) => {{ use $crate::crossterm_shim::QueueableCommand; let mut res = Ok(&mut $writer); $( if res.is_ok() { res = res.unwrap().queue($command); } )* res.map(|_| ()) }} }

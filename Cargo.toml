@@ -57,7 +57,6 @@ walkdir = "2.5"
 peg = "0.8"
 indenter = "0.3"
 utf8-chars = "3.0"
-crossterm = "0.29.0"
 
 
 [target.'cfg(unix)'.dependencies]
@@ -79,6 +78,3 @@ opt-level = "z"
 codegen-units = 1
 panic = "abort"
 
-[patch.crates-io]
-# Patch crossterm to local small shim for WASM targets to avoid building upstream with unix code
-crossterm = { path = "patches/crossterm" }
