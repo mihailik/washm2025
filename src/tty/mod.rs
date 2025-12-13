@@ -1,9 +1,11 @@
 use crate::wasm_async::eval_blocking;
 use serde::Deserialize;
 
-const RAW_ENABLE_JS: &str = include_str!("./tty/raw-enable.js");
-const RAW_DISABLE_JS: &str = include_str!("./tty/raw-disable.js");
-const SIZE_JS: &str = include_str!("./tty/size.js");
+pub mod crossterm_shim;
+
+const RAW_ENABLE_JS: &str = include_str!("raw-enable.js");
+const RAW_DISABLE_JS: &str = include_str!("raw-disable.js");
+const SIZE_JS: &str = include_str!("size.js");
 
 #[derive(Deserialize)]
 struct TtyResult {

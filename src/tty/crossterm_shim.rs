@@ -1,7 +1,6 @@
 // Minimal patch module implementing a subset of Crossterm API so our project
 // and dependencies compile for WASM targets. It intentionally provides no-op
 // implementations or stubs for platform-specific functionality.
-use std::io;
 pub mod platform {
     pub use super::platform_shim::{TtyDelegates, set_tty_delegates};
 }

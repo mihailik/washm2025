@@ -1,6 +1,6 @@
 use std::io;
 use std::sync::Arc;
-use crate::crossterm_shim::platform::{TtyDelegates, set_tty_delegates};
+use crate::tty::crossterm_shim::platform::{TtyDelegates, set_tty_delegates};
 
 // Include transformed sources from OUT_DIR
 pub mod brush_parser { include!(concat!(env!("OUT_DIR"), "/brush-parser/src/lib.rs")); }
@@ -18,7 +18,6 @@ mod jobs;
 
 pub mod wasm_async;
 pub mod tty;
-pub mod crossterm_shim;
 
 // Guest REPL and command handling are implemented internally. Host-driven axy_submit removed.
 
