@@ -1,5 +1,14 @@
 use std::io;
 use crossterm::platform::{TtyDelegates, set_tty_delegates};
+
+// Include transformed sources from OUT_DIR
+pub mod brush_parser { include!(concat!(env!("OUT_DIR"), "/brush-parser/src/lib.rs")); }
+pub mod brush_core { include!(concat!(env!("OUT_DIR"), "/brush-core/src/lib.rs")); }
+pub mod brush_builtins { include!(concat!(env!("OUT_DIR"), "/brush-builtins/src/lib.rs")); }
+pub mod brush_interactive { include!(concat!(env!("OUT_DIR"), "/brush-interactive/src/lib.rs")); }
+pub mod brush_shell { include!(concat!(env!("OUT_DIR"), "/brush-shell/src/lib.rs")); }
+pub mod uucore { include!(concat!(env!("OUT_DIR"), "/uucore/src/lib/lib.rs")); }
+
 mod command;
 pub mod brush_bridge;
 mod uutils_bridge;

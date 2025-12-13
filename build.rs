@@ -1,0 +1,251 @@
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
+use regex::Regex;
+
+fn main() {
+    println!("cargo:rerun-if-changed=brush-fork");
+    println!("cargo:rerun-if-changed=coreutils-fork");
+    println!("cargo:rerun-if-changed=build.rs");
+
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let out_path = Path::new(&out_dir);
+
+    // Generate stub embedded_locales.rs for uucore
+    let locales_path = out_path.join("embedded_locales.rs");
+    fs::write(locales_path, r#"
+pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
+    None
+}
+"#).unwrap();
+
+    // Define mappings: Source Dir -> Dest Dir Name
+    let mappings = vec![
+        ("brush-fork/brush-core", "brush-core"),
+        ("brush-fork/brush-builtins", "brush-builtins"),
+        ("brush-fork/brush-parser", "brush-parser"),
+        ("brush-fork/brush-interactive", "brush-interactive"),
+        ("brush-fork/brush-shell", "brush-shell"),
+        ("coreutils-fork/src/uucore", "uucore"),
+    ];
+
+    for (src, dest_name) in mappings {
+        let src_path = Path::new(src).join("src");
+        let dest_path = out_path.join(dest_name).join("src");
+
+        if dest_path.exists() {
+            fs::remove_dir_all(&dest_path).unwrap();
+        }
+        fs::create_dir_all(dest_path.parent().unwrap()).unwrap();
+
+        // Copy directory
+        let mut options = fs_extra::dir::CopyOptions::new();
+        options.overwrite = true;
+        options.copy_inside = true;
+        
+        if let Err(e) = fs_extra::dir::copy(&src_path, dest_path.parent().unwrap(), &options) {
+            eprintln!("Failed to copy {:?} to {:?}: {}", src_path, dest_path.parent().unwrap(), e);
+            panic!("Failed to copy source");
+        }
+
+        // Patch files
+        patch_files(&dest_path);
+
+        // Create embedded.rs for brush-shell
+        if dest_name == "brush-shell" {
+            let embedded_path = dest_path.join("embedded.rs");
+            fs::write(embedded_path, r#"
+use crate::brush_shell::args::CommandLineArgs;
+use crate::brush_shell::entry;
+use std::collections::HashMap;
+
+pub fn run_custom(
+    args: Vec<String>,
+    _extra_builtins: impl FnOnce(&mut HashMap<String, crate::brush_core::builtins::Registration>),
+) {
+    let parsed_args = match CommandLineArgs::try_parse_from(args.iter().cloned()) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = e.print();
+            return;
+        }
+    };
+    
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _ = rt.block_on(entry::run_async(args, parsed_args));
+}
+"#).unwrap();
+        }
+    }
+}
+
+fn patch_files(dir: &Path) {
+    let crates = vec![
+        "brush_core",
+        "brush_builtins",
+        "brush_parser",
+        "brush_interactive",
+        "brush_shell",
+        "uucore",
+    ];
+
+    // Regex for `use CRATE`
+    // Matches `use ` followed by CRATE followed by word boundary
+    let use_pattern = format!(r"use\s+({})\b", crates.join("|"));
+    let use_re = Regex::new(&use_pattern).unwrap();
+
+    // Regex for `CRATE::`
+    // Matches (start or non-colon) followed by CRATE followed by ::
+    let path_pattern = format!(r"([^:]|^)\b({})::", crates.join("|"));
+    let path_re = Regex::new(&path_pattern).unwrap();
+
+    // Regex for inner doc comments `//!`
+    let doc_re = Regex::new(r"(?m)^//!").unwrap();
+
+    // Regex for inner attributes `#![...]`
+    let inner_attr_re = Regex::new(r"(?m)^#\!\[.*\]").unwrap();
+
+    for entry in WalkDir::new(dir) {
+        let entry = entry.unwrap();
+        if entry.file_type().is_file() && entry.path().extension().map_or(false, |e| e == "rs") {
+            let path = entry.path();
+            let content = fs::read_to_string(path).unwrap();
+            let mut new_content = content.clone();
+
+            // 0. Replace `crate::` with `crate::CURRENT_CRATE::`
+            // Identify which "crate" this file belongs to
+            let path_str = path.to_string_lossy();
+            let current_crate = if path_str.contains("/brush-parser/") { Some("brush_parser") }
+                else if path_str.contains("/brush-core/") { Some("brush_core") }
+                else if path_str.contains("/brush-builtins/") { Some("brush_builtins") }
+                else if path_str.contains("/brush-interactive/") { Some("brush_interactive") }
+                else if path_str.contains("/brush-shell/") { Some("brush_shell") }
+                else if path_str.contains("/uucore/") { Some("uucore") }
+                else { None };
+
+            if let Some(c_name) = current_crate {
+                // Replace `crate::` with `crate::c_name::`
+                // But avoid `pub(crate)` which doesn't have `::`
+                // Regex: `\bcrate::`
+                let crate_re = Regex::new(r"\bcrate::").unwrap();
+                new_content = crate_re.replace_all(&new_content, format!("crate::{}::", c_name).as_str()).to_string();
+            }
+
+            // 1. Replace `//!` with `//`
+            new_content = doc_re.replace_all(&new_content, "//").to_string();
+
+            // 1.5 Replace `#![...]` with `// #![...]`
+            new_content = inner_attr_re.replace_all(&new_content, "// $0").to_string();
+
+            // 2. Replace `use CRATE` with `use crate::CRATE`
+            new_content = use_re.replace_all(&new_content, |caps: &regex::Captures| {
+                format!("use crate::{}", &caps[1])
+            }).to_string();
+
+            // 3. Replace `CRATE::` with `crate::CRATE::` (if not preceded by :)
+            new_content = path_re.replace_all(&new_content, |caps: &regex::Captures| {
+                format!("{}crate::{}::", &caps[1], &caps[2])
+            }).to_string();
+
+            // 4. Special case: Disable conflicting blanket impl in brush-core/src/error.rs
+            if path.to_string_lossy().ends_with("brush-core/src/error.rs") {
+                let specific_impls = r#"
+// Replacement for blanket impl
+macro_rules! impl_from_error {
+    ($t:ty) => {
+        impl From<$t> for Error {
+            fn from(err: $t) -> Self {
+                Self {
+                    kind: ErrorKind::from(err),
+                    fatal: false,
+                }
+            }
+        }
+    }
+}
+
+impl_from_error!(std::io::Error);
+impl_from_error!(std::num::ParseIntError);
+impl_from_error!(std::num::TryFromIntError);
+impl_from_error!(std::string::FromUtf8Error);
+impl_from_error!(std::str::Utf8Error);
+impl_from_error!(fancy_regex::Error);
+impl_from_error!(std::fmt::Error);
+impl_from_error!(tokio::task::JoinError);
+impl_from_error!(std::time::SystemTimeError);
+impl_from_error!(crate::brush_core::sys::PlatformError);
+impl_from_error!(crate::brush_core::arithmetic::EvalError);
+impl_from_error!(crate::brush_core::parser::WordParseError);
+impl_from_error!(crate::brush_core::parser::TestCommandParseError);
+impl_from_error!(crate::brush_core::parser::BindingParseError);
+impl_from_error!(ErrorKind);
+"#;
+                new_content = new_content.replace(
+                    "impl<T> From<T> for Error",
+                    &format!("{}\n#[cfg(any())] impl<T> From<T> for Error", specific_impls)
+                );
+            }
+
+            // 5. Patch `mod name;` with absolute paths
+            // Regex: ^\s*(pub(?:\([^)]+\))?\s+)?mod\s+(\w+)\s*;
+            let mod_re = Regex::new(r"(?m)^\s*((?:pub(?:\([^)]+\))?\s+)*)mod\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;").unwrap();
+            
+            new_content = mod_re.replace_all(&new_content, |caps: &regex::Captures| {
+                let vis = &caps[1];
+                let mod_name = &caps[2];
+                
+                // Determine potential paths
+                let parent_dir = path.parent().unwrap();
+                let file_stem = path.file_stem().unwrap().to_str().unwrap();
+                
+                let mut search_dirs = vec![];
+                if file_stem == "lib" || file_stem == "mod" {
+                    search_dirs.push(parent_dir.to_path_buf());
+                } else {
+                    search_dirs.push(parent_dir.join(file_stem));
+                }
+                
+                let mut found_path = None;
+                for dir in search_dirs {
+                    let p1 = dir.join(format!("{}.rs", mod_name));
+                    let p2 = dir.join(mod_name).join("mod.rs");
+                    
+                    if p1.exists() {
+                        found_path = Some(p1);
+                        break;
+                    }
+                    if p2.exists() {
+                        found_path = Some(p2);
+                        break;
+                    }
+                }
+                
+                if let Some(p) = found_path {
+                    format!("#[path = \"{}\"]\n{}mod {};", p.display(), vis, mod_name)
+                } else {
+                    // If not found, leave it as is (might be a macro-generated module or cfg-ed out)
+                    caps[0].to_string()
+                }
+            }).to_string();
+
+            // 6. Specific file patches
+            if path.to_string_lossy().ends_with("brush-core/src/expansion.rs") {
+                 new_content = format!("use std::future::Future;\n{}", new_content);
+            }
+
+            if path.to_string_lossy().ends_with("brush-shell/src/entry.rs") {
+                 new_content = new_content.replace("async fn run_async", "pub async fn run_async");
+                 new_content = new_content.replace("fn try_parse_from", "pub fn try_parse_from");
+            }
+            
+            if path.to_string_lossy().ends_with("brush-shell/src/lib.rs") {
+                 new_content.push_str("\npub mod embedded;");
+            }
+
+            if content != new_content {
+                fs::write(path, new_content).unwrap();
+            }
+        }
+    }
+}

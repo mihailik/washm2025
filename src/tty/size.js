@@ -1,0 +1,1 @@
+JSON.stringify({ ok: true, result: { ok: true, rows: 24, cols: 80 } })

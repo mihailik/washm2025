@@ -1,11 +1,11 @@
 use crate::wasm_async::WasmHostFuture;
-use brush_shell::brush_core::builtins::{SimpleCommand, ContentType};
-use brush_shell::brush_core::{commands, results, error};
+use crate::brush_core::builtins::{SimpleCommand, ContentType, ContentOptions};
+use crate::brush_core::{commands, results, error};
 
 struct CatCommand;
 
 impl SimpleCommand for CatCommand {
-    fn get_content(name: &str, _content_type: ContentType) -> Result<String, error::Error> {
+    fn get_content(name: &str, _content_type: ContentType, _options: &ContentOptions) -> Result<String, error::Error> {
         Ok(format!("{} - concatenate files and print on the standard output", name))
     }
 
@@ -75,13 +75,11 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
                 args.push(arg.clone());
             }
 
-            let mut extra_builtins = Vec::new();
-            extra_builtins.push((
-                "cat".to_string(),
-                brush_shell::brush_core::builtins::simple_builtin::<CatCommand>(),
-            ));
+            let extra_builtins = |map: &mut std::collections::HashMap<String, crate::brush_core::builtins::Registration>| {
+                map.insert("cat".to_string(), crate::brush_core::builtins::simple_builtin::<CatCommand>());
+            };
 
-            brush_shell::embedded::run_custom(args, extra_builtins);
+            crate::brush_shell::embedded::run_custom(args, extra_builtins);
         }
     }
 
