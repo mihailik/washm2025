@@ -14,7 +14,7 @@ async function run() {
   const os = require('os');
 
   const cliArgs = process.argv.slice(2);
-  const isVerbose = true; // cliArgs.includes("--verbose");
+  const isVerbose = cliArgs.includes("--verbose");
 
   let _origEmitWarning = null;
   let _didOverride = false;

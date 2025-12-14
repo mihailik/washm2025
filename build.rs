@@ -114,46 +114,6 @@ pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
         // Patch files
         patch_files(&dest_path);
 
-        // For brush-core, inject a crate-local `stubs_impl.rs` so trampolines
-        // that call `crate::stubs_impl::...` resolve inside the vendored crate.
-        if dest_name == "brush-core" {
-            // Read our authoritative host implementations and write them into
-            // the vendored crate without changing the original brush_core
-            // qualified paths. The vendored code is included under
-            // `pub mod brush_core { include!(...) }` so references to
-            // `crate::brush_core::...` remain valid.
-            let host_impl = fs::read_to_string("src/stubs_impl.rs").expect("Failed to read src/stubs_impl.rs");
-            let stubs_impl_path = dest_path.join("stubs_impl.rs");
-            fs::write(&stubs_impl_path, host_impl).expect("Failed to write vendored stubs_impl.rs");
-
-            // Add a module declaration to lib.rs so `crate::stubs_impl` resolves.
-            let lib_rs = dest_path.join("lib.rs");
-            if lib_rs.exists() {
-                let mut lib = fs::read_to_string(&lib_rs).expect("Failed to read vendored lib.rs");
-                let decl = format!("\n#[path = r\"{}\"]\npub mod stubs_impl;\n", stubs_impl_path.display());
-                if !lib.contains("pub mod stubs_impl") {
-                    lib.push_str(&decl);
-                    fs::write(&lib_rs, lib).expect("Failed to patch vendored lib.rs");
-                }
-            }
-            
-            // Ensure any calls that used `crate::stubs_impl::...` are updated to
-            // use the fully-qualified `crate::brush_core::stubs_impl::...` so
-            // they resolve correctly when the vendored source is included as
-            // a submodule in the host crate.
-            for entry in WalkDir::new(&dest_path) {
-                let entry = entry.unwrap();
-                if entry.file_type().is_file() && entry.path().extension().map_or(false, |e| e == "rs") {
-                    let p = entry.path();
-                    let s = fs::read_to_string(p).unwrap();
-                    if s.contains("crate::stubs_impl::") {
-                        let replaced = s.replace("crate::stubs_impl::", "crate::brush_core::stubs_impl::");
-                        fs::write(p, replaced).unwrap();
-                    }
-                }
-            }
-        }
-
         // Create embedded.rs for brush-shell by referencing the canonical
         // `src/embedded_brush_shell.rs` using a relative path computed from
         // the vendored destination. This avoids copying large inline strings
@@ -443,6 +403,14 @@ pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>
                 );
             }
 
+            // Patch: Expose brushctl for use in stubs_impl
+            if path.ends_with(std::path::Path::new("brush-shell/src/lib.rs")) {
+                 new_content = new_content.replace("mod brushctl;", "pub mod brushctl;");
+            }
+            if path.ends_with(std::path::Path::new("brush-shell/src/brushctl.rs")) {
+                 new_content = new_content.replace("pub(crate) trait ShellBuilderBrushBuiltinExt", "pub trait ShellBuilderBrushBuiltinExt");
+            }
+
             // 5. Patch `mod name;` with absolute paths
             // Regex: ^\s*(pub(?:\([^)]+\))?\s+)?mod\s+(\w+)\s*;
             let mod_re = Regex::new(r"(?m)^\s*((?:pub(?:\([^)]+\))?\s+)*)mod\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;").unwrap();
@@ -505,7 +473,7 @@ pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>
                       // Replace the builtin registration to add extra builtins
                       new_content = new_content.replace(
                           "    // Add builtins.\n    let shell = shell.default_builtins(builtin_set).brush_builtins();",
-                          "    // Add builtins.\n    let mut shell = shell.default_builtins(builtin_set).brush_builtins();\n    \n    // Add extra builtins from global registry\n    let shell = crate::brush_core::stubs_impl::add_extra_builtins(shell);"
+                          "    // Add builtins.\n    let shell = crate::stubs_impl::configure_shell(shell, builtin_set);"
                       );
                   }
                  
