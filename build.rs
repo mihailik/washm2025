@@ -175,11 +175,12 @@ pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
     verify_no_stubs(out_path);
 }
 
-fn verified_replace(content: String, from: &str, to: &str, path: &Path) -> String {
-    if !content.contains(from) {
-        panic!("PATCH FAILED: Pattern not found in {:?}\nPattern: '{}'", path, from);
+fn regex_replace(content: String, pattern: &str, replacement: &str, path: &Path) -> String {
+    let re = Regex::new(pattern).unwrap();
+    if !re.is_match(&content) {
+        panic!("PATCH FAILED: Pattern not found in {:?}\nPattern: '{}'", path, pattern);
     }
-    content.replace(from, to)
+    re.replace_all(&content, replacement).to_string()
 }
 
 fn patch_files(dir: &Path) {
@@ -218,116 +219,37 @@ fn patch_files(dir: &Path) {
             // Patch brush-core/src/sys/stubs/users.rs to avoid "operation not supported" on WASI
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/users.rs")) {
                 // Use helpers that read startup JSON at /dev/host/washm/startup and cache values
-                new_content = verified_replace(new_content, "Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current uid\").into())", "Ok(startup_uid())", path);
-                new_content = verified_replace(new_content, "Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current gid\").into())", "Ok(startup_gid())", path);
-                new_content = verified_replace(new_content, "Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting effective uid\").into())", "Ok(startup_uid())", path);
-                new_content = verified_replace(new_content, "Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting effective gid\").into())", "Ok(startup_gid())", path);
-                new_content = verified_replace(new_content, "Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current username\").into())", "Ok(startup_username())", path);
-                // Instead of injecting a huge helper string, create a proper
-                // `startup.rs` helper file alongside `users.rs` and import it.
-                if !new_content.contains("mod startup;") {
-                    // Insert module declaration and re-exports at the top of the file
-                    new_content.insert_str(0, "pub mod startup;\nuse startup::{startup_username, startup_uid, startup_gid};\n\n");
-
-                    // Write a small trampoline helper that delegates to our
-                    // crate-local implementation in `src/host_startup.rs`.
-                    let helper_path = path.parent().unwrap().join(path.file_stem().unwrap()).join("startup.rs");
-                    fs::create_dir_all(path.parent().unwrap().join(path.file_stem().unwrap())).unwrap();
-                    let helper_src = r#"// Trampoline helpers: delegate to `crate::host_startup` implemented
-// in the main crate so complex parsing logic can live in our src tree.
-pub fn startup_username() -> String {
-    crate::host_startup::startup_username()
-}
-
-pub fn startup_uid() -> u32 {
-    crate::host_startup::startup_uid()
-}
-
-pub fn startup_gid() -> u32 {
-    crate::host_startup::startup_gid()
-}
-
-pub fn startup_hostname() -> String {
-    crate::host_startup::startup_hostname()
-}
-"#;
-                    let _ = fs::write(&helper_path, helper_src);
-                }
-                // Ensure the trampoline helper exists even if the module declaration
-                // was present in upstream sources; some upstream revisions included
-                // `pub mod startup;` but did not ship the trampoline helper file.
-                let helper_path = path.parent().unwrap().join(path.file_stem().unwrap()).join("startup.rs");
-                fs::create_dir_all(path.parent().unwrap().join(path.file_stem().unwrap())).unwrap();
-                if !helper_path.exists() {
-                    let helper_src = r#"// Trampoline helpers: delegate to `crate::host_startup` implemented
-// in the main crate so complex parsing logic can live in our src tree.
-pub fn startup_username() -> String {
-    crate::host_startup::startup_username()
-}
-
-pub fn startup_uid() -> u32 {
-    crate::host_startup::startup_uid()
-}
-
-pub fn startup_gid() -> u32 {
-    crate::host_startup::startup_gid()
-}
-
-pub fn startup_hostname() -> String {
-    crate::host_startup::startup_hostname()
-}
-"#;
-                    let _ = fs::write(&helper_path, helper_src);
-                }
+                new_content = regex_replace(new_content, r#"Err\s*\(\s*error::ErrorKind::NotSupportedOnThisPlatform\s*\(\s*"getting current uid"\s*\)\s*\.into\(\)\s*\)"#, "Ok(crate::stubs_impl::startup_uid())", path);
+                new_content = regex_replace(new_content, r#"Err\s*\(\s*error::ErrorKind::NotSupportedOnThisPlatform\s*\(\s*"getting current gid"\s*\)\s*\.into\(\)\s*\)"#, "Ok(crate::stubs_impl::startup_gid())", path);
+                new_content = regex_replace(new_content, r#"Err\s*\(\s*error::ErrorKind::NotSupportedOnThisPlatform\s*\(\s*"getting effective uid"\s*\)\s*\.into\(\)\s*\)"#, "Ok(crate::stubs_impl::startup_uid())", path);
+                new_content = regex_replace(new_content, r#"Err\s*\(\s*error::ErrorKind::NotSupportedOnThisPlatform\s*\(\s*"getting effective gid"\s*\)\s*\.into\(\)\s*\)"#, "Ok(crate::stubs_impl::startup_gid())", path);
+                new_content = regex_replace(new_content, r#"Err\s*\(\s*error::ErrorKind::NotSupportedOnThisPlatform\s*\(\s*"getting current username"\s*\)\s*\.into\(\)\s*\)"#, "Ok(crate::stubs_impl::startup_username())", path);
             }
 
             // Patch brush-core/src/openfiles.rs to avoid panics when cloning isn't supported on WASI
             if path.ends_with(std::path::Path::new("brush-core/src/openfiles.rs")) {
-                new_content = verified_replace(new_content,
-                    r#"impl Clone for OpenFile {
-    fn clone(&self) -> Self {
-        self.try_clone().unwrap()
-    }
-}"#,
-                    r#"impl Clone for OpenFile {
-    fn clone(&self) -> Self {
-        match self.try_clone() {
-            Ok(v) => v,
-            Err(_) => {
-                // Best-effort fallback on platforms where dup/clone is unsupported
-                if matches!(self, Self::Stdin(_)) {
-                    Self::Stdin(std::io::stdin())
-                } else if matches!(self, Self::Stdout(_)) {
-                    Self::Stdout(std::io::stdout())
-                } else if matches!(self, Self::Stderr(_)) {
-                    Self::Stderr(std::io::stderr())
-                } else {
-                    null().unwrap_or_else(|_| Self::Stdin(std::io::stdin()))
-                }
-            }
-        }
-    }
-}"#,
-                    path
-                );
+                // Match `fn clone` signature and the specific `unwrap()` call inside.
+                // We capture the function header in group 1 and the closing brace in group 2.
+                let pattern = r"(?s)(fn\s+clone\s*\([^)]*\)\s*->\s*Self\s*\{\s*)self\.try_clone\(\)\s*\.\s*unwrap\(\)(\s*\})";
+                
+                let replacement = "${1}crate::stubs_impl::clone_open_file(self)${2}";
+                new_content = regex_replace(new_content, pattern, &replacement, path);
             }
 
             // Patch brush-core/src/sys/stubs/network.rs to use host-provided hostname
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/network.rs")) {
-                new_content = verified_replace(new_content,
-                    "pub(crate) fn get_hostname() -> std::io::Result<std::ffi::OsString> {\n    Ok(\"\".into())\n}",
-                    "pub(crate) fn get_hostname() -> std::io::Result<std::ffi::OsString> {\n    // Use host-provided hostname (via startup JSON) when available\n    Ok(std::ffi::OsString::from(super::users::startup::startup_hostname()))\n}",
-                    path
-                );
+                let pattern = r#"(?s)pub\(crate\)\s+fn\s+get_hostname\s*\(\)\s*->\s*std::io::Result<std::ffi::OsString>\s*\{\s*Ok\(""\.into\(\)\)\s*\}"#;
+                let replacement = "pub(crate) fn get_hostname() -> std::io::Result<std::ffi::OsString> {\n    // Use host-provided hostname (via startup JSON) when available\n    Ok(std::ffi::OsString::from(crate::stubs_impl::startup_hostname()))\n}";
+                new_content = regex_replace(new_content, pattern, replacement, path);
             }
 
             // Re-export startup helpers at `crate::brush_core::sys::stubs` so
             // callers like `crate::brush_core::sys::stubs::startup_username()`
             // resolve correctly from other modules/crates.
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs.rs")) {
-                if !new_content.contains("pub use users::startup::") {
-                    new_content.push_str("\n// Re-export startup helpers from users::startup for external use\n");
-                    new_content.push_str("pub use users::startup::{startup_username, startup_uid, startup_gid};\n");
+                if !new_content.contains("pub use crate::stubs_impl::") {
+                    new_content.push_str("\n// Re-export startup helpers from stubs_impl for external use\n");
+                    new_content.push_str("pub use crate::stubs_impl::{startup_username, startup_uid, startup_gid};\n");
                 }
             }
 
@@ -364,59 +286,34 @@ pub fn startup_hostname() -> String {
 
             // Patch brush-core/src/sys/stubs/fs.rs to trampoline to our safe implementation
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/fs.rs")) {
-                let from = r#"pub fn open_null_file() -> Result<std::fs::File, error::Error> {
-    Err(error::ErrorKind::NotSupportedOnThisPlatform("opening null file").into())
-}"#;
+                let pattern = r#"(?s)pub\s+fn\s+open_null_file\s*\(\)\s*->\s*Result<std::fs::File,\s*error::Error>\s*\{\s*Err\(error::ErrorKind::NotSupportedOnThisPlatform\("opening null file"\)\.into\(\)\)\s*\}"#;
                 let to = r#"pub fn open_null_file() -> Result<std::fs::File, error::Error> {
     crate::stubs_impl::open_null_file()
 }"#;
-                new_content = verified_replace(new_content, from, to, path);
+                new_content = regex_replace(new_content, pattern, to, path);
             }
 
             // Patch brush-core/src/sys/stubs/signal.rs to trampoline to our safe implementation
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/signal.rs")) {
-                let from1 = r#"pub(crate) fn continue_process(_pid: sys::process::ProcessId) -> Result<(), error::Error> {
-    Err(error::ErrorKind::NotSupportedOnThisPlatform("continuing process").into())
-}"#;
-                let to1 = r#"pub(crate) fn continue_process(_pid: sys::process::ProcessId) -> Result<(), error::Error> {
-    crate::stubs_impl::continue_process(_pid)
-}"#;
-                new_content = verified_replace(new_content, from1, to1, path);
+                let pattern1 = r#"(?s)(pub\(crate\)\s+fn\s+continue_process\s*\(_pid:\s*sys::process::ProcessId\)\s*->\s*Result<\(\),\s*error::Error>\s*\{)\s*Err\(error::ErrorKind::NotSupportedOnThisPlatform\("continuing process"\)\.into\(\)\)\s*\}"#;
+                let to1 = "${1} crate::stubs_impl::continue_process(_pid) }";
+                new_content = regex_replace(new_content, pattern1, to1, path);
 
-                let from2 = r#"pub fn kill_process(
-    _pid: sys::process::ProcessId,
-    _signal: traps::TrapSignal,
-) -> Result<(), error::Error> {
-    Err(error::ErrorKind::NotSupportedOnThisPlatform("killing process").into())
-}"#;
-                let to2 = r#"pub fn kill_process(
-    _pid: sys::process::ProcessId,
-    _signal: traps::TrapSignal,
-) -> Result<(), error::Error> {
-    crate::stubs_impl::kill_process(_pid, _signal)
-}"#;
-                new_content = verified_replace(new_content, from2, to2, path);
+                let pattern2 = r#"(?s)(pub\s+fn\s+kill_process\s*\(\s*_pid:\s*sys::process::ProcessId,\s*_signal:\s*traps::TrapSignal,\s*\)\s*->\s*Result<\(\),\s*error::Error>\s*\{)\s*Err\(error::ErrorKind::NotSupportedOnThisPlatform\("killing process"\)\.into\(\)\)\s*\}"#;
+                let to2 = "${1} crate::stubs_impl::kill_process(_pid, _signal) }";
+                new_content = regex_replace(new_content, pattern2, to2, path);
             }
 
             // Patch brush-core/src/sys/stubs/commands.rs to trampoline to our safe implementation
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/commands.rs")) {
-                let from = r#"    fn inject_fds(
-        &mut self,
-        mut open_files: impl Iterator<Item = (ShellFd, openfiles::OpenFile)>,
-    ) -> Result<(), error::Error> {
-        if open_files.next().is_some() {
-            return Err(error::ErrorKind::NotSupportedOnThisPlatform("fd redirections").into());
-        }
-
-        Ok(())
-    }"#;
+                let pattern = r#"(?s)fn\s+inject_fds\s*\(\s*&mut\s+self,\s*mut\s+open_files:\s*impl\s+Iterator<Item\s*=\s*\(ShellFd,\s*openfiles::OpenFile\)>\s*,\s*\)\s*->\s*Result<\(\),\s*error::Error>\s*\{\s*if\s+open_files\.next\(\)\.is_some\(\)\s*\{\s*return\s+Err\(error::ErrorKind::NotSupportedOnThisPlatform\("fd redirections"\)\.into\(\)\);\s*\}\s*Ok\(\(\)\)\s*\}"#;
                 let to = r#"    fn inject_fds(
         &mut self,
         mut open_files: impl Iterator<Item = (ShellFd, openfiles::OpenFile)>,
     ) -> Result<(), error::Error> {
         crate::stubs_impl::inject_fds(open_files.collect::<Vec<_>>())
     }"#;
-                new_content = verified_replace(new_content, from, to, path);
+                new_content = regex_replace(new_content, pattern, to, path);
             }
 
 
@@ -540,40 +437,9 @@ pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>
 
             // 4. Special case: Disable conflicting blanket impl in brush-core/src/error.rs
             if path.ends_with(std::path::Path::new("brush-core/src/error.rs")) {
-                let specific_impls = r#"
-// Replacement for blanket impl
-macro_rules! impl_from_error {
-    ($t:ty) => {
-        impl From<$t> for Error {
-            fn from(err: $t) -> Self {
-                Self {
-                    kind: ErrorKind::from(err),
-                    fatal: false,
-                }
-            }
-        }
-    }
-}
-
-impl_from_error!(std::io::Error);
-impl_from_error!(std::num::ParseIntError);
-impl_from_error!(std::num::TryFromIntError);
-impl_from_error!(std::string::FromUtf8Error);
-impl_from_error!(std::str::Utf8Error);
-impl_from_error!(fancy_regex::Error);
-impl_from_error!(std::fmt::Error);
-impl_from_error!(tokio::task::JoinError);
-impl_from_error!(std::time::SystemTimeError);
-impl_from_error!(crate::brush_core::sys::PlatformError);
-impl_from_error!(crate::brush_core::arithmetic::EvalError);
-impl_from_error!(crate::brush_core::parser::WordParseError);
-impl_from_error!(crate::brush_core::parser::TestCommandParseError);
-impl_from_error!(crate::brush_core::parser::BindingParseError);
-impl_from_error!(ErrorKind);
-"#;
                 new_content = new_content.replace(
                     "impl<T> From<T> for Error",
-                    &format!("{}\n#[cfg(any())] impl<T> From<T> for Error", specific_impls)
+                    &format!("include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/brush_error_impls.rs\"));\n#[cfg(any())] impl<T> From<T> for Error")
                 );
             }
 
@@ -636,13 +502,10 @@ impl_from_error!(ErrorKind);
                  
                  // Add extra builtins support (after crate:: patching has already happened)
                  if new_content.contains("crate::brush_core::Shell::builder()") {
-                      // Add global registry at top of file  
-                      new_content = format!("use std::collections::HashMap;\npub static mut EXTRA_BUILTINS: Option<HashMap<String, crate::brush_core::builtins::Registration>> = None;\n\n{}", new_content);
-                      
                       // Replace the builtin registration to add extra builtins
                       new_content = new_content.replace(
                           "    // Add builtins.\n    let shell = shell.default_builtins(builtin_set).brush_builtins();",
-                          "    // Add builtins.\n    let mut shell = shell.default_builtins(builtin_set).brush_builtins();\n    \n    // Add extra builtins from global registry\n    // Use `addr_of!` to avoid creating a shared reference to a `static mut`.\n    if let Some(Some(extras)) = unsafe { std::ptr::addr_of!(EXTRA_BUILTINS).as_ref() } {\n        for (name, reg) in extras {\n            shell = shell.builtin(name.clone(), reg.clone());\n        }\n    }\n    let shell = shell;"
+                          "    // Add builtins.\n    let mut shell = shell.default_builtins(builtin_set).brush_builtins();\n    \n    // Add extra builtins from global registry\n    let shell = crate::brush_core::stubs_impl::add_extra_builtins(shell);"
                       );
                   }
                  

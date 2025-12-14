@@ -26,7 +26,7 @@ pub fn run_custom(
     unsafe {
         let mut builtin_map = HashMap::new();
         extra_builtins(&mut builtin_map);
-        entry::EXTRA_BUILTINS = Some(builtin_map);
+        crate::stubs_impl::EXTRA_BUILTINS = Some(builtin_map);
     }
 
     // Run the async main and record its exit code to a file the host can inspect.
