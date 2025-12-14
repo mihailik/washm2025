@@ -406,7 +406,7 @@ impl_from_error!(ErrorKind);
                       // Replace the builtin registration to add extra builtins
                       new_content = new_content.replace(
                           "    // Add builtins.\n    let shell = shell.default_builtins(builtin_set).brush_builtins();",
-                          "    // Add builtins.\n    let mut shell = shell.default_builtins(builtin_set).brush_builtins();\n    \n    // Add extra builtins from global registry\n    if let Some(extras) = unsafe { EXTRA_BUILTINS.as_ref() } {\n        for (name, reg) in extras {\n            shell = shell.builtin(name.clone(), reg.clone());\n        }\n    }\n    let shell = shell;"
+                          "    // Add builtins.\n    let mut shell = shell.default_builtins(builtin_set).brush_builtins();\n    \n    // Add extra builtins from global registry\n    // Use `addr_of!` to avoid creating a shared reference to a `static mut`.\n    if let Some(Some(extras)) = unsafe { std::ptr::addr_of!(EXTRA_BUILTINS).as_ref() } {\n        for (name, reg) in extras {\n            shell = shell.builtin(name.clone(), reg.clone());\n        }\n    }\n    let shell = shell;"
                       );
                   }
                  
