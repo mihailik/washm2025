@@ -37,7 +37,7 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     // Get arguments to pass to brush
     let raw_args: Vec<String> = std::env::args().collect();
     
-    // Skip host args (executable name, possibly axy.js and wasm file)
+    // Skip host args (executable name, possibly washm.js and wasm file)
     let mut start_index = 1;
     if raw_args.len() > start_index && raw_args[start_index].ends_with(".js") {
         start_index += 1;
@@ -49,6 +49,14 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     // Collect user arguments
     let user_args: Vec<String> = raw_args.iter().skip(start_index).cloned().collect();
     
+    // Change to the host's starting directory
+    if let Ok(start_pwd) = std::fs::read_to_string("/dev/host/washm/start_pwd") {
+        let start_pwd = start_pwd.trim();
+        if !start_pwd.is_empty() {
+            let _ = std::env::set_current_dir(start_pwd);
+        }
+    }
+
     // Build arguments for brush
     let mut args = Vec::new();
     args.push("brush".to_string());
@@ -75,6 +83,7 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
         map.insert("mkdir".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::MkdirCommand>());
         map.insert("rmdir".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::RmdirCommand>());
         map.insert("touch".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::TouchCommand>());
+        // map.insert("pwd".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::PwdCommand>());
         
         #[cfg(feature = "wasm-test")]
         map.insert("test".to_string(), crate::brush_core::builtins::simple_builtin::<crate::test_command::TestCommand>());

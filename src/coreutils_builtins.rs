@@ -27,3 +27,37 @@ make_coreutil!(RmCommand, "rm", "remove files or directories");
 make_coreutil!(MkdirCommand, "mkdir", "make directories");
 make_coreutil!(RmdirCommand, "rmdir", "remove empty directories");
 make_coreutil!(TouchCommand, "touch", "change file timestamps or create files");
+
+pub struct PwdCommand;
+
+impl SimpleCommand for PwdCommand {
+    fn get_content(name: &str, _content_type: crate::brush_core::builtins::ContentType, _options: &crate::brush_core::builtins::ContentOptions) -> Result<String, error::Error> {
+        Ok(format!("{} - print name of current/working directory", name))
+    }
+
+    fn execute<I: Iterator<Item = S>, S: AsRef<str>>(
+        context: commands::ExecutionContext<'_>,
+        _args: I,
+    ) -> Result<results::ExecutionResult, error::Error> {
+        // Read host start path
+        let start_pwd = std::fs::read_to_string("/dev/host/washm/start_pwd")
+            .unwrap_or_else(|_| String::from("/"));
+        let start_pwd = start_pwd.trim();
+
+        // Get shell's current working directory (relative to WASI root)
+        let shell_cwd = context.shell.working_dir();
+        let shell_cwd_str = shell_cwd.to_string_lossy();
+
+        // Combine
+        let final_path = if shell_cwd_str == "/" {
+            std::path::PathBuf::from(start_pwd)
+        } else {
+            let relative = shell_cwd_str.trim_start_matches('/');
+            std::path::Path::new(start_pwd).join(relative)
+        };
+
+        use std::io::Write;
+        writeln!(context.stdout(), "{}", final_path.display())?;
+        Ok(results::ExecutionResult::success())
+    }
+}

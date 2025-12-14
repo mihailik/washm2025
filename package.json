@@ -1,20 +1,25 @@
 {
   "name": "washm",
   "description": "WASM shell: Bash inside WASM",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "keywords": [
     "MIT",
     "WASM",
     "WebAssembly",
     "WASI",
-    "Python",
-    "Pyodide"
+    "bash",
+    "shell"
   ],
   "author": "Oleg Mihailik",
   "license": "MIT",
   "main": "index.js",
+  "bin": "washm.js",
+  "files": [
+    "washm.js",
+    "washm.wasm"
+  ],
   "scripts": {
-    "test": "cargo build --target wasm32-wasip1 --features wasm-test && node axy.js test",
+    "test": "cargo build --target wasm32-wasip1 --features wasm-test && node washm.js test",
     "build": "cargo build -p washm --release --target wasm32-wasip1 && echo wasm-strip && npx wasm-strip target/wasm32-wasip1/release/washm.wasm && echo wasm-opt && npx wasm-opt --enable-bulk-memory -Oz target/wasm32-wasip1/release/washm.wasm -o ./washm.wasm"
   },
   "devDependencies": {

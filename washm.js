@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // @ts-check
 
-/* Node host for WASI Async interop. Implements the /dev/host/eval protocol + _continue.
+/**
+ * Node host for WASI Async interop. Implements the /dev/host/eval protocol + _continue.
    This host uses `node:wasi` and expects a WASM guest compiled for `wasm32-wasi`.
 */
-
 async function run() {
 
   const fs = require('fs/promises');
   const path = require('path');
   const { TextDecoder, TextEncoder } = require('util');
+  const { execSync } = require('child_process');
+  const os = require('os');
 
   const cliArgs = process.argv.slice(2);
   const isVerbose = cliArgs.includes("--verbose");
@@ -143,8 +145,64 @@ async function run() {
 
   const wasi = new WASI({
     args: wasiArgs,
-    // Preopen / to CWD to allow absolute paths to be passed to path_open
-    preopens: { '/': process.cwd() },
+    // Preopen / to / to allow full filesystem access and correct path mapping
+    preopens: (function() {
+        const p = {};
+        if (process.platform === 'win32') {
+            // On Windows, map drives like C:\ to /C:/
+            let found = false;
+            
+            // Method 1: wmic (Standard, no admin required, works on most versions)
+            // Output: "Name\r\nC:\r\nD:"
+            try {
+                const stdout = execSync('wmic logicaldisk get name', { encoding: 'utf8', stdio: 'pipe', windowsHide: true });
+                const lines = stdout.split(/[\r\n]+/);
+                const drives = lines
+                    .map(l => l.trim())
+                    .filter(l => /^[A-Z]:$/.test(l)); // Matches "C:"
+                
+                if (drives.length > 0) {
+                    for (const drive of drives) {
+                        // drive is "C:", we need "C:\" for value
+                        p[`/${drive}/`] = drive + '\\';
+                    }
+                    found = true;
+                }
+            } catch (e) { }
+
+            // Method 2: fsutil (Fast, but requires Admin)
+            if (!found) {
+                try {
+                    const stdout = execSync('fsutil fsinfo drives', { encoding: 'utf8', stdio: 'pipe', windowsHide: true });
+                    const drives = stdout.match(/[A-Z]:\\/g);
+                    if (drives) {
+                        for (const drive of drives) {
+                            const letter = drive.substring(0, 2); // "C:"
+                            p[`/${letter}/`] = drive;
+                        }
+                        found = true;
+                    }
+                } catch (e) { }
+            }
+
+            if (!found) {
+                // Fallback: map the drive of the current working directory
+                const cwdRoot = path.parse(process.cwd()).root; // e.g. "D:\"
+                if (cwdRoot.endsWith(':\\')) {
+                    const drive = cwdRoot.substring(0, 2); // "D:"
+                    p[`/${drive}/`] = cwdRoot;
+                }
+                
+                // Always try C: if it's not the current drive
+                if (cwdRoot.toUpperCase() !== 'C:\\') {
+                     p['/C:/'] = 'C:\\';
+                }
+            }
+        } else {
+            p['/'] = '/';
+        }
+        return p;
+    })(),
     version: 'preview1'
   });
 
