@@ -40,14 +40,22 @@ impl UutilsBridge {
                 }
             }
             "pwd" => {
-                match std::env::current_dir() {
+                match std::fs::read_to_string("/dev/host/washm/start_pwd") {
                     Ok(p) => {
-                        println!("{}", p.display());
+                        println!("{}", p.trim());
                         0
                     }
-                    Err(e) => {
-                        eprintln!("pwd: {}", e);
-                        1
+                    Err(_) => {
+                        match std::env::current_dir() {
+                            Ok(p) => {
+                                println!("{}", p.display());
+                                0
+                            }
+                            Err(e) => {
+                                eprintln!("pwd: {}", e);
+                                1
+                            }
+                        }
                     }
                 }
             }

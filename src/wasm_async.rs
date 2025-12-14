@@ -66,7 +66,7 @@ impl WasmHostFuture {
     pub fn new(js: &str) -> Self {
         init_maps();
         let cookie = next_cookie();
-        let path = Path::new("dev/host/eval");
+        let path = Path::new("/dev/host/eval");
         if !path.exists() {
             let _ = fs::create_dir_all(path);
         }
@@ -97,7 +97,7 @@ pub fn eval_blocking(js: &str) -> Result<String, String> {
     // eprintln!("eval_blocking: starting");
     init_maps();
     let cookie = next_cookie();
-    let path = Path::new("dev/host/eval");
+    let path = Path::new("/dev/host/eval");
     if !path.exists() {
         let _ = fs::create_dir_all(path);
     }
@@ -126,7 +126,7 @@ pub fn eval_blocking(js: &str) -> Result<String, String> {
 #[no_mangle]
 pub extern "C" fn _continue(cookie: u32) {
     // Read result from VFS file
-    let path = std::path::Path::new("dev/host/eval");
+    let path = std::path::Path::new("/dev/host/eval");
     let result_file = path.join(format!("{}.json", cookie));
     
     if let Ok(result_json) = std::fs::read_to_string(&result_file) {

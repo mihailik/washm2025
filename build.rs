@@ -148,7 +148,7 @@ pub fn run_custom(
             Err(_) => 1u8,
         };
         // Best-effort write to a well-known file in the preopened FS.
-        let _ = std::fs::write("dev/washm_exit_code", format!("{}", code));
+        let _ = std::fs::write("/dev/host/washm/exit_code", format!("{}", code));
     });
 
     // Tick the runtime until the spawned task completes.
