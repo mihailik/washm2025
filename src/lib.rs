@@ -14,6 +14,15 @@ mod jobs;
 pub mod wasm_async;
 pub mod tty;
 
+#[cfg(feature = "wasm-test")]
+pub mod test_harness;
+
+#[cfg(feature = "wasm-test")]
+pub mod example_tests;
+
+#[cfg(feature = "wasm-test")]
+mod test_command;
+
 // Guest REPL and command handling are implemented internally. Host-driven axy_submit removed.
 
 // Host-driven `axy_submit` removed. The guest runs its own REPL via WASI `_start`.
@@ -21,7 +30,8 @@ pub mod tty;
 /// Standard WASI Reactor initialization.
 #[no_mangle]
 pub extern "C" fn _initialize() {
-    // Initialization logic here
+    // Always start the Brush REPL
+    // The test command is registered as a builtin when wasm-test feature is enabled
     {
         // Start the Brush REPL immediately after initialization.
         // Errors are ignored; the REPL runs until stdin is closed.
@@ -46,4 +56,3 @@ pub extern "C" fn _initialize() {
 
 // Re-export _continue from wasm_async for the Host
 pub use crate::wasm_async::_continue;
-

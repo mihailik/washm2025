@@ -46,8 +46,18 @@ async function run() {
   }
   // detect wasm path as the first non-flag argument; otherwise we'll use defaults later
   let wasmPath = cliArgs.find(a => !a.startsWith('-'));
-  // If argv[2] is missing or looks like a flag (starts with -), assume it's not the wasm file
-  if (!wasmPath || wasmPath.startsWith('-')) {
+  // Check if the detected path actually exists as a file
+  if (wasmPath) {
+    try {
+      await fs.access(wasmPath);
+    } catch (e) {
+      // Path doesn't exist, treat it as a guest argument instead
+      wasmPath = null;
+    }
+  }
+  
+  // If argv[2] is missing or looks like a flag (starts with -), or doesn't exist, use defaults
+  if (!wasmPath) {
     const viablePaths = ['.', 'target/wasm32-wasip1/release', 'target/wasm32-wasip1/debug'];
     for (let i = 0; i < viablePaths.length; i++) {
       const p = viablePaths[i];
@@ -70,9 +80,15 @@ async function run() {
 
   let guestArgs = [];
   if (wasmPath) {
+    // Check if wasmPath was explicitly provided in cliArgs
     const wasmIndex = cliArgs.indexOf(wasmPath);
-    const trailing = wasmIndex >= 0 ? cliArgs.slice(wasmIndex + 1) : cliArgs;
-    guestArgs = [path.basename(wasmPath), ...trailing];
+    if (wasmIndex >= 0) {
+      // WASM path was explicit, include everything after it
+      guestArgs = [path.basename(wasmPath), ...cliArgs.slice(wasmIndex + 1)];
+    } else {
+      // WASM path was auto-detected, include all cliArgs as arguments
+      guestArgs = [path.basename(wasmPath), ...cliArgs];
+    }
   } else {
     // No wasm path provided, leave guestArgs empty
     guestArgs = [];

@@ -9,6 +9,13 @@ license = "MIT"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = ["minimal"]
+wasm-test = []
+minimal = []
+basic = []
+reedline = []
+
 [dependencies]
 # Proc-macros must be a real crate
 uucore_procs = { path = "coreutils-fork/src/uucore_procs" }
@@ -18,7 +25,7 @@ clap = { version = "4.5", features = ["derive", "env", "wrap_help", "cargo", "co
 thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-tokio = { version = "1.48", features = ["io-util", "macros", "rt", "sync"] }
+tokio = { version = "1.48", features = ["io-util", "macros", "rt", "sync", "time"] }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -77,4 +84,7 @@ regex = "1.10"
 opt-level = "z"
 codegen-units = 1
 panic = "abort"
+
+[profile.dev]
+panic = "unwind"
 

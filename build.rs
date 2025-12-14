@@ -106,7 +106,7 @@ use std::collections::HashMap;
 
 pub fn run_custom(
     args: Vec<String>,
-    _extra_builtins: impl FnOnce(&mut HashMap<String, crate::brush_core::builtins::Registration>),
+    extra_builtins: impl FnOnce(&mut HashMap<String, crate::brush_core::builtins::Registration>),
 ) {
     let parsed_args = match CommandLineArgs::try_parse_from(args.iter().cloned()) {
         Ok(a) => a,
@@ -116,8 +116,20 @@ pub fn run_custom(
         }
     };
     
+    // Register extra builtins in global registry
+    unsafe {
+        let mut builtin_map = HashMap::new();
+        extra_builtins(&mut builtin_map);
+        entry::EXTRA_BUILTINS = Some(builtin_map);
+    }
+    
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let _ = rt.block_on(entry::run_async(args, parsed_args));
+    
+    // Clear global registry
+    unsafe {
+        entry::EXTRA_BUILTINS = None;
+    }
 }
 "#).unwrap();
         }
@@ -286,6 +298,18 @@ impl_from_error!(ErrorKind);
             if path.to_string_lossy().ends_with("brush-shell/src/entry.rs") {
                  new_content = new_content.replace("async fn run_async", "pub async fn run_async");
                  new_content = new_content.replace("fn try_parse_from", "pub fn try_parse_from");
+                 
+                 // Add extra builtins support (after crate:: patching has already happened)
+                 if new_content.contains("crate::brush_core::Shell::builder()") {
+                      // Add global registry at top of file  
+                      new_content = format!("use std::collections::HashMap;\npub static mut EXTRA_BUILTINS: Option<HashMap<String, crate::brush_core::builtins::Registration>> = None;\n\n{}", new_content);
+                      
+                      // Replace the builtin registration to add extra builtins
+                      new_content = new_content.replace(
+                          "    // Add builtins.\n    let shell = shell.default_builtins(builtin_set).brush_builtins();",
+                          "    // Add builtins.\n    let mut shell = shell.default_builtins(builtin_set).brush_builtins();\n    \n    // Add extra builtins from global registry\n    if let Some(extras) = unsafe { EXTRA_BUILTINS.as_ref() } {\n        for (name, reg) in extras {\n            shell = shell.builtin(name.clone(), reg.clone());\n        }\n    }\n    let shell = shell;"
+                      );
+                  }
             }
             
             if path.to_string_lossy().ends_with("brush-shell/src/lib.rs") {
