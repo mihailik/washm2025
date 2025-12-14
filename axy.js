@@ -105,7 +105,7 @@ async function run() {
     preopens: { '.': process.cwd() },
     version: 'preview1'
   });
-  console.error("Loading WASM...");
+  if (isVerbose) console.error("Loading WASM...");
   const wasm = await fs.readFile(wasmPath);
   // If check flag was passed, print a summary before continuing
   const module = await WebAssembly.compile(wasm);
@@ -265,15 +265,88 @@ async function run() {
   // Reactor initialization
   // wasi.initialize(instance) will call _initialize export if it exists.
   try {
-    console.error("Initializing WASI...");
+    if (isVerbose) console.error("Initializing WASI...");
     wasi.initialize(instance);
-    console.error("WASI Initialized.");
+    if (isVerbose) console.error("WASI Initialized.");
   } catch (e) {
-    console.error("WASI Init Error:", e);
-    // Ignore if already initialized or if it fails safely (e.g. no _initialize)
-    // But for random_get to work, wasi must be initialized.
+    if (isVerbose) console.error("WASI Init Error:", e);
+    // Some Node/WASI implementations signal proc_exit by throwing an error
+    // containing a special symbol like Symbol(kExitCode). Detect that case and
+    // propagate the exit code to the host process so the exit builtin works.
+    try {
+      // Check for common numeric properties first
+      if (e && typeof e === 'object') {
+        if (typeof e.code === 'number') {
+          process.exit(e.code);
+        }
+        if (typeof e.errno === 'number') {
+          process.exit(e.errno);
+        }
+        // Inspect symbols for kExitCode
+        const syms = Object.getOwnPropertySymbols(e);
+        for (const s of syms) {
+          if (s && s.description === 'kExitCode') {
+            const code = e[s];
+            if (typeof code === 'number') process.exit(code);
+          }
+        }
+        // Fallback: parse message like 'exit code: N'
+        if (e && e.message) {
+          const m = String(e.message).match(/exit\s+code[:\s]+(\d+)/i);
+          if (m) process.exit(parseInt(m[1], 10));
+        }
+      }
+    } catch (ex) {
+      if (isVerbose) console.error('Error while extracting WASI exit code:', ex);
+    }
+    // Ignore other init errors (e.g. no _initialize present)
   }
+
+  // If stdin is not a TTY (piped input), wait for the guest to record an exit code
+  // to `dev/washm_exit_code` and exit the host with that code. For interactive
+  // sessions (TTY), do not automatically exit.
+  if (!process.stdin.isTTY) {
+    const exitPath = path.resolve(process.cwd(), 'dev', 'washm_exit_code');
+    const maxWaitMs = 30000; // 30s timeout
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      try {
+        const data = await fs.readFile(exitPath, 'utf8');
+        const code = parseInt(data.trim(), 10);
+        if (!Number.isNaN(code)) {
+          if (isVerbose) console.error(`Guest exit code: ${code}`);
+          try { await fs.unlink(exitPath); } catch (e) { }
+          process.exit(code);
+        }
+      } catch (e) {
+        // File not yet present; sleep and retry
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    // Timeout: assume success
+    process.exit(0);
+  }
+
+  // Start a background watcher to exit the host when the guest writes the exit file.
+  (async () => {
+    const exitPath = path.resolve(process.cwd(), 'dev', 'washm_exit_code');
+    while (true) {
+      try {
+        const data = await fs.readFile(exitPath, 'utf8');
+        const code = parseInt(data.trim(), 10);
+        if (!Number.isNaN(code)) {
+          if (isVerbose) console.error(`Guest exit code: ${code} (watcher)`);
+          try { await fs.unlink(exitPath); } catch (e) { }
+          process.exit(code);
+        }
+      } catch (e) {
+        // File not yet present; continue polling
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  })();
 }
+
 
 if (require.main === module) {
   run();
