@@ -193,7 +193,7 @@ fn patch_files(dir: &Path) {
             let mut new_content = content.clone();
 
             // Specific file patches (run early to avoid conflicts with general patches)
-            if path.to_string_lossy().ends_with("brush-builtins/src/lib.rs") {
+            if path.ends_with(std::path::Path::new("brush-builtins/src/lib.rs")) {
                 // The macro must be defined BEFORE the modules that use it are declared
                 // Move the macro definition to the top of the file
                 if new_content.contains("macro_rules! minus_or_plus_flag_arg") {
@@ -218,8 +218,8 @@ fn patch_files(dir: &Path) {
                     new_content.insert_str(insert_pos, &format!("{}\n\n", macro_def));
                 }
             }
-            
-            if path.to_string_lossy().ends_with("brush-interactive/src/lib.rs") {
+
+            if path.ends_with(std::path::Path::new("brush-interactive/src/lib.rs")) {
                 // Disable original modules/exports to avoid conflicts
                 // Comment out cfg attributes for backends
                 let cfg_re = Regex::new(r#"(?m)^#\[cfg\(feature = "(reedline|basic|minimal)"\)\]"#).unwrap();
@@ -253,14 +253,16 @@ pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>
             }
 
             // 0. Replace `crate::` with `crate::CURRENT_CRATE::`
-            // Identify which "crate" this file belongs to
+            // Identify which "crate" this file belongs to. Normalize path separators
+            // so checks work consistently on Windows and Unix.
             let path_str = path.to_string_lossy();
-            let current_crate = if path_str.contains("/brush-parser/") { Some("brush_parser") }
-                else if path_str.contains("/brush-core/") { Some("brush_core") }
-                else if path_str.contains("/brush-builtins/") { Some("brush_builtins") }
-                else if path_str.contains("/brush-interactive/") { Some("brush_interactive") }
-                else if path_str.contains("/brush-shell/") { Some("brush_shell") }
-                else if path_str.contains("/uucore/") { Some("uucore") }
+            let path_norm = path_str.replace("\\", "/");
+            let current_crate = if path_norm.contains("/brush-parser/") { Some("brush_parser") }
+                else if path_norm.contains("/brush-core/") { Some("brush_core") }
+                else if path_norm.contains("/brush-builtins/") { Some("brush_builtins") }
+                else if path_norm.contains("/brush-interactive/") { Some("brush_interactive") }
+                else if path_norm.contains("/brush-shell/") { Some("brush_shell") }
+                else if path_norm.contains("/uucore/") { Some("uucore") }
                 else { None };
 
             if let Some(c_name) = current_crate {
@@ -301,7 +303,7 @@ pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>
             new_content = new_content.replace("use crossterm ", "use crate::tty::crossterm_shim ");
 
             // 4. Special case: Disable conflicting blanket impl in brush-core/src/error.rs
-            if path.to_string_lossy().ends_with("brush-core/src/error.rs") {
+            if path.ends_with(std::path::Path::new("brush-core/src/error.rs")) {
                 let specific_impls = r#"
 // Replacement for blanket impl
 macro_rules! impl_from_error {
@@ -377,7 +379,9 @@ impl_from_error!(ErrorKind);
                     if mod_name == "refs" {
                         println!("cargo:warning=Resolved refs to: {:?}", p);
                     }
-                    format!("#[path = \"{}\"]\n{}mod {};", p.display(), vis, mod_name)
+                    // Use a raw string literal for the path attribute so backslashes
+                    // on Windows don't produce unknown escape errors when compiled.
+                    format!("#[path = r\"{}\"]\n{}mod {};", p.display(), vis, mod_name)
                 } else {
                     // If not found, leave it as is (might be a macro-generated module or cfg-ed out)
                     println!("cargo:warning=Module not found: {} in {:?}", mod_name, parent_dir);
@@ -386,11 +390,11 @@ impl_from_error!(ErrorKind);
             }).to_string();
 
             // 6. Specific file patches
-            if path.to_string_lossy().ends_with("brush-core/src/expansion.rs") {
+            if path.ends_with(std::path::Path::new("brush-core/src/expansion.rs")) {
                  new_content = format!("use std::future::Future;\n{}", new_content);
             }
 
-            if path.to_string_lossy().ends_with("brush-shell/src/entry.rs") {
+            if path.ends_with(std::path::Path::new("brush-shell/src/entry.rs")) {
                  new_content = new_content.replace("async fn run_async", "pub async fn run_async");
                  new_content = new_content.replace("fn try_parse_from", "pub fn try_parse_from");
                  
@@ -412,7 +416,7 @@ impl_from_error!(ErrorKind);
                  new_content = minimal_re.replace_all(&new_content, "$1::new();").to_string();
             }
             
-            if path.to_string_lossy().ends_with("brush-shell/src/lib.rs") {
+            if path.ends_with(std::path::Path::new("brush-shell/src/lib.rs")) {
                  new_content.push_str("\npub mod embedded;");
             }
 
@@ -422,7 +426,7 @@ impl_from_error!(ErrorKind);
             }
             
             // Patch impls and calls
-            if (new_content.contains("impl InputBackend") || path.to_string_lossy().contains("interactive")) && !path.to_string_lossy().ends_with("wasm_interactive.rs") {
+            if (new_content.contains("impl InputBackend") || path.to_string_lossy().contains("interactive")) && !path.ends_with(std::path::Path::new("wasm_interactive.rs")) {
                  // Make impl methods async
                  // Use regex to avoid double async
                  let async_re = Regex::new(r"(?m)(async\s+)?fn\s+read_line").unwrap();
