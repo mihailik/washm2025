@@ -118,43 +118,43 @@ pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
         if dest_name == "brush-shell" {
             let embedded_path = dest_path.join("embedded.rs");
             fs::write(embedded_path, r#"
-        use crate::brush_shell::args::CommandLineArgs;
-        use crate::brush_shell::entry;
-        use std::collections::HashMap;
+use crate::brush_shell::args::CommandLineArgs;
+use crate::brush_shell::entry;
+use std::collections::HashMap;
 
-        pub fn run_custom(
-            args: Vec<String>,
-            extra_builtins: impl FnOnce(&mut HashMap<String, crate::brush_core::builtins::Registration>),
-        ) {
-            let parsed_args = match CommandLineArgs::try_parse_from(args.iter().cloned()) {
-                Ok(a) => a,
-                Err(e) => {
-                    let _ = e.print();
-                    return;
-                }
-            };
-    
-            // Register extra builtins in global registry
-            unsafe {
-                let mut builtin_map = HashMap::new();
-                extra_builtins(&mut builtin_map);
-                entry::EXTRA_BUILTINS = Some(builtin_map);
-            }
-
-            // Run the async main and record its exit code to a file the host can inspect.
-            crate::wasm_async::spawn(async move {
-                let code = match entry::run_async(args, parsed_args).await {
-                    Ok(c) => c,
-                    Err(_) => 1u8,
-                };
-                // Best-effort write to a well-known file in the preopened FS.
-                let _ = std::fs::write("dev/washm_exit_code", format!("{}", code));
-            });
-
-            // Tick the runtime until the spawned task completes.
-            crate::wasm_async::tick();
+pub fn run_custom(
+    args: Vec<String>,
+    extra_builtins: impl FnOnce(&mut HashMap<String, crate::brush_core::builtins::Registration>),
+) {
+    let parsed_args = match CommandLineArgs::try_parse_from(args.iter().cloned()) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = e.print();
+            return;
         }
-        "#).unwrap();
+    };
+    
+    // Register extra builtins in global registry
+    unsafe {
+        let mut builtin_map = HashMap::new();
+        extra_builtins(&mut builtin_map);
+        entry::EXTRA_BUILTINS = Some(builtin_map);
+    }
+
+    // Run the async main and record its exit code to a file the host can inspect.
+    crate::wasm_async::spawn(async move {
+        let code = match entry::run_async(args, parsed_args).await {
+            Ok(c) => c,
+            Err(_) => 1u8,
+        };
+        // Best-effort write to a well-known file in the preopened FS.
+        let _ = std::fs::write("dev/washm_exit_code", format!("{}", code));
+    });
+
+    // Tick the runtime until the spawned task completes.
+    crate::wasm_async::tick();
+}
+"#).unwrap();
         }
     }
 }

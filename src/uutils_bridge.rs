@@ -51,6 +51,92 @@ impl UutilsBridge {
                     }
                 }
             }
+            "ls" => {
+                use std::io::Write;
+                let mut out = std::io::stdout();
+                let targets = if args.len() > 1 { args[1..].to_vec() } else { vec![".".to_string()] };
+                for t in targets {
+                    match std::fs::read_dir(&t) {
+                        Ok(entries) => {
+                            for entry in entries.flatten() {
+                                let p = entry.file_name();
+                                let _ = write!(&mut out, "{}\n", p.to_string_lossy());
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("ls: {}: {}", t, e);
+                            return 1;
+                        }
+                    }
+                }
+                let _ = out.flush();
+                0
+            }
+            "mkdir" => {
+                for dir in &args[1..] {
+                    if let Err(e) = std::fs::create_dir_all(dir) {
+                        eprintln!("mkdir: {}: {}", dir, e);
+                        return 1;
+                    }
+                }
+                0
+            }
+            "rmdir" => {
+                for dir in &args[1..] {
+                    if let Err(e) = std::fs::remove_dir(dir) {
+                        eprintln!("rmdir: {}: {}", dir, e);
+                        return 1;
+                    }
+                }
+                0
+            }
+            "touch" => {
+                use std::io::Write;
+                for f in &args[1..] {
+                    match std::fs::OpenOptions::new().create(true).append(true).open(f) {
+                        Ok(mut file) => { let _ = file.write_all(b""); }
+                        Err(e) => { eprintln!("touch: {}: {}", f, e); return 1; }
+                    }
+                }
+                0
+            }
+            "rm" => {
+                let mut code = 0;
+                for f in &args[1..] {
+                    if let Err(e) = std::fs::remove_file(f) {
+                        // Try remove_dir_all as a fallback
+                        if let Err(e2) = std::fs::remove_dir_all(f) {
+                            eprintln!("rm: {}: {}", f, e2);
+                            code = 1;
+                        }
+                    }
+                }
+                code
+            }
+            "cp" => {
+                if args.len() < 3 {
+                    eprintln!("cp: missing destination file operand");
+                    return 1;
+                }
+                let srcs = &args[1..args.len()-1];
+                let dest = &args[args.len()-1];
+                // If multiple sources, dest must be a directory
+                if srcs.len() > 1 {
+                    if let Err(e) = std::fs::create_dir_all(dest) { eprintln!("cp: {}: {}", dest, e); return 1; }
+                }
+                for s in srcs {
+                    let filename = std::path::Path::new(s).file_name().unwrap_or_default();
+                    let outp = if srcs.len() > 1 { std::path::Path::new(dest).join(filename) } else { std::path::Path::new(dest).to_path_buf() };
+                    if let Err(e) = std::fs::copy(s, outp) { eprintln!("cp: {}: {}", s, e); return 1; }
+                }
+                0
+            }
+            "mv" => {
+                if args.len() < 3 { eprintln!("mv: missing destination"); return 1; }
+                let src = &args[1]; let dest = &args[2];
+                if let Err(e) = std::fs::rename(src, dest) { eprintln!("mv: {}: {}", src, e); return 1; }
+                0
+            }
             "echo" => {
                 use std::io::Write;
                 let mut out = std::io::stdout();

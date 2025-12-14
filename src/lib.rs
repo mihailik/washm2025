@@ -10,6 +10,7 @@ pub mod brush_bridge;
 mod uutils_bridge;
 mod async_test;
 mod jobs;
+mod coreutils_builtins;
 
 pub mod wasm_async;
 pub mod tty;

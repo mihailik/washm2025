@@ -66,6 +66,15 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
 
     let extra_builtins = |map: &mut std::collections::HashMap<String, crate::brush_core::builtins::Registration>| {
         map.insert("cat".to_string(), crate::brush_core::builtins::simple_builtin::<CatCommand>());
+
+        // Coreutils wrappers
+        map.insert("ls".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::LsCommand>());
+        map.insert("cp".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::CpCommand>());
+        map.insert("mv".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::MvCommand>());
+        map.insert("rm".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::RmCommand>());
+        map.insert("mkdir".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::MkdirCommand>());
+        map.insert("rmdir".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::RmdirCommand>());
+        map.insert("touch".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::TouchCommand>());
         
         #[cfg(feature = "wasm-test")]
         map.insert("test".to_string(), crate::brush_core::builtins::simple_builtin::<crate::test_command::TestCommand>());
