@@ -114,47 +114,21 @@ pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
         // Patch files
         patch_files(&dest_path);
 
-        // Create embedded.rs for brush-shell
+        // Create embedded.rs for brush-shell by referencing the canonical
+        // `src/embedded_brush_shell.rs` using a relative path computed from
+        // the vendored destination. This avoids copying large inline strings
+        // into `build.rs` and preserves a single source of truth.
         if dest_name == "brush-shell" {
             let embedded_path = dest_path.join("embedded.rs");
-            fs::write(embedded_path, r#"
-use crate::brush_shell::args::CommandLineArgs;
-use crate::brush_shell::entry;
-use std::collections::HashMap;
-
-pub fn run_custom(
-    args: Vec<String>,
-    extra_builtins: impl FnOnce(&mut HashMap<String, crate::brush_core::builtins::Registration>),
-) {
-    let parsed_args = match CommandLineArgs::try_parse_from(args.iter().cloned()) {
-        Ok(a) => a,
-        Err(e) => {
-            let _ = e.print();
-            return;
-        }
-    };
-    
-    // Register extra builtins in global registry
-    unsafe {
-        let mut builtin_map = HashMap::new();
-        extra_builtins(&mut builtin_map);
-        entry::EXTRA_BUILTINS = Some(builtin_map);
-    }
-
-    // Run the async main and record its exit code to a file the host can inspect.
-    crate::wasm_async::spawn(async move {
-        let code = match entry::run_async(args, parsed_args).await {
-            Ok(c) => c,
-            Err(_) => 1u8,
-        };
-        // Best-effort write to a well-known file in the preopened FS.
-        let _ = std::fs::write("/dev/host/washm/exit_code", format!("{}", code));
-    });
-
-    // Tick the runtime until the spawned task completes.
-    crate::wasm_async::tick();
-}
-"#).unwrap();
+            // Compute a relative path from the vendored `dest_path` to the
+            // project's `src/embedded_brush_shell.rs` and write a tiny
+            // `include!` that uses that relative path (forward-slash style).
+            let project_src = std::env::current_dir().unwrap().join("src/embedded_brush_shell.rs");
+            let rel = pathdiff::diff_paths(&project_src, &dest_path).unwrap_or_else(|| Path::new("../../src/embedded_brush_shell.rs").to_path_buf());
+            let mut rel_str = rel.to_string_lossy().into_owned();
+            rel_str = rel_str.replace("\\", "/");
+            let contents = format!("include!(\"{}\");\n", rel_str);
+            fs::write(embedded_path, contents).unwrap();
         }
     }
 }
@@ -191,6 +165,83 @@ fn patch_files(dir: &Path) {
             let path = entry.path();
             let content = fs::read_to_string(path).unwrap();
             let mut new_content = content.clone();
+
+            // Patch brush-core/src/sys/stubs/users.rs to avoid "operation not supported" on WASI
+            if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/users.rs")) {
+                // Use helpers that read startup JSON at /dev/host/washm/startup and cache values
+                new_content = new_content
+                    .replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current uid\").into())", "Ok(startup_uid())")
+                    .replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current gid\").into())", "Ok(startup_gid())")
+                    .replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting effective uid\").into())", "Ok(startup_uid())")
+                    .replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting effective gid\").into())", "Ok(startup_gid())")
+                    .replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current username\").into())", "Ok(startup_username())");
+                // Instead of injecting a huge helper string, create a proper
+                // `startup.rs` helper file alongside `users.rs` and import it.
+                if !new_content.contains("mod startup;") {
+                    // Insert module declaration and re-exports at the top of the file
+                    new_content.insert_str(0, "pub mod startup;\nuse startup::{startup_username, startup_uid, startup_gid};\n\n");
+
+                    // Write a small trampoline helper that delegates to our
+                    // crate-local implementation in `src/host_startup.rs`.
+                    let helper_path = path.parent().unwrap().join("startup.rs");
+                    let helper_src = r#"// Trampoline helpers: delegate to `crate::host_startup` implemented
+// in the main crate so complex parsing logic can live in our src tree.
+pub fn startup_username() -> String {
+    crate::host_startup::startup_username()
+}
+
+pub fn startup_uid() -> u32 {
+    crate::host_startup::startup_uid()
+}
+
+pub fn startup_gid() -> u32 {
+    crate::host_startup::startup_gid()
+}
+"#;
+                    let _ = fs::write(&helper_path, helper_src);
+                }
+            }
+
+            // Patch brush-core/src/openfiles.rs to avoid panics when cloning isn't supported on WASI
+            if path.ends_with(std::path::Path::new("brush-core/src/openfiles.rs")) {
+                new_content = new_content.replace(
+                    r#"impl Clone for OpenFile {
+    fn clone(&self) -> Self {
+        self.try_clone().unwrap()
+    }
+}"#,
+                    r#"impl Clone for OpenFile {
+    fn clone(&self) -> Self {
+        match self.try_clone() {
+            Ok(v) => v,
+            Err(_) => {
+                // Best-effort fallback on platforms where dup/clone is unsupported
+                if matches!(self, Self::Stdin(_)) {
+                    Self::Stdin(std::io::stdin())
+                } else if matches!(self, Self::Stdout(_)) {
+                    Self::Stdout(std::io::stdout())
+                } else if matches!(self, Self::Stderr(_)) {
+                    Self::Stderr(std::io::stderr())
+                } else {
+                    null().unwrap_or_else(|_| Self::Stdin(std::io::stdin()))
+                }
+            }
+        }
+    }
+}"#,
+                );
+            }
+
+            // Re-export startup helpers at `crate::brush_core::sys::stubs` so
+            // callers like `crate::brush_core::sys::stubs::startup_username()`
+            // resolve correctly from other modules/crates.
+            if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs.rs")) {
+                if !new_content.contains("pub use users::startup::") {
+                    new_content.push_str("\n// Re-export startup helpers from users::startup for external use\n");
+                    new_content.push_str("pub use users::startup::{startup_username, startup_uid, startup_gid};\n");
+                }
+            }
+
 
             // Specific file patches (run early to avoid conflicts with general patches)
             if path.ends_with(std::path::Path::new("brush-builtins/src/lib.rs")) {

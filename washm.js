@@ -73,8 +73,13 @@ async function run() {
   
   globalThis.mounted = {
     washm: {
-        get start_pwd() { return process.cwd(); },
-        set exit_code(val) { 
+        get start_pwd() { return process.cwd(); },        // JSON string exposing startup parameters: env, user, cwd, args
+        startup: JSON.stringify({
+            env: Object.assign({}, process.env),
+            user: process.env.USER || os.userInfo().username,
+            cwd: process.cwd(),
+            args: wasiArgs
+        }),        set exit_code(val) { 
             if (isVerbose) console.error(`Guest requested exit with code: ${val}`);
             process.exit(Number(val)); 
         }
@@ -145,6 +150,7 @@ async function run() {
 
   const wasi = new WASI({
     args: wasiArgs,
+    env: Object.assign({}, process.env),
     // Preopen / to / to allow full filesystem access and correct path mapping
     preopens: (function() {
         const p = {};
