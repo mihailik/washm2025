@@ -1,1 +1,0 @@
-JSON.stringify({ ok: true, result: { ok: true } })

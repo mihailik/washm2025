@@ -93,6 +93,23 @@ pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
             panic!("Failed to copy source");
         }
 
+        // Inject wasm_interactive.rs if we are processing brush-interactive
+        if dest_name == "brush-interactive" {
+            let wasm_interactive_src = Path::new("src/wasm_interactive.rs");
+            let wasm_interactive_dest = dest_path.join("wasm_interactive.rs");
+            if wasm_interactive_src.exists() {
+                fs::copy(wasm_interactive_src, wasm_interactive_dest).unwrap();
+                
+                // Also copy bridge.js so include_str! works
+                let bridge_src = Path::new("src/tty/bridge.js");
+                let bridge_dest = dest_path.join("tty/bridge.js");
+                if bridge_src.exists() {
+                    fs::create_dir_all(bridge_dest.parent().unwrap()).unwrap();
+                    fs::copy(bridge_src, bridge_dest).unwrap();
+                }
+            }
+        }
+
         // Patch files
         patch_files(&dest_path);
 
@@ -123,13 +140,15 @@ pub fn run_custom(
         entry::EXTRA_BUILTINS = Some(builtin_map);
     }
     
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let _ = rt.block_on(entry::run_async(args, parsed_args));
-    
-    // Clear global registry
-    unsafe {
-        entry::EXTRA_BUILTINS = None;
-    }
+    println!("Spawning run_async");
+    crate::wasm_async::spawn(async move {
+        println!("run_async started");
+        let _ = entry::run_async(args, parsed_args).await;
+        println!("run_async finished");
+    });
+    println!("Ticking runtime");
+    crate::wasm_async::tick();
+    println!("Tick returned");
 }
 "#).unwrap();
         }
@@ -168,6 +187,40 @@ fn patch_files(dir: &Path) {
             let path = entry.path();
             let content = fs::read_to_string(path).unwrap();
             let mut new_content = content.clone();
+
+            // Specific file patches (run early to avoid conflicts with general patches)
+            if path.to_string_lossy().ends_with("brush-interactive/src/lib.rs") {
+                // Disable original modules/exports to avoid conflicts
+                // Comment out cfg attributes for backends
+                let cfg_re = Regex::new(r#"(?m)^#\[cfg\(feature = "(reedline|basic|minimal)"\)\]"#).unwrap();
+                new_content = cfg_re.replace_all(&new_content, "// $0").to_string();
+
+                // Comment out mod declarations
+                let mod_re = Regex::new(r"(?m)^(pub\s+)?mod\s+(reedline|basic|minimal)\s*;").unwrap();
+                new_content = mod_re.replace_all(&new_content, "// $0").to_string();
+
+                // Comment out pub use declarations
+                let use_re = Regex::new(r"(?m)^pub\s+use\s+(reedline|basic|minimal)::.*").unwrap();
+                new_content = use_re.replace_all(&new_content, "// $0").to_string();
+
+                new_content.push_str("\npub mod wasm_interactive;");
+                new_content.push_str("\npub use wasm_interactive::{WasmInputBackend, ReedlineInputBackend, BasicInputBackend, MinimalInputBackend};");
+                
+                // Inline refs module to avoid resolution issues
+                let refs_re = Regex::new(r"(?m)^mod\s+refs\s*;").unwrap();
+                if refs_re.is_match(&new_content) {
+                    println!("cargo:warning=Inlining refs module");
+                    new_content = refs_re.replace(&new_content, r#"
+pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>;
+"#).to_string();
+                } else {
+                    println!("cargo:warning=Could not find 'mod refs;' to inline");
+                }
+                
+                // Remove pub use refs::ShellRef; since we defined it directly
+                let use_refs_re = Regex::new(r"(?m)^pub\s+use\s+refs::ShellRef\s*;").unwrap();
+                new_content = use_refs_re.replace_all(&new_content, "// $0").to_string();
+            }
 
             // 0. Replace `crate::` with `crate::CURRENT_CRATE::`
             // Identify which "crate" this file belongs to
@@ -283,9 +336,13 @@ impl_from_error!(ErrorKind);
                 }
                 
                 if let Some(p) = found_path {
+                    if mod_name == "refs" {
+                        println!("cargo:warning=Resolved refs to: {:?}", p);
+                    }
                     format!("#[path = \"{}\"]\n{}mod {};", p.display(), vis, mod_name)
                 } else {
                     // If not found, leave it as is (might be a macro-generated module or cfg-ed out)
+                    println!("cargo:warning=Module not found: {} in {:?}", mod_name, parent_dir);
                     caps[0].to_string()
                 }
             }).to_string();
@@ -310,10 +367,32 @@ impl_from_error!(ErrorKind);
                           "    // Add builtins.\n    let mut shell = shell.default_builtins(builtin_set).brush_builtins();\n    \n    // Add extra builtins from global registry\n    if let Some(extras) = unsafe { EXTRA_BUILTINS.as_ref() } {\n        for (name, reg) in extras {\n            shell = shell.builtin(name.clone(), reg.clone());\n        }\n    }\n    let shell = shell;"
                       );
                   }
+                 
+                 // Patch MinimalInputBackend instantiation
+                 // Match both original and transformed versions
+                 let minimal_re = Regex::new(r"(let mut ui = (?:crate::)?brush_interactive::MinimalInputBackend);").unwrap();
+                 new_content = minimal_re.replace_all(&new_content, "$1::new();").to_string();
             }
             
             if path.to_string_lossy().ends_with("brush-shell/src/lib.rs") {
                  new_content.push_str("\npub mod embedded;");
+            }
+
+            // Patch InputBackend trait and usages
+            if new_content.contains("trait InputBackend") {
+                 new_content = new_content.replace("fn read_line", "async fn read_line");
+            }
+            
+            // Patch impls and calls
+            if (new_content.contains("impl InputBackend") || path.to_string_lossy().contains("interactive")) && !path.to_string_lossy().ends_with("wasm_interactive.rs") {
+                 // Make impl methods async
+                 // Use regex to avoid double async
+                 let async_re = Regex::new(r"(?m)(async\s+)?fn\s+read_line").unwrap();
+                 new_content = async_re.replace_all(&new_content, "async fn read_line").to_string();
+                 
+                 // Patch call sites: .read_line(prompt)? -> .read_line(prompt).await?
+                 let call_re = Regex::new(r"\.read_line\(([^)]*)\)\?").unwrap();
+                 new_content = call_re.replace_all(&new_content, ".read_line($1).await?").to_string();
             }
 
             if content != new_content {

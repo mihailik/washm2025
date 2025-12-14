@@ -102,9 +102,10 @@ async function run() {
 
   const wasi = new WASI({
     args: wasiArgs,
-    preopens: { [process.cwd()]: process.cwd() },
+    preopens: { '.': process.cwd() },
     version: 'preview1'
   });
+  console.error("Loading WASM...");
   const wasm = await fs.readFile(wasmPath);
   // If check flag was passed, print a summary before continuing
   const module = await WebAssembly.compile(wasm);
@@ -129,7 +130,9 @@ async function run() {
 
   wrapped.path_open = function (dirfd, dirflags, path_ptr, path_len, oflags, fs_rights_base, fs_rights_inheriting, fdflags, fd_out_ptr) {
     const p = readStringFromMemory(path_ptr, path_len);
-    if (p.startsWith('/dev/host/eval')) {
+    // console.error("path_open:", p);
+    if (p.includes('dev/host/eval')) {
+      // console.error("Opening eval path:", p);
       const fd = nextFakeFd++;
       fdToVfs.set(fd, { path: p, pos: 0, mode: 'rw' });
       if (!evalVfs.has(p)) evalVfs.set(p, { js: '', json: null });
@@ -139,6 +142,7 @@ async function run() {
     return orig.path_open(dirfd, dirflags, path_ptr, path_len, oflags, fs_rights_base, fs_rights_inheriting, fdflags, fd_out_ptr);
   };
   wrapped.fd_write = function (fd, iovs_ptr, iovs_len, nwritten_ptr) {
+    // console.error("fd_write:", fd);
     if (fdToVfs.has(fd)) {
       const mem = memRef.memory; const dv = new DataView(mem.buffer);
       let total = 0;
@@ -157,43 +161,100 @@ async function run() {
   };
   wrapped.fd_read = function (fd, iovs_ptr, iovs_len, nread_ptr) {
     if (fdToVfs.has(fd)) {
-      const entry = evalVfs.get(fdToVfs.get(fd).path) || { js: '', json: null };
-      const readBuf = entry.json === null ? '' : entry.json; const mem = memRef.memory; const dv = new DataView(mem.buffer);
+      // console.error("fd_read:", fd);
+      const info = fdToVfs.get(fd);
+      const path = info.path;
+      // console.error("fd_read: path:", path);
+      const entry = evalVfs.get(path) || { js: '', json: null };
+      // console.error("fd_read: entry:", entry);
+      const jsonStr = entry.json === null ? '' : entry.json;
+      const bytes = new TextEncoder().encode(jsonStr);
+      
+      const mem = memRef.memory; const dv = new DataView(mem.buffer);
       let total = 0;
-      for (let i = 0; i < iovs_len && total < readBuf.length; i++) {
+      let currentPos = info.pos;
+
+      for (let i = 0; i < iovs_len && currentPos < bytes.length; i++) {
         const off = iovs_ptr + i * 8; const bufPtr = dv.getUint32(off, true); const bufLen = dv.getUint32(off + 4, true);
-        const toWrite = Math.min(bufLen, readBuf.length - total);
-        const bytes = new TextEncoder().encode(readBuf.slice(total, total + toWrite));
-        new Uint8Array(mem.buffer, bufPtr, toWrite).set(bytes);
+        const remaining = bytes.length - currentPos;
+        const toWrite = Math.min(bufLen, remaining);
+        
+        const chunk = bytes.subarray(currentPos, currentPos + toWrite);
+        new Uint8Array(mem.buffer, bufPtr, toWrite).set(chunk);
+        
+        currentPos += toWrite;
         total += toWrite;
       }
+      
+      info.pos = currentPos;
+      // fdToVfs is a Map, info is a reference to the object in the map (if it was an object), 
+      // but I should probably set it back just in case or if I cloned it.
+      // fdToVfs.set(fd, { path: p, pos: 0, mode: 'rw' }); -> it's an object.
+      // So modifying info.pos updates the object in the map.
+      
       try { writeU32(nread_ptr, total); } catch (e) { }
       return 0;
     }
     return orig.fd_read(fd, iovs_ptr, iovs_len, nread_ptr);
   };
   wrapped.fd_close = function (fd) {
+    // console.error("fd_close:", fd);
     if (fdToVfs.has(fd)) {
       const info = fdToVfs.get(fd); fdToVfs.delete(fd);
       if (info.path.endsWith('.js')) {
         const cookie = path.basename(info.path, '.js'); const entry = evalVfs.get(info.path) || { js: '', json: null };
         const jsText = entry.js;
-        (async () => {
-          let result;
-          try {
-            let isAsync = false;
-            try { new Function(jsText); } catch (e) { if (e instanceof SyntaxError) isAsync = true; else throw e; }
-            if (isAsync) { const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor; const fn = new AsyncFunction(jsText); result = await fn(); }
-            else result = eval(jsText);
-            if (result instanceof Promise) result = await result;
-          } catch (err) { result = { error: String(err) }; }
-          entry.json = JSON.stringify({ ok: true, result }); evalVfs.set(`/dev/host/eval/${cookie}.json`, entry);
-          if (typeof instance.exports._continue === 'function') instance.exports._continue(Number(cookie));
-        })();
+        
+        const handleResult = (result) => {
+             // console.error("JS Result:", result);
+             const jsonPath = info.path.slice(0, -3) + '.json';
+             // console.error("handleResult: jsonPath:", jsonPath);
+             const jsonEntry = evalVfs.get(jsonPath) || { js: '', json: null };
+             jsonEntry.json = JSON.stringify({ ok: true, result });
+             // console.error("handleResult: setting entry:", jsonEntry);
+             evalVfs.set(jsonPath, jsonEntry);
+             if (typeof instance.exports._continue === 'function') instance.exports._continue(Number(cookie));
+        };
+        const handleError = (err) => {
+             console.error("JS Error:", err);
+             const jsonPath = info.path.slice(0, -3) + '.json';
+             const jsonEntry = evalVfs.get(jsonPath) || { js: '', json: null };
+             jsonEntry.json = JSON.stringify({ ok: true, result: { error: String(err) } });
+             evalVfs.set(jsonPath, jsonEntry);
+             if (typeof instance.exports._continue === 'function') instance.exports._continue(Number(cookie));
+        };
+
+        let isAsyncSyntax = false;
+        try { new Function(jsText); } catch (e) { if (e instanceof SyntaxError) isAsyncSyntax = true; }
+
+        if (isAsyncSyntax) {
+             (async () => {
+                 try {
+                    const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor; 
+                    const fn = new AsyncFunction(jsText); 
+                    handleResult(await fn());
+                 } catch (err) { handleError(err); }
+             })();
+        } else {
+            try {
+                let result = eval(jsText);
+                if (result instanceof Promise) {
+                    result.then(handleResult).catch(handleError);
+                } else {
+                    handleResult(result);
+                }
+            } catch (err) { handleError(err); }
+        }
       }
       return 0;
     }
     return orig.fd_close(fd);
+  };
+
+  wrapped.path_create_directory = function (fd, path_ptr, path_len) {
+    const p = readStringFromMemory(path_ptr, path_len);
+    // console.error("path_create_directory:", p);
+    return orig.path_create_directory(fd, path_ptr, path_len);
   };
 
   importObj.wasi_snapshot_preview1 = wrapped;
@@ -204,8 +265,11 @@ async function run() {
   // Reactor initialization
   // wasi.initialize(instance) will call _initialize export if it exists.
   try {
+    console.error("Initializing WASI...");
     wasi.initialize(instance);
+    console.error("WASI Initialized.");
   } catch (e) {
+    console.error("WASI Init Error:", e);
     // Ignore if already initialized or if it fails safely (e.g. no _initialize)
     // But for random_get to work, wasi must be initialized.
   }

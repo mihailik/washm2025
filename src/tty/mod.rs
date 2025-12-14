@@ -3,9 +3,7 @@ use serde::Deserialize;
 
 pub mod crossterm_shim;
 
-const RAW_ENABLE_JS: &str = include_str!("raw-enable.js");
-const RAW_DISABLE_JS: &str = include_str!("raw-disable.js");
-const SIZE_JS: &str = include_str!("size.js");
+const BRIDGE_JS: &str = include_str!("bridge.js");
 
 #[derive(Deserialize)]
 struct TtyResult {
@@ -15,16 +13,26 @@ struct TtyResult {
     cols: Option<u16>,
 }
 
-pub fn enable_raw_mode() -> Result<(), String> {
-    let res_json = eval_blocking(RAW_ENABLE_JS)?;
+#[derive(Deserialize)]
+struct HostResult {
+    ok: bool,
+    result: Option<TtyResult>,
+    error: Option<String>,
+}
 
-    #[derive(Deserialize)]
-    struct HostResult {
-        ok: bool,
-        result: Option<TtyResult>,
-        error: Option<String>,
+fn ensure_bridge() -> Result<(), String> {
+    let js = format!("{} //# sourceURL=washm-tty-bridge.js", BRIDGE_JS);
+    let res_json = eval_blocking(&js)?;
+    let host_res: HostResult = serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
+    if !host_res.ok {
+        return Err(host_res.error.unwrap_or_else(|| "Unknown bridge init error".to_string()));
     }
+    Ok(())
+}
 
+pub fn enable_raw_mode() -> Result<(), String> {
+    ensure_bridge()?;
+    let res_json = eval_blocking("washm_tty.enableRaw()")?;
     let host_res: HostResult = serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
     
     if !host_res.ok {
@@ -32,7 +40,6 @@ pub fn enable_raw_mode() -> Result<(), String> {
     }
     
     let tty_res = host_res.result.ok_or("No result from host")?;
-    
     if tty_res.ok {
         Ok(())
     } else {
@@ -41,15 +48,8 @@ pub fn enable_raw_mode() -> Result<(), String> {
 }
 
 pub fn disable_raw_mode() -> Result<(), String> {
-    let res_json = eval_blocking(RAW_DISABLE_JS)?;
-    
-    #[derive(Deserialize)]
-    struct HostResult {
-        ok: bool,
-        result: Option<TtyResult>,
-        error: Option<String>,
-    }
-
+    ensure_bridge()?;
+    let res_json = eval_blocking("washm_tty.disableRaw()")?;
     let host_res: HostResult = serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
     
     if !host_res.ok {
@@ -57,7 +57,6 @@ pub fn disable_raw_mode() -> Result<(), String> {
     }
     
     let tty_res = host_res.result.ok_or("No result from host")?;
-    
     if tty_res.ok {
         Ok(())
     } else {
@@ -66,15 +65,8 @@ pub fn disable_raw_mode() -> Result<(), String> {
 }
 
 pub fn size() -> Result<(u16, u16), String> {
-    let res_json = eval_blocking(SIZE_JS)?;
-    
-    #[derive(Deserialize)]
-    struct HostResult {
-        ok: bool,
-        result: Option<TtyResult>,
-        error: Option<String>,
-    }
-
+    ensure_bridge()?;
+    let res_json = eval_blocking("washm_tty.size()")?;
     let host_res: HostResult = serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
     
     if !host_res.ok {
@@ -82,7 +74,6 @@ pub fn size() -> Result<(u16, u16), String> {
     }
     
     let tty_res = host_res.result.ok_or("No result from host")?;
-    
     if tty_res.ok {
         Ok((tty_res.cols.unwrap_or(80), tty_res.rows.unwrap_or(24)))
     } else {

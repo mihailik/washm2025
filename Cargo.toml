@@ -15,6 +15,7 @@ wasm-test = []
 minimal = []
 basic = []
 reedline = []
+"builtin.echo" = []
 
 [dependencies]
 # Proc-macros must be a real crate

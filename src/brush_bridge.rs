@@ -29,6 +29,11 @@ pub async fn host_eval(js: &str) -> Result<String, &'static str> {
 }
 
 pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
+    // Try to get terminal size to verify TTY integration
+    if let Ok((_cols, _rows)) = crate::tty::size() {
+        // TTY is available
+    }
+
     // Get arguments to pass to brush
     let raw_args: Vec<String> = std::env::args().collect();
     
@@ -47,6 +52,11 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     // Build arguments for brush
     let mut args = Vec::new();
     args.push("brush".to_string());
+
+    // We need to force the Minimal backend because the default Reedline backend
+    // requires a TTY, which is not available in the WASI environment (piped stdin).
+    args.push("--input-backend".to_string());
+    args.push("minimal".to_string());
     
     // If we have user args, run them as a single command with -c
     if !user_args.is_empty() {

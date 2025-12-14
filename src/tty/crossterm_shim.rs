@@ -39,12 +39,21 @@ pub mod event {
     pub fn read() -> io::Result<Event> { Err(io::Error::new(io::ErrorKind::Other, "not supported")) }
 }
 
-pub mod terminal { pub use super::terminal_shim::{Clear, ClearType, size}; }
+pub mod terminal { pub use super::terminal_shim::{Clear, ClearType, size, enable_raw_mode, disable_raw_mode}; }
 mod terminal_shim {
     use std::io;
+    use crate::tty;
     #[derive(Clone, Copy, Debug)] pub enum ClearType { All }
     pub struct Clear(pub ClearType);
-    pub fn size() -> io::Result<(u16, u16)> { Err(io::Error::new(io::ErrorKind::Other, "not supported")) }
+    pub fn size() -> io::Result<(u16, u16)> { 
+        tty::size().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    }
+    pub fn enable_raw_mode() -> io::Result<()> {
+        tty::enable_raw_mode().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    }
+    pub fn disable_raw_mode() -> io::Result<()> {
+        tty::disable_raw_mode().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    }
 }
 
 pub mod cursor { pub use super::cursor_shim::MoveTo; }
