@@ -196,7 +196,8 @@ pathdiff = "0.2"
 [profile.release]
 opt-level = "z"
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
+debug = 2
 
 [profile.dev]
 panic = "unwind"

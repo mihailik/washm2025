@@ -114,6 +114,46 @@ pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
         // Patch files
         patch_files(&dest_path);
 
+        // For brush-core, inject a crate-local `stubs_impl.rs` so trampolines
+        // that call `crate::stubs_impl::...` resolve inside the vendored crate.
+        if dest_name == "brush-core" {
+            // Read our authoritative host implementations and write them into
+            // the vendored crate without changing the original brush_core
+            // qualified paths. The vendored code is included under
+            // `pub mod brush_core { include!(...) }` so references to
+            // `crate::brush_core::...` remain valid.
+            let host_impl = fs::read_to_string("src/stubs_impl.rs").expect("Failed to read src/stubs_impl.rs");
+            let stubs_impl_path = dest_path.join("stubs_impl.rs");
+            fs::write(&stubs_impl_path, host_impl).expect("Failed to write vendored stubs_impl.rs");
+
+            // Add a module declaration to lib.rs so `crate::stubs_impl` resolves.
+            let lib_rs = dest_path.join("lib.rs");
+            if lib_rs.exists() {
+                let mut lib = fs::read_to_string(&lib_rs).expect("Failed to read vendored lib.rs");
+                let decl = format!("\n#[path = r\"{}\"]\npub mod stubs_impl;\n", stubs_impl_path.display());
+                if !lib.contains("pub mod stubs_impl") {
+                    lib.push_str(&decl);
+                    fs::write(&lib_rs, lib).expect("Failed to patch vendored lib.rs");
+                }
+            }
+            
+            // Ensure any calls that used `crate::stubs_impl::...` are updated to
+            // use the fully-qualified `crate::brush_core::stubs_impl::...` so
+            // they resolve correctly when the vendored source is included as
+            // a submodule in the host crate.
+            for entry in WalkDir::new(&dest_path) {
+                let entry = entry.unwrap();
+                if entry.file_type().is_file() && entry.path().extension().map_or(false, |e| e == "rs") {
+                    let p = entry.path();
+                    let s = fs::read_to_string(p).unwrap();
+                    if s.contains("crate::stubs_impl::") {
+                        let replaced = s.replace("crate::stubs_impl::", "crate::brush_core::stubs_impl::");
+                        fs::write(p, replaced).unwrap();
+                    }
+                }
+            }
+        }
+
         // Create embedded.rs for brush-shell by referencing the canonical
         // `src/embedded_brush_shell.rs` using a relative path computed from
         // the vendored destination. This avoids copying large inline strings
@@ -131,6 +171,15 @@ pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
             fs::write(embedded_path, contents).unwrap();
         }
     }
+
+    verify_no_stubs(out_path);
+}
+
+fn verified_replace(content: String, from: &str, to: &str, path: &Path) -> String {
+    if !content.contains(from) {
+        panic!("PATCH FAILED: Pattern not found in {:?}\nPattern: '{}'", path, from);
+    }
+    content.replace(from, to)
 }
 
 fn patch_files(dir: &Path) {
@@ -169,12 +218,11 @@ fn patch_files(dir: &Path) {
             // Patch brush-core/src/sys/stubs/users.rs to avoid "operation not supported" on WASI
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/users.rs")) {
                 // Use helpers that read startup JSON at /dev/host/washm/startup and cache values
-                new_content = new_content
-                    .replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current uid\").into())", "Ok(startup_uid())")
-                    .replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current gid\").into())", "Ok(startup_gid())")
-                    .replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting effective uid\").into())", "Ok(startup_uid())")
-                    .replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting effective gid\").into())", "Ok(startup_gid())")
-                    .replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current username\").into())", "Ok(startup_username())");
+                new_content = verified_replace(new_content, "Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current uid\").into())", "Ok(startup_uid())", path);
+                new_content = verified_replace(new_content, "Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current gid\").into())", "Ok(startup_gid())", path);
+                new_content = verified_replace(new_content, "Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting effective uid\").into())", "Ok(startup_uid())", path);
+                new_content = verified_replace(new_content, "Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting effective gid\").into())", "Ok(startup_gid())", path);
+                new_content = verified_replace(new_content, "Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current username\").into())", "Ok(startup_username())", path);
                 // Instead of injecting a huge helper string, create a proper
                 // `startup.rs` helper file alongside `users.rs` and import it.
                 if !new_content.contains("mod startup;") {
@@ -235,7 +283,7 @@ pub fn startup_hostname() -> String {
 
             // Patch brush-core/src/openfiles.rs to avoid panics when cloning isn't supported on WASI
             if path.ends_with(std::path::Path::new("brush-core/src/openfiles.rs")) {
-                new_content = new_content.replace(
+                new_content = verified_replace(new_content,
                     r#"impl Clone for OpenFile {
     fn clone(&self) -> Self {
         self.try_clone().unwrap()
@@ -260,14 +308,16 @@ pub fn startup_hostname() -> String {
         }
     }
 }"#,
+                    path
                 );
             }
 
             // Patch brush-core/src/sys/stubs/network.rs to use host-provided hostname
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/network.rs")) {
-                new_content = new_content.replace(
+                new_content = verified_replace(new_content,
                     "pub(crate) fn get_hostname() -> std::io::Result<std::ffi::OsString> {\n    Ok(\"\".into())\n}",
-                    "pub(crate) fn get_hostname() -> std::io::Result<std::ffi::OsString> {\n    // Use host-provided hostname (via startup JSON) when available\n    Ok(std::ffi::OsString::from(super::users::startup::startup_hostname()))\n}"
+                    "pub(crate) fn get_hostname() -> std::io::Result<std::ffi::OsString> {\n    // Use host-provided hostname (via startup JSON) when available\n    Ok(std::ffi::OsString::from(super::users::startup::startup_hostname()))\n}",
+                    path
                 );
             }
 
@@ -279,6 +329,94 @@ pub fn startup_hostname() -> String {
                     new_content.push_str("\n// Re-export startup helpers from users::startup for external use\n");
                     new_content.push_str("pub use users::startup::{startup_username, startup_uid, startup_gid};\n");
                 }
+            }
+
+            // After all individual patches, verify that no vendored files still
+            // contain `NotSupportedOnThisPlatform(` which would indicate we missed
+            // a stub. Fail fast so we can fix the mapping rather than shipping
+            // a runtime with unexpected generic errors.
+            if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs.rs")) {
+                // Perform a quick scan over the copied `brush-core` directory and fail
+                // the build if any `NotSupportedOnThisPlatform(` remains in the stubs.
+                let mut found = vec![];
+                // Only scan the `stubs` subtree rather than the whole `sys` tree,
+                // since other platform modules (e.g. windows) legitimately contain
+                // `NotSupportedOnThisPlatform` entries.
+                let stubs_dir = path.parent().unwrap().join("stubs");
+                if stubs_dir.exists() {
+                    for entry in WalkDir::new(&stubs_dir) {
+                        let entry = entry.unwrap();
+                        if entry.file_type().is_file() {
+                            let p = entry.path();
+                            if let Ok(s) = fs::read_to_string(p) {
+                                if s.contains("NotSupportedOnThisPlatform(") {
+                                    found.push(p.to_path_buf());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !found.is_empty() {
+                    panic!("Unpatched NotSupportedOnThisPlatform stubs found: {:?}", found);
+                }
+            }
+
+            // Patch brush-core/src/sys/stubs/fs.rs to trampoline to our safe implementation
+            if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/fs.rs")) {
+                let from = r#"pub fn open_null_file() -> Result<std::fs::File, error::Error> {
+    Err(error::ErrorKind::NotSupportedOnThisPlatform("opening null file").into())
+}"#;
+                let to = r#"pub fn open_null_file() -> Result<std::fs::File, error::Error> {
+    crate::stubs_impl::open_null_file()
+}"#;
+                new_content = verified_replace(new_content, from, to, path);
+            }
+
+            // Patch brush-core/src/sys/stubs/signal.rs to trampoline to our safe implementation
+            if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/signal.rs")) {
+                let from1 = r#"pub(crate) fn continue_process(_pid: sys::process::ProcessId) -> Result<(), error::Error> {
+    Err(error::ErrorKind::NotSupportedOnThisPlatform("continuing process").into())
+}"#;
+                let to1 = r#"pub(crate) fn continue_process(_pid: sys::process::ProcessId) -> Result<(), error::Error> {
+    crate::stubs_impl::continue_process(_pid)
+}"#;
+                new_content = verified_replace(new_content, from1, to1, path);
+
+                let from2 = r#"pub fn kill_process(
+    _pid: sys::process::ProcessId,
+    _signal: traps::TrapSignal,
+) -> Result<(), error::Error> {
+    Err(error::ErrorKind::NotSupportedOnThisPlatform("killing process").into())
+}"#;
+                let to2 = r#"pub fn kill_process(
+    _pid: sys::process::ProcessId,
+    _signal: traps::TrapSignal,
+) -> Result<(), error::Error> {
+    crate::stubs_impl::kill_process(_pid, _signal)
+}"#;
+                new_content = verified_replace(new_content, from2, to2, path);
+            }
+
+            // Patch brush-core/src/sys/stubs/commands.rs to trampoline to our safe implementation
+            if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/commands.rs")) {
+                let from = r#"    fn inject_fds(
+        &mut self,
+        mut open_files: impl Iterator<Item = (ShellFd, openfiles::OpenFile)>,
+    ) -> Result<(), error::Error> {
+        if open_files.next().is_some() {
+            return Err(error::ErrorKind::NotSupportedOnThisPlatform("fd redirections").into());
+        }
+
+        Ok(())
+    }"#;
+                let to = r#"    fn inject_fds(
+        &mut self,
+        mut open_files: impl Iterator<Item = (ShellFd, openfiles::OpenFile)>,
+    ) -> Result<(), error::Error> {
+        crate::stubs_impl::inject_fds(open_files.collect::<Vec<_>>())
+    }"#;
+                new_content = verified_replace(new_content, from, to, path);
             }
 
 
@@ -361,6 +499,14 @@ pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>
                 // Regex: `\bcrate::`
                 let crate_re = Regex::new(r"\bcrate::").unwrap();
                 new_content = crate_re.replace_all(&new_content, format!("crate::{}::", c_name).as_str()).to_string();
+                // Revert any accidental rewrites of our host trampoline module
+                // so trampolines injected earlier continue to call the real
+                // `crate::stubs_impl` in the host crate rather than
+                // `crate::<current_crate>::stubs_impl` which does not exist.
+                let host_stub_prefix = format!("crate::{}::stubs_impl", c_name);
+                if new_content.contains(&host_stub_prefix) {
+                    new_content = new_content.replace(&host_stub_prefix, "crate::stubs_impl");
+                }
                 
                 // Fix macro invocations - macros exported with #[macro_export] 
                 // are available at the crate root and should be called without any path prefix
@@ -531,5 +677,34 @@ impl_from_error!(ErrorKind);
                 fs::write(path, new_content).unwrap();
             }
         }
+    }
+}
+
+fn verify_no_stubs(out_dir: &Path) {
+    println!("Verifying no unpatched stubs in {:?}", out_dir);
+    let mut found = vec![];
+    for entry in WalkDir::new(out_dir) {
+        let entry = entry.unwrap();
+        if entry.file_type().is_file() && entry.path().extension().map_or(false, |e| e == "rs") {
+            let path = entry.path();
+            // Skip windows/unix specific modules that are not used on WASI
+            // (Adjust this logic if we target Unix/Windows)
+            if path.to_string_lossy().contains("/sys/windows/") || path.to_string_lossy().contains("/sys/unix/") {
+                continue;
+            }
+            // Skip error definition
+            if path.ends_with("brush-core/src/error.rs") {
+                continue;
+            }
+
+            let content = fs::read_to_string(path).unwrap();
+            if content.contains("NotSupportedOnThisPlatform") {
+                found.push(path.to_path_buf());
+            }
+        }
+    }
+    
+    if !found.is_empty() {
+        panic!("BUILD FAILED: Unpatched NotSupportedOnThisPlatform stubs found in:\n{:#?}", found);
     }
 }

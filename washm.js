@@ -14,7 +14,7 @@ async function run() {
   const os = require('os');
 
   const cliArgs = process.argv.slice(2);
-  const isVerbose = cliArgs.includes("--verbose");
+  const isVerbose = true; // cliArgs.includes("--verbose");
 
   let _origEmitWarning = null;
   let _didOverride = false;
@@ -149,6 +149,7 @@ async function run() {
     })
   };
 
+  if (isVerbose) console.error("WASI args:", wasiArgs);
   const wasi = new WASI({
     args: wasiArgs,
     env: Object.assign({}, process.env),
@@ -249,6 +250,7 @@ async function run() {
 
   wrapped.path_open = function (dirfd, dirflags, path_ptr, path_len, oflags, fs_rights_base, fs_rights_inheriting, fdflags, fd_out_ptr) {
     const p = readStringFromMemory(path_ptr, path_len);
+    if (isVerbose) console.error(`DEBUG: path_open p='${p}' oflags=${oflags} dirflags=${dirflags} fdflags=${fdflags}`);
     // Check if path targets /dev/host
     // Since we preopen / as root, paths might come in as "dev/host/..."
     if (p.startsWith('dev/host/') || p === 'dev/host') {
@@ -285,10 +287,23 @@ async function run() {
             }
         }
     }
+    
+    if (p === 'dev/null') {
+        const fd = nextFakeFd++;
+        fdToVfs.set(fd, {
+            write: () => {},
+            read: () => '',
+            close: () => {}
+        });
+        writeU32(fd_out_ptr, fd);
+        return 0;
+    }
+
     return orig.path_open(dirfd, dirflags, path_ptr, path_len, oflags, fs_rights_base, fs_rights_inheriting, fdflags, fd_out_ptr);
   };
 
   wrapped.fd_write = function (fd, iovs_ptr, iovs_len, nwritten_ptr) {
+    if (isVerbose && fdToVfs.has(fd)) console.error(`DEBUG: fd_write fd=${fd}`);
     if (fdToVfs.has(fd)) {
       const info = fdToVfs.get(fd);
       const mem = memRef.memory; const dv = new DataView(mem.buffer);
@@ -312,6 +327,7 @@ async function run() {
   };
 
   wrapped.fd_read = function (fd, iovs_ptr, iovs_len, nread_ptr) {
+    if (isVerbose && fdToVfs.has(fd)) console.error(`DEBUG: fd_read fd=${fd}`);
     if (fdToVfs.has(fd)) {
       const info = fdToVfs.get(fd);
       let content = '';
@@ -319,6 +335,8 @@ async function run() {
           content = info.content;
       } else if (info.target && info.target.read) {
           content = info.target.read();
+      } else if (info.read) {
+          content = info.read();
       }
 
       const bytes = new TextEncoder().encode(content);
@@ -346,6 +364,7 @@ async function run() {
   };
 
   wrapped.fd_close = function (fd) {
+    if (isVerbose && fdToVfs.has(fd)) console.error(`DEBUG: fd_close fd=${fd}`);
     if (fdToVfs.has(fd)) {
       const info = fdToVfs.get(fd);
       fdToVfs.delete(fd);
@@ -369,6 +388,7 @@ async function run() {
 
   wrapped.path_filestat_get = function (fd, flags, path_ptr, path_len, buf_ptr) {
       const p = readStringFromMemory(path_ptr, path_len);
+      if (isVerbose) console.error(`DEBUG: path_filestat_get p='${p}'`);
       if (p.startsWith('dev/host/') || p === 'dev/host') {
           const target = resolveMounted(p);
           if (target) {
@@ -388,7 +408,89 @@ async function run() {
           }
           return 44; // ENOENT
       }
+      if (p === 'dev/null') {
+          const mem = memRef.memory;
+          const dv = new DataView(mem.buffer);
+          dv.setBigUint64(buf_ptr, 0n, true); // dev
+          dv.setBigUint64(buf_ptr + 8, 0n, true); // ino
+          dv.setUint8(buf_ptr + 16, 2); // filetype: character device
+          dv.setBigUint64(buf_ptr + 24, 1n, true); // nlink
+          dv.setBigUint64(buf_ptr + 32, 0n, true); // size
+          dv.setBigUint64(buf_ptr + 40, 0n, true); // atim
+          dv.setBigUint64(buf_ptr + 48, 0n, true); // mtim
+          dv.setBigUint64(buf_ptr + 56, 0n, true); // ctim
+          return 0;
+      }
       return orig.path_filestat_get(fd, flags, path_ptr, path_len, buf_ptr);
+  };
+
+  wrapped.fd_fdstat_get = function (fd, buf_ptr) {
+    if (isVerbose && fdToVfs.has(fd)) console.error(`DEBUG: fd_fdstat_get fd=${fd}`);
+    if (fdToVfs.has(fd)) {
+        const mem = memRef.memory;
+        const dv = new DataView(mem.buffer);
+        const info = fdToVfs.get(fd);
+        // 2 = character device (like /dev/null), 3 = directory, 4 = regular file
+        // Let's use 2 for /dev/null if we can distinguish, otherwise 4.
+        // My /dev/null entry has no content/target/isDir properties that clearly distinguish it from file, 
+        // but it has empty read/write.
+        
+        let type = 4; // Regular file
+        if (info.isDir) type = 3;
+        else if (info.read && info.write && !info.content && !info.target) type = 2; // Heuristic for /dev/null
+
+        dv.setUint8(buf_ptr, type); // fs_filetype
+        dv.setUint16(buf_ptr + 2, 0, true); // fs_flags
+        dv.setBigUint64(buf_ptr + 8, -1n, true); // fs_rights_base
+        dv.setBigUint64(buf_ptr + 16, -1n, true); // fs_rights_inheriting
+        return 0;
+    }
+    return orig.fd_fdstat_get(fd, buf_ptr);
+  };
+
+  wrapped.fd_renumber = function (from, to) {
+      if (isVerbose) console.error(`DEBUG: fd_renumber from=${from} to=${to}`);
+      if (fdToVfs.has(from)) {
+          const info = fdToVfs.get(from);
+          fdToVfs.delete(from);
+          
+          if (fdToVfs.has(to)) {
+              const old = fdToVfs.get(to);
+              if (old.target && old.target.close) old.target.close();
+              else if (old.close) old.close.call(old);
+              fdToVfs.delete(to);
+          } else {
+              // Close 'to' in underlying WASI if it exists
+              try { orig.fd_close(to); } catch (e) {}
+          }
+          
+          fdToVfs.set(to, info);
+          return 0;
+      }
+      return orig.fd_renumber(from, to);
+  };
+
+  wrapped.fd_filestat_get = function (fd, buf_ptr) {
+      if (isVerbose && fdToVfs.has(fd)) console.error(`DEBUG: fd_filestat_get fd=${fd}`);
+      if (fdToVfs.has(fd)) {
+          const mem = memRef.memory;
+          const dv = new DataView(mem.buffer);
+          const info = fdToVfs.get(fd);
+          let type = 4; // Regular file
+          if (info.isDir) type = 3;
+          else if (info.read && info.write && !info.content && !info.target) type = 2; // Heuristic for /dev/null
+
+          dv.setBigUint64(buf_ptr, 0n, true); // dev
+          dv.setBigUint64(buf_ptr + 8, BigInt(fd), true); // ino
+          dv.setUint8(buf_ptr + 16, type); // filetype
+          dv.setBigUint64(buf_ptr + 24, 1n, true); // nlink
+          dv.setBigUint64(buf_ptr + 32, 0n, true); // size
+          dv.setBigUint64(buf_ptr + 40, 0n, true); // atim
+          dv.setBigUint64(buf_ptr + 48, 0n, true); // mtim
+          dv.setBigUint64(buf_ptr + 56, 0n, true); // ctim
+          return 0;
+      }
+      return orig.fd_filestat_get(fd, buf_ptr);
   };
 
   wrapped.path_unlink_file = function (fd, path_ptr, path_len) {
@@ -405,6 +507,22 @@ async function run() {
         return 0;
     }
     return orig.path_unlink_file(fd, path_ptr, path_len);
+  };
+
+  wrapped.fd_seek = function (fd, offset, whence, newoffset_ptr) {
+      if (isVerbose && fdToVfs.has(fd)) console.error(`DEBUG: fd_seek fd=${fd}`);
+      if (fdToVfs.has(fd)) {
+          return 0; // Mock success
+      }
+      return orig.fd_seek(fd, offset, whence, newoffset_ptr);
+  };
+
+  wrapped.fd_tell = function (fd, newoffset_ptr) {
+      if (isVerbose && fdToVfs.has(fd)) console.error(`DEBUG: fd_tell fd=${fd}`);
+      if (fdToVfs.has(fd)) {
+          return 0; // Mock success
+      }
+      return orig.fd_tell(fd, newoffset_ptr);
   };
 
   importObj.wasi_snapshot_preview1 = wrapped;
