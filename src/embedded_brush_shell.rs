@@ -12,6 +12,7 @@ pub fn run_custom(
     let _ = crate::host_startup::startup_username();
     let _ = crate::host_startup::startup_uid();
     let _ = crate::host_startup::startup_gid();
+    let _ = crate::host_startup::startup_hostname();
 
     let parsed_args = match CommandLineArgs::try_parse_from(args.iter().cloned()) {
         Ok(a) => a,

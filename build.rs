@@ -183,7 +183,8 @@ fn patch_files(dir: &Path) {
 
                     // Write a small trampoline helper that delegates to our
                     // crate-local implementation in `src/host_startup.rs`.
-                    let helper_path = path.parent().unwrap().join("startup.rs");
+                    let helper_path = path.parent().unwrap().join(path.file_stem().unwrap()).join("startup.rs");
+                    fs::create_dir_all(path.parent().unwrap().join(path.file_stem().unwrap())).unwrap();
                     let helper_src = r#"// Trampoline helpers: delegate to `crate::host_startup` implemented
 // in the main crate so complex parsing logic can live in our src tree.
 pub fn startup_username() -> String {
@@ -196,6 +197,36 @@ pub fn startup_uid() -> u32 {
 
 pub fn startup_gid() -> u32 {
     crate::host_startup::startup_gid()
+}
+
+pub fn startup_hostname() -> String {
+    crate::host_startup::startup_hostname()
+}
+"#;
+                    let _ = fs::write(&helper_path, helper_src);
+                }
+                // Ensure the trampoline helper exists even if the module declaration
+                // was present in upstream sources; some upstream revisions included
+                // `pub mod startup;` but did not ship the trampoline helper file.
+                let helper_path = path.parent().unwrap().join(path.file_stem().unwrap()).join("startup.rs");
+                fs::create_dir_all(path.parent().unwrap().join(path.file_stem().unwrap())).unwrap();
+                if !helper_path.exists() {
+                    let helper_src = r#"// Trampoline helpers: delegate to `crate::host_startup` implemented
+// in the main crate so complex parsing logic can live in our src tree.
+pub fn startup_username() -> String {
+    crate::host_startup::startup_username()
+}
+
+pub fn startup_uid() -> u32 {
+    crate::host_startup::startup_uid()
+}
+
+pub fn startup_gid() -> u32 {
+    crate::host_startup::startup_gid()
+}
+
+pub fn startup_hostname() -> String {
+    crate::host_startup::startup_hostname()
 }
 "#;
                     let _ = fs::write(&helper_path, helper_src);
@@ -229,6 +260,14 @@ pub fn startup_gid() -> u32 {
         }
     }
 }"#,
+                );
+            }
+
+            // Patch brush-core/src/sys/stubs/network.rs to use host-provided hostname
+            if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/network.rs")) {
+                new_content = new_content.replace(
+                    "pub(crate) fn get_hostname() -> std::io::Result<std::ffi::OsString> {\n    Ok(\"\".into())\n}",
+                    "pub(crate) fn get_hostname() -> std::io::Result<std::ffi::OsString> {\n    // Use host-provided hostname (via startup JSON) when available\n    Ok(std::ffi::OsString::from(super::users::startup::startup_hostname()))\n}"
                 );
             }
 

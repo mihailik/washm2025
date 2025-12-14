@@ -75,10 +75,11 @@ async function run() {
     washm: {
         get start_pwd() { return process.cwd(); },        // JSON string exposing startup parameters: env, user, cwd, args
         startup: JSON.stringify({
-            env: Object.assign({}, process.env),
-            user: process.env.USER || os.userInfo().username,
-            cwd: process.cwd(),
-            args: wasiArgs
+          env: Object.assign({}, process.env),
+          user: process.env.USER || os.userInfo().username,
+          hostname: os.hostname(),
+          cwd: process.cwd(),
+          args: wasiArgs
         }),        set exit_code(val) { 
             if (isVerbose) console.error(`Guest requested exit with code: ${val}`);
             process.exit(Number(val)); 

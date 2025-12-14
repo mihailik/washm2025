@@ -4,6 +4,7 @@ use serde::Deserialize;
 struct StartupJson {
     env: Option<std::collections::HashMap<String, String>>,
     user: Option<String>,
+    hostname: Option<String>,
     uid: Option<u32>,
     gid: Option<u32>,
 }
@@ -29,6 +30,11 @@ fn ensure_cache() -> &'static StartupJson {
 pub(crate) fn startup_username() -> String {
     let v = ensure_cache();
     v.user.clone().unwrap_or_else(|| "user".to_string())
+}
+
+pub(crate) fn startup_hostname() -> String {
+    let v = ensure_cache();
+    v.hostname.clone().or_else(|| std::env::var("HOSTNAME").ok()).unwrap_or_else(|| "localhost".to_string())
 }
 
 pub(crate) fn startup_uid() -> u32 {
@@ -60,5 +66,12 @@ mod tests {
         let got = parse_startup_str(s).unwrap();
         assert_eq!(got.user.unwrap(), "bob");
         assert!(got.uid.is_none());
+    }
+
+    #[test]
+    fn parse_with_hostname() {
+        let s = r#"{"hostname":"host.local"}"#;
+        let got = parse_startup_str(s).unwrap();
+        assert_eq!(got.hostname.unwrap(), "host.local");
     }
 }
