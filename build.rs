@@ -130,6 +130,31 @@ pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
             let contents = format!("include!(\"{}\");\n", rel_str);
             fs::write(embedded_path, contents).unwrap();
         }
+
+        if dest_name == "brush-core" {
+            // Create the logging module for the vendored crate
+            // We use `crate::error` so that the patcher rewrites it to `crate::brush_core::error`
+            // We use `crate::parser::ast` so that the patcher rewrites it to `crate::brush_core::parser::ast`
+            let log_mod_dest = dest_path.join("interp_log.rs");
+            let content = r#"
+use crate::brush_core::parser::ast;
+use crate::brush_core::error;
+
+pub fn log_interp_error(command: &ast::CompoundList, err: &error::Error) {
+    println!("DEBUG interp: Error executing command: {:?}", command);
+    println!("DEBUG interp: Error details: {:?}", err);
+}
+"#;
+            fs::write(log_mod_dest, content).unwrap();
+
+            // Inject the module declaration into lib.rs
+            let lib_rs_path = dest_path.join("lib.rs");
+            let mut lib_rs_content = fs::read_to_string(&lib_rs_path).unwrap();
+            if !lib_rs_content.contains("mod interp_log;") {
+                 lib_rs_content.push_str("\npub mod interp_log;\n");
+                 fs::write(&lib_rs_path, lib_rs_content).unwrap();
+            }
+        }
     }
 
     verify_no_stubs(out_path);
@@ -276,6 +301,18 @@ fn patch_files(dir: &Path) {
                 new_content = regex_replace(new_content, pattern, to, path);
             }
 
+            // Patch brush-core/src/interp.rs to log interpreter errors
+            if path.ends_with(std::path::Path::new("brush-core/src/interp.rs")) {
+                let pattern = r#"(?s)Err\(err\)\s*=>\s*\{\s*// Display the error and convert to an execution result\.\s*let _ = shell\.display_error\(&mut params\.stderr\(shell\), &err\)\.await;\s*result = err\.into_result\(shell\);\s*\}"#;
+                let to = r#"Err(err) => {
+                    // Display the error and convert to an execution result.
+                    crate::interp_log::log_interp_error(command, &err);
+                    let _ = shell.display_error(&mut params.stderr(shell), &err).await;
+                    result = err.into_result(shell);
+                }"#;
+                new_content = regex_replace(new_content, pattern, to, path);
+            }
+
 
             // Specific file patches (run early to avoid conflicts with general patches)
             if path.ends_with(std::path::Path::new("brush-builtins/src/lib.rs")) {
@@ -364,6 +401,7 @@ pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>
                 if new_content.contains(&host_stub_prefix) {
                     new_content = new_content.replace(&host_stub_prefix, "crate::stubs_impl");
                 }
+
                 
                 // Fix macro invocations - macros exported with #[macro_export] 
                 // are available at the crate root and should be called without any path prefix
