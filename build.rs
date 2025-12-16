@@ -327,7 +327,7 @@ fn patch_files(dir: &Path) {
                 let pattern = r#"(?s)Err\(err\)\s*=>\s*\{\s*// Display the error and convert to an execution result\.\s*let _ = shell\.display_error\(&mut params\.stderr\(shell\), &err\)\.await;\s*result = err\.into_result\(shell\);\s*\}"#;
                 let to = r#"Err(err) => {
                     // Display the error and convert to an execution result.
-                    crate::tty::interp_log_shim::log_interp_error(command, &err);
+                    crate::tty::interp_log_shim::log_interp_error(command, &err, shell);
                     let _ = shell.display_error(&mut params.stderr(shell), &err).await;
                     result = err.into_result(shell);
                 }"#;
