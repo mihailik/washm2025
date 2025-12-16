@@ -134,9 +134,15 @@ async function run() {
           hostname: os.hostname(),
           cwd: process.cwd(),
           args: wasiArgs
-        }),        set exit_code(val) { 
-            if (isVerbose) console.error(`Guest requested exit with code: ${val}`);
-            process.exit(Number(val)); 
+        }),        set exit_code(val) {
+            // Accept strings; default to 0 on empty or invalid values.
+            const parsed = parseInt(String(val).trim());
+            const code = Number.isFinite(parsed) ? parsed : 0;
+            globalThis.mounted.washm._exit_code = code;
+            if (isVerbose) console.error(`Guest requested exit with code: ${code}`);
+            // Treat any explicit write to /dev/host/washm/exit_code as a request to
+            // terminate the host process; exit immediately with the guest code.
+            process.exit(code);
         }
     },
     eval: new Proxy({}, {
@@ -217,7 +223,7 @@ async function run() {
             // Method 1: wmic (Standard, no admin required, works on most versions)
             // Output: "Name\r\nC:\r\nD:"
             try {
-                const stdout = execSync('wmic logicaldisk get name', { encoding: 'utf8', stdio: 'pipe', windowsHide: true });
+                const stdout = execSync('wmic logicaldisk get name', { encoding: 'utf8', stdio: 'pipe', windowsHide: true, timeout: 2000 });
                 const lines = stdout.split(/[\r\n]+/);
                 const drives = lines
                     .map(l => l.trim())
@@ -225,17 +231,19 @@ async function run() {
                 
                 if (drives.length > 0) {
                     for (const drive of drives) {
-                        // drive is "C:", we need "C:\" for value
+                        // drive is "C:", we need "C:\\" for value
                         p[`/${drive}/`] = drive + '\\';
                     }
                     found = true;
                 }
-            } catch (e) { }
+            } catch (e) {
+                if (isVerbose) console.error('WASHM: wmic probe failed or timed out:', e && e.message);
+            }
 
             // Method 2: fsutil (Fast, but requires Admin)
             if (!found) {
                 try {
-                    const stdout = execSync('fsutil fsinfo drives', { encoding: 'utf8', stdio: 'pipe', windowsHide: true });
+                    const stdout = execSync('fsutil fsinfo drives', { encoding: 'utf8', stdio: 'pipe', windowsHide: true, timeout: 2000 });
                     const drives = stdout.match(/[A-Z]:\\/g);
                     if (drives) {
                         for (const drive of drives) {
@@ -244,7 +252,9 @@ async function run() {
                         }
                         found = true;
                     }
-                } catch (e) { }
+                } catch (e) {
+                    if (isVerbose) console.error('WASHM: fsutil probe failed or timed out:', e && e.message);
+                }
             }
 
             if (!found) {

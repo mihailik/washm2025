@@ -2,6 +2,7 @@ use crate::wasm_async::eval_blocking;
 use serde::Deserialize;
 
 pub mod crossterm_shim;
+pub mod interp_log_shim;
 
 const BRIDGE_JS: &str = include_str!("bridge.js");
 

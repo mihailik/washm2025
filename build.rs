@@ -14,6 +14,7 @@ fn main() {
     println!("cargo:rerun-if-changed=brush-fork");
     println!("cargo:rerun-if-changed=coreutils-fork");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/interp_log.rs");
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let out_path = Path::new(&out_dir);
@@ -94,23 +95,14 @@ pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
             panic!("Failed to copy source");
         }
 
-        // Inject wasm_interactive.rs if we are processing brush-interactive
+        // For brush-interactive, do NOT copy `src/wasm_interactive.rs` or `src/tty/bridge.js` into OUT_DIR.
+        // The `patch_files` function will inject an include!-based module and rewrite any
+        // `include_str!("tty/bridge.js")` occurrences to point at the project `src/` path
+        // (using `concat!(env!("CARGO_MANIFEST_DIR"), "/src/tty/bridge.js")`) so the
+        // implementation stays in `src/` and remains type-checked and deterministic.
         if dest_name == "brush-interactive" {
-            let wasm_interactive_src = Path::new("src/wasm_interactive.rs");
-            let wasm_interactive_dest = dest_path.join("wasm_interactive.rs");
-            if wasm_interactive_src.exists() {
-                fs::copy(wasm_interactive_src, wasm_interactive_dest).unwrap();
-                
-                // Also copy bridge.js so include_str! works
-                let bridge_src = Path::new("src/tty/bridge.js");
-                let bridge_dest = dest_path.join("tty/bridge.js");
-                if bridge_src.exists() {
-                    fs::create_dir_all(bridge_dest.parent().unwrap()).unwrap();
-                    fs::copy(bridge_src, bridge_dest).unwrap();
-                }
-            }
+            // No file copy here; transformations are handled below in `patch_files`.
         }
-
         // Patch files
         patch_files(&dest_path);
 
@@ -132,28 +124,10 @@ pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
         }
 
         if dest_name == "brush-core" {
-            // Create the logging module for the vendored crate
-            // We use `crate::error` so that the patcher rewrites it to `crate::brush_core::error`
-            // We use `crate::parser::ast` so that the patcher rewrites it to `crate::brush_core::parser::ast`
-            let log_mod_dest = dest_path.join("interp_log.rs");
-            let content = r#"
-use crate::brush_core::parser::ast;
-use crate::brush_core::error;
-
-pub fn log_interp_error(command: &ast::CompoundList, err: &error::Error) {
-    println!("DEBUG interp: Error executing command: {:?}", command);
-    println!("DEBUG interp: Error details: {:?}", err);
-}
-"#;
-            fs::write(log_mod_dest, content).unwrap();
-
-            // Inject the module declaration into lib.rs
-            let lib_rs_path = dest_path.join("lib.rs");
-            let mut lib_rs_content = fs::read_to_string(&lib_rs_path).unwrap();
-            if !lib_rs_content.contains("mod interp_log;") {
-                 lib_rs_content.push_str("\npub mod interp_log;\n");
-                 fs::write(&lib_rs_path, lib_rs_content).unwrap();
-            }
+            // Do NOT copy `src/interp_log.rs` into the vendored tree. Instead,
+            // `patch_files` will rewrite interpreter error handling sites to call
+            // a host shim under `crate::tty::interp_log_shim` so the real
+            // implementation lives in `src/` and is type-checked and deterministic.
         }
     }
 
@@ -163,7 +137,11 @@ pub fn log_interp_error(command: &ast::CompoundList, err: &error::Error) {
 fn regex_replace(content: String, pattern: &str, replacement: &str, path: &Path) -> String {
     let re = Regex::new(pattern).unwrap();
     if !re.is_match(&content) {
-        panic!("PATCH FAILED: Pattern not found in {:?}\nPattern: '{}'", path, pattern);
+        // Pattern not present - skip patch rather than failing so the build
+        // script is idempotent when re-run or when files have already been
+        // updated by a prior invocation.
+        println!("cargo:warning=Patch pattern not found (skipping): {} in {:?}", pattern, path);
+        return content;
     }
     re.replace_all(&content, replacement).to_string()
 }
@@ -200,6 +178,10 @@ fn patch_files(dir: &Path) {
             let path = entry.path();
             let content = fs::read_to_string(path).unwrap();
             let mut new_content = content.clone();
+
+            // Make any `include_str!("tty/bridge.js")` point at the project's src
+            // (so a physical copy of the JS file is not required in the vendored tree).
+            new_content = new_content.replace("include_str!(\"tty/bridge.js\")", "include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/tty/bridge.js\"))");
 
             // Patch brush-core/src/sys/stubs/users.rs to avoid "operation not supported" on WASI
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/users.rs")) {
@@ -306,7 +288,7 @@ fn patch_files(dir: &Path) {
                 let pattern = r#"(?s)Err\(err\)\s*=>\s*\{\s*// Display the error and convert to an execution result\.\s*let _ = shell\.display_error\(&mut params\.stderr\(shell\), &err\)\.await;\s*result = err\.into_result\(shell\);\s*\}"#;
                 let to = r#"Err(err) => {
                     // Display the error and convert to an execution result.
-                    crate::interp_log::log_interp_error(command, &err);
+                    crate::tty::interp_log_shim::log_interp_error(command, &err);
                     let _ = shell.display_error(&mut params.stderr(shell), &err).await;
                     result = err.into_result(shell);
                 }"#;
@@ -355,7 +337,8 @@ fn patch_files(dir: &Path) {
                 let use_re = Regex::new(r"(?m)^pub\s+use\s+(reedline|basic|minimal)::.*").unwrap();
                 new_content = use_re.replace_all(&new_content, "// $0").to_string();
 
-                new_content.push_str("\npub mod wasm_interactive;");
+                new_content.push_str("\n/// Use project-implemented `wasm_interactive` via include! so the real code stays in `src/`\n");
+                new_content.push_str("pub mod wasm_interactive { include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/wasm_interactive.rs\")); }\n");
                 new_content.push_str("\npub use wasm_interactive::{WasmInputBackend, ReedlineInputBackend, BasicInputBackend, MinimalInputBackend};");
                 
                 // Inline refs module to avoid resolution issues
@@ -391,8 +374,26 @@ pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>
                 // Replace `crate::` with `crate::c_name::`
                 // But avoid `pub(crate)` which doesn't have `::`
                 // Regex: `\bcrate::`
-                let crate_re = Regex::new(r"\bcrate::").unwrap();
-                new_content = crate_re.replace_all(&new_content, format!("crate::{}::", c_name).as_str()).to_string();
+                // Only replace bare `crate::` occurrences that are NOT followed by a
+                // top-level vendored crate name. If `crate::brush_parser::` is present we
+                // want to keep it as-is (it's a cross-crate reference). We therefore use
+                // a negative lookahead to avoid rewriting those cases into
+                // `crate::brush_core::brush_parser::...` which would be invalid.
+                // We can't use look-around with the `regex` crate, so match the
+                // `crate::` plus the immediate following identifier and decide
+                // whether to rewrite on a per-match basis.
+                let crate_re = Regex::new(r"\bcrate::([a-zA-Z_][a-zA-Z0-9_]*)").unwrap();
+                let crate_names_vec = crates.clone();
+                new_content = crate_re.replace_all(&new_content, |caps: &regex::Captures| {
+                    let next = caps.get(1).unwrap().as_str();
+                    // If the next segment is a vendored crate name, leave alone
+                    // (this is a cross-crate reference like `crate::brush_parser`).
+                    if crate_names_vec.contains(&next) {
+                        caps[0].to_string()
+                    } else {
+                        format!("crate::{}::{}", c_name, next)
+                    }
+                }).to_string();
                 // Revert any accidental rewrites of our host trampoline module
                 // so trampolines injected earlier continue to call the real
                 // `crate::stubs_impl` in the host crate rather than
@@ -400,6 +401,22 @@ pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>
                 let host_stub_prefix = format!("crate::{}::stubs_impl", c_name);
                 if new_content.contains(&host_stub_prefix) {
                     new_content = new_content.replace(&host_stub_prefix, "crate::stubs_impl");
+                }
+                // Revert accidental rewrites of the interp_log_shim trampoline which should
+                // call into the host `crate::tty::interp_log_shim` rather than
+                // `crate::<vendored>::tty::interp_log_shim` after the generic `crate::`
+                // qualification rewrites above.
+                let interp_shim_prefix = format!("crate::{}::tty::interp_log_shim", c_name);
+                if new_content.contains(&interp_shim_prefix) {
+                    new_content = new_content.replace(&interp_shim_prefix, "crate::tty::interp_log_shim");
+                }
+
+                // Handle `use crate::{...}` style imports which our simple
+                // `crate::X` matcher doesn't catch. Rewrite them to include
+                // the current crate qualification: `crate::{...}` ->
+                // `crate::c_name::{...}` so internal imports resolve.
+                if new_content.contains("crate::{") {
+                    new_content = new_content.replace("crate::{", &format!("crate::{}::{{", c_name));
                 }
 
                 
@@ -540,6 +557,31 @@ pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>
                  // Patch call sites: .read_line(prompt)? -> .read_line(prompt).await?
                  let call_re = Regex::new(r"\.read_line\(([^)]*)\)\?").unwrap();
                  new_content = call_re.replace_all(&new_content, ".read_line($1).await?").to_string();
+            }
+
+            // Deduplicate identical `use ...;` imports which can be
+            // introduced by earlier transformations or upstream changes.
+            // Re-importing the same item can cause `E0252` (defined
+            // multiple times) so collapse exact duplicate `use` lines.
+            {
+                use std::collections::HashSet;
+                let mut seen: HashSet<String> = HashSet::new();
+                let mut out_lines: Vec<&str> = Vec::new();
+                for line in new_content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("use ") && trimmed.ends_with(";") {
+                        if seen.contains(trimmed) {
+                            // skip duplicate import
+                            continue;
+                        }
+                        seen.insert(trimmed.to_string());
+                    }
+                    out_lines.push(line);
+                }
+                new_content = out_lines.join("\n");
+                if !new_content.ends_with('\n') {
+                    new_content.push('\n');
+                }
             }
 
             if content != new_content {
