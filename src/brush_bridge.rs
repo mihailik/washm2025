@@ -68,8 +68,12 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     
     // If we have user args, run them as a single command with -c
     if !user_args.is_empty() {
-        args.push("-c".to_string());
-        args.push(user_args.join(" "));
+        if user_args.iter().any(|a| a == "-c" || a == "--command") {
+            args.extend(user_args);
+        } else {
+            args.push("-c".to_string());
+            args.push(user_args.join(" "));
+        }
     }
 
     let extra_builtins = |map: &mut std::collections::HashMap<String, crate::brush_core::builtins::Registration>| {

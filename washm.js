@@ -13,7 +13,38 @@ async function run() {
   const { execSync } = require('child_process');
   const os = require('os');
 
-  const cliArgs = process.argv.slice(2);
+  // Normalize CLI args: combine multi-token values for -c into a single token so
+  // guests always receive the full command string as one value. This handles
+  // invocations like `-c echo ok` (without quotes) as well as `-c "echo ok"`.
+  const rawCliArgs = process.argv.slice(2);
+  const normalizedArgs = [];
+  for (let i = 0; i < rawCliArgs.length; i++) {
+    const a = rawCliArgs[i];
+    if (a === '-c' || a === '--command') {
+      // Collect following tokens until next token looks like an option (starts with '-')
+      // or we hit the end. Join them with spaces into a single value token.
+      let j = i + 1;
+      const parts = [];
+      while (j < rawCliArgs.length && !rawCliArgs[j].startsWith('-')) {
+        parts.push(rawCliArgs[j]);
+        j++;
+      }
+      // If no following tokens, keep the flag as-is; clap will report missing value.
+      if (parts.length > 0) {
+        normalizedArgs.push(a);
+        normalizedArgs.push(parts.join(' '));
+        i = j - 1; // advance
+        continue;
+      } else {
+        normalizedArgs.push(a);
+        continue;
+      }
+    }
+    normalizedArgs.push(a);
+  }
+
+  const cliArgs = normalizedArgs;
+  if (process.env.WASHM_DEBUG) console.error("DEBUG HOST: CLI args:", cliArgs);
   const isVerbose = cliArgs.includes("--verbose");
 
   let _origEmitWarning = null;
@@ -33,9 +64,23 @@ async function run() {
     _didOverride = true;
   }
 
-  let wasmPath = cliArgs.find(a => !a.startsWith('-'));
-  if (wasmPath) {
-    try { await fs.access(wasmPath); } catch (e) { wasmPath = null; }
+  // Determine the guest wasm path from CLI args. Avoid treating arbitrary
+  // non-option tokens (for example, the argument to "-c") as the wasm path.
+  // Prefer an explicit arg that ends with `.wasm`, or an explicit path (contains
+  // a directory separator) or the literal `washm.wasm` if it exists.
+  let wasmPath = null;
+  for (const a of cliArgs) {
+    if (a.endsWith('.wasm')) {
+      try { await fs.access(a); wasmPath = a; break; } catch (e) { /* not accessible */ }
+    }
+  }
+
+  if (!wasmPath) {
+    for (const a of cliArgs) {
+      if (a.includes('/') || a === 'washm.wasm') {
+        try { await fs.access(a); wasmPath = a; break; } catch (e) { /* not accessible */ }
+      }
+    }
   }
   
   if (!wasmPath) {
@@ -52,6 +97,7 @@ async function run() {
   }
 
   let guestArgs = [];
+
   if (wasmPath) {
     const wasmIndex = cliArgs.indexOf(wasmPath);
     if (wasmIndex >= 0) {
@@ -59,14 +105,22 @@ async function run() {
     } else {
       guestArgs = [path.basename(wasmPath), ...cliArgs];
     }
-  } else {
-    guestArgs = [];
   }
   const wasiArgs = guestArgs;
   let WASI = require('wasi').WASI;
   if (_didOverride && _origEmitWarning) {
     process.emitWarning = _origEmitWarning;
   }
+
+  // Ensure host exits on SIGINT/SIGTERM so Ctrl+C kills the running shell.
+  process.on('SIGINT', () => {
+    console.error('Received SIGINT, exiting');
+    process.exit(130);
+  });
+  process.on('SIGTERM', () => {
+    console.error('Received SIGTERM, exiting');
+    process.exit(143);
+  });
 
   // Initialize globalThis.mounted
   const evalState = new Map(); // Stores { js: string, json: string } for each cookie
@@ -149,7 +203,7 @@ async function run() {
     })
   };
 
-  if (isVerbose) console.error("WASI args:", wasiArgs);
+  if (process.env.WASHM_DEBUG) console.error("DEBUG HOST: WASI args:", wasiArgs);
   const wasi = new WASI({
     args: wasiArgs,
     env: Object.assign({}, process.env),
@@ -527,7 +581,23 @@ async function run() {
 
   importObj.wasi_snapshot_preview1 = wrapped;
 
-  const instance = await WebAssembly.instantiate(module, importObj);
+  let instance;
+  try {
+    instance = await WebAssembly.instantiate(module, importObj);
+  } catch (e) {
+    // If the module's start function called proc_exit, Node may present it as an
+    // exception during instantiate; honor any exit code encoded in the error.
+    if (e && typeof e === 'object') {
+      if (typeof e.code === 'number') process.exit(e.code);
+      if (e.message) {
+        const m = String(e.message).match(/exit\s+code[:\s]+(\d+)/i);
+        if (m) process.exit(parseInt(m[1], 10));
+      }
+    }
+    // Rethrow otherwise
+    throw e;
+  }
+
   memRef.memory = instance.exports.memory;
 
   try {
