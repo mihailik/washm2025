@@ -22,6 +22,9 @@ fn ensure_cache() -> &'static StartupJson {
     unsafe {
         if CACHE.is_none() {
             CACHE = load_startup_from_fs().or_else(|| Some(StartupJson::default()));
+            // Install guest-side process bridge JS via eval bridge if possible.
+            // Best-effort: do not panic if host/filesystem aren't available.
+            crate::process_bridge::install_process_bridge();
         }
         CACHE.as_ref().unwrap()
     }

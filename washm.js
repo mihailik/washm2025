@@ -299,7 +299,6 @@ async function run() {
   }
 
   function resolveMounted(p) {
-      // p is like "dev/host/washm/start_pwd"
       const parts = p.split('/');
       if (parts[0] === 'dev' && parts[1] === 'host') {
           let curr = globalThis.mounted;
@@ -321,7 +320,6 @@ async function run() {
         const target = resolveMounted(p);
         if (target) {
             const fd = nextFakeFd++;
-            // If it's a virtual file object (from proxy)
             if (target._isVirtualFile) {
                 fdToVfs.set(fd, { target, pos: 0, mode: 'rw' });
             } else if (typeof target === 'string') {
@@ -377,7 +375,13 @@ async function run() {
         const bytes = new Uint8Array(mem.buffer, bufPtr, bufLen);
         const text = new TextDecoder('utf-8').decode(bytes);
         
-        if (info.target && info.target.write) {
+        // If we cached a path, re-resolve it now and call write
+        if (info.resolveFromPath) {
+            const target = resolveMounted(info.resolveFromPath);
+            if (target && target.write) {
+                target.write(text);
+            }
+        } else if (info.target && info.target.write) {
             info.target.write(text);
         } else if (info.write) {
             info.write.call(info, text);
@@ -395,12 +399,24 @@ async function run() {
     if (fdToVfs.has(fd)) {
       const info = fdToVfs.get(fd);
       let content = '';
-      if (info.content) {
+      
+      // If we cached a path, re-resolve it now to get fresh data
+      if (info.resolveFromPath) {
+          const target = resolveMounted(info.resolveFromPath);
+          if (target && target.read) {
+              content = target.read();
+          }
+      } else if (info.content) {
           content = info.content;
       } else if (info.target && info.target.read) {
           content = info.target.read();
       } else if (info.read) {
           content = info.read();
+      }
+
+      if (!content) {
+          writeU32(nread_ptr, 0);
+          return 0;
       }
 
       const bytes = new TextEncoder().encode(content);
@@ -432,7 +448,14 @@ async function run() {
     if (fdToVfs.has(fd)) {
       const info = fdToVfs.get(fd);
       fdToVfs.delete(fd);
-      if (info.target && info.target.close) {
+      
+      // If we cached a path, re-resolve it now and call close
+      if (info.resolveFromPath) {
+          const target = resolveMounted(info.resolveFromPath);
+          if (target && target.close) {
+              target.close();
+          }
+      } else if (info.target && info.target.close) {
           info.target.close();
       } else if (info.close) {
           info.close.call(info);

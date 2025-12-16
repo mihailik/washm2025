@@ -6,7 +6,9 @@ use crate::tty::crossterm_shim::platform::{TtyDelegates, set_tty_delegates};
 include!(concat!(env!("OUT_DIR"), "/embedded_mods.rs"));
 
 mod host_startup;
+mod process_bridge;
 pub mod stubs_impl;
+pub mod async_sleep;
 
 mod command;
 pub mod brush_bridge;

@@ -260,6 +260,45 @@ fn patch_files(dir: &Path) {
                 new_content = regex_replace(new_content, pattern, to, path);
             }
 
+            // Patch brush-core/src/sys/stubs/process.rs to use VFS bridge
+            if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/process.rs")) {
+                // Replace the spawn function
+                let spawn_pattern = r#"(?s)pub\(crate\)\s+fn\s+spawn\s*\(\s*mut\s+command:\s*std::process::Command\s*\)\s*->\s*std::io::Result<Child>\s*\{\s*let\s+child\s*=\s*command\.spawn\(\)\?;\s*Ok\(Child\s*\{\s*inner:\s*child\s*\}\)\s*\}"#;
+                let spawn_to = r#"pub(crate) fn spawn(command: std::process::Command) -> std::io::Result<Child> {
+    let guest_child = crate::stubs_impl::spawn_process(command)?;
+    Ok(Child { inner: guest_child })
+}"#;
+                new_content = regex_replace(new_content, spawn_pattern, spawn_to, path);
+                
+                // Replace Child struct to use GuestChild
+                let struct_pattern = r#"(?s)pub\s+struct\s+Child\s*\{\s*inner:\s*std::process::Child,\s*\}"#;
+                let struct_to = r#"pub struct Child {
+    inner: crate::stubs_impl::GuestChild,
+}"#;
+                new_content = regex_replace(new_content, struct_pattern, struct_to, path);
+                
+                // Update id method to delegate to GuestChild
+                let id_pattern = r#"(?s)pub\s+fn\s+id\s*\(\s*&self\s*\)\s*->\s*Option<u32>\s*\{\s*None\s*\}"#;
+                let id_to = r#"pub fn id(&self) -> Option<u32> {
+        self.inner.id()
+    }"#;
+                new_content = regex_replace(new_content, id_pattern, id_to, path);
+                
+                // Update wait method to delegate to GuestChild
+                let wait_pattern = r#"(?s)pub\s+async\s+fn\s+wait\s*\(\s*&mut\s+self\s*\)\s*->\s*std::io::Result<ExitStatus>\s*\{\s*self\.inner\.wait\(\)\s*\}"#;
+                let wait_to = r#"pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        self.inner.wait().await
+    }"#;
+                new_content = regex_replace(new_content, wait_pattern, wait_to, path);
+                
+                // Update wait_with_output method
+                let wait_out_pattern = r#"(?s)pub\s+async\s+fn\s+wait_with_output\s*\(\s*self\s*\)\s*->\s*std::io::Result<Output>\s*\{\s*self\.inner\.wait_with_output\(\)\s*\}"#;
+                let wait_out_to = r#"pub async fn wait_with_output(self) -> std::io::Result<Output> {
+        self.inner.wait_with_output().await
+    }"#;
+                new_content = regex_replace(new_content, wait_out_pattern, wait_out_to, path);
+            }
+
             // Patch brush-core/src/sys/stubs/signal.rs to trampoline to our safe implementation
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/signal.rs")) {
                 let pattern1 = r#"(?s)(pub\(crate\)\s+fn\s+continue_process\s*\(_pid:\s*sys::process::ProcessId\)\s*->\s*Result<\(\),\s*error::Error>\s*\{)\s*Err\(error::ErrorKind::NotSupportedOnThisPlatform\("continuing process"\)\.into\(\)\)\s*\}"#;
