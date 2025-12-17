@@ -1,12 +1,17 @@
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Default, Clone)]
-struct StartupJson {
-    env: Option<std::collections::HashMap<String, String>>,
-    user: Option<String>,
-    hostname: Option<String>,
+struct UserInfo {
+    username: Option<String>,
     uid: Option<u32>,
     gid: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct StartupJson {
+    env: Option<std::collections::HashMap<String, String>>,
+    hostname: Option<String>,
+    userInfo: Option<UserInfo>,
 }
 
 fn parse_startup_str(s: &str) -> Option<StartupJson> {
@@ -32,7 +37,9 @@ fn ensure_cache() -> &'static StartupJson {
 
 pub(crate) fn startup_username() -> String {
     let v = ensure_cache();
-    v.user.clone().unwrap_or_else(|| "user".to_string())
+    v.userInfo.as_ref()
+        .and_then(|ui| ui.username.clone())
+        .unwrap_or_else(|| "user".to_string())
 }
 
 pub(crate) fn startup_hostname() -> String {
@@ -42,12 +49,16 @@ pub(crate) fn startup_hostname() -> String {
 
 pub(crate) fn startup_uid() -> u32 {
     let v = ensure_cache();
-    v.uid.unwrap_or(1000)
+    v.userInfo.as_ref()
+        .and_then(|ui| ui.uid)
+        .unwrap_or(1000)
 }
 
 pub(crate) fn startup_gid() -> u32 {
     let v = ensure_cache();
-    v.gid.unwrap_or(1000)
+    v.userInfo.as_ref()
+        .and_then(|ui| ui.gid)
+        .unwrap_or(1000)
 }
 
 #[cfg(test)]
@@ -56,25 +67,25 @@ mod tests {
 
     #[test]
     fn parse_valid_json() {
-        let s = r#"{"user":"alice","uid":42,"gid":43}"#;
+        let s = r#"{"userInfo":{"username":"alice","uid":42,"gid":43}}"#;
         let got = parse_startup_str(s).unwrap();
-        assert_eq!(got.user.unwrap(), "alice");
-        assert_eq!(got.uid.unwrap(), 42);
-        assert_eq!(got.gid.unwrap(), 43);
+        assert_eq!(got.userInfo.as_ref().unwrap().username.as_ref().unwrap(), "alice");
+        assert_eq!(got.userInfo.as_ref().unwrap().uid.unwrap(), 42);
+        assert_eq!(got.userInfo.as_ref().unwrap().gid.unwrap(), 43);
     }
 
     #[test]
     fn parse_partial_json() {
-        let s = r#"{"user":"bob"}"#;
+        let s = r#"{"userInfo":{"username":"bob"}}"#;
         let got = parse_startup_str(s).unwrap();
-        assert_eq!(got.user.unwrap(), "bob");
-        assert!(got.uid.is_none());
+        assert_eq!(got.userInfo.as_ref().unwrap().username.as_ref().unwrap(), "bob");
+        assert!(got.userInfo.as_ref().unwrap().uid.is_none());
     }
 
     #[test]
     fn parse_with_hostname() {
         let s = r#"{"hostname":"host.local"}"#;
         let got = parse_startup_str(s).unwrap();
-        assert_eq!(got.hostname.unwrap(), "host.local");
+        assert_eq!(got.hostname.as_ref().unwrap(), "host.local");
     }
 }

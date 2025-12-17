@@ -25,6 +25,26 @@ pub fn startup_hostname() -> String {
     crate::host_startup::startup_hostname()
 }
 
+// --- UID/GID Helpers ---
+// These functions read from the startup metadata which includes os.userInfo()
+// The host_startup module already caches the startup JSON, so we just delegate to it
+
+pub fn get_current_uid() -> Result<u32, crate::brush_core::error::Error> {
+    Ok(crate::host_startup::startup_uid())
+}
+
+pub fn get_current_gid() -> Result<u32, crate::brush_core::error::Error> {
+    Ok(crate::host_startup::startup_gid())
+}
+
+pub fn get_effective_uid() -> Result<u32, crate::brush_core::error::Error> {
+    Ok(crate::host_startup::startup_uid())
+}
+
+pub fn get_effective_gid() -> Result<u32, crate::brush_core::error::Error> {
+    Ok(crate::host_startup::startup_gid())
+}
+
 // --- OpenFile Helpers ---
 pub fn clone_open_file(f: &crate::brush_core::openfiles::OpenFile) -> crate::brush_core::openfiles::OpenFile {
     match f.try_clone() {

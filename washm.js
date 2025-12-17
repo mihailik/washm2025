@@ -127,14 +127,15 @@ async function run() {
   
   globalThis.mounted = {
     washm: {
-        get start_pwd() { return process.cwd(); },        // JSON string exposing startup parameters: env, user, cwd, args
+        get start_pwd() { return process.cwd(); },
         startup: JSON.stringify({
           env: Object.assign({}, process.env),
-          user: process.env.USER || os.userInfo().username,
           hostname: os.hostname(),
           cwd: process.cwd(),
+          userInfo: os.userInfo(),
           args: wasiArgs
-        }),        set exit_code(val) {
+        }),
+        set exit_code(val) {
             // Accept strings; default to 0 on empty or invalid values.
             const parsed = parseInt(String(val).trim());
             const code = Number.isFinite(parsed) ? parsed : 0;
