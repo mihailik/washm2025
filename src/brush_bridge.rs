@@ -66,11 +66,21 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     args.push("--input-backend".to_string());
     args.push("minimal".to_string());
     
-    // If we have user args, run them as a single command with -c
+    // If we have user args, pass them through to brush
+    // Only wrap with -c if they are NOT brush command-line options
     if !user_args.is_empty() {
-        if user_args.iter().any(|a| a == "-c" || a == "--command") {
+        // Check if user provided -c/--command explicitly, or if the args are brush options
+        let has_command_flag = user_args.iter().any(|a| a == "-c" || a == "--command");
+        let has_brush_option = user_args.iter().any(|a| {
+            // Check for long options or short options (but not negative numbers)
+            a.starts_with("--") || (a.starts_with("-") && a.len() == 2 && a.chars().nth(1).map_or(false, |c| c.is_alphabetic()))
+        });
+        
+        if has_command_flag || has_brush_option {
+            // Pass args through directly to brush
             args.extend(user_args);
         } else {
+            // Treat as a command to execute with -c
             args.push("-c".to_string());
             args.push(user_args.join(" "));
         }

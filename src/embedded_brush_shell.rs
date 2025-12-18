@@ -2,6 +2,9 @@ use crate::brush_shell::args::CommandLineArgs;
 use crate::brush_shell::entry;
 use std::collections::HashMap;
 
+/// WASHM version, set at build time
+const WASHM_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub fn run_custom(
     args: Vec<String>,
     extra_builtins: impl FnOnce(&mut HashMap<String, crate::brush_core::builtins::Registration>),
@@ -14,10 +17,20 @@ pub fn run_custom(
     let _ = crate::host_startup::startup_gid();
     let _ = crate::host_startup::startup_hostname();
 
+    // Special handling for --version: print washm version instead of brush version
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        println!("washm {}", WASHM_VERSION);
+        // Exit cleanly by writing exit code 0
+        let _ = std::fs::write("/dev/host/washm/exit_code", "0");
+        return;
+    }
+
     let parsed_args = match CommandLineArgs::try_parse_from(args.iter().cloned()) {
         Ok(a) => a,
         Err(e) => {
             let _ = e.print();
+            // Exit cleanly with error code 1 to prevent hanging
+            let _ = std::fs::write("/dev/host/washm/exit_code", "1");
             return;
         }
     };
