@@ -4,6 +4,3 @@
 [submodule "brush-fork"]
 	path = brush-fork
 	url = https://github.com/mavity/brush-fork
-[submodule "ion-fork"]
-	path = ion-fork
-	url = https://github.com/mavity/ion-fork
