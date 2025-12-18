@@ -3,6 +3,8 @@ use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
 use regex::Regex;
+use ast_grep_core::{AstGrep, Language};
+use ast_grep_language::SupportLang;
 
 fn main() {
     // Note: This build script synthesizes trimmed `pub mod` entries for a set
@@ -146,6 +148,22 @@ fn regex_replace(content: String, pattern: &str, replacement: &str, path: &Path)
     re.replace_all(&content, replacement).to_string()
 }
 
+fn ast_grep_replace(content: &str, pattern_str: &str, replacement_str: &str, path: &Path) -> String {
+    let lang = SupportLang::Rust;
+    let mut grep = AstGrep::new(content, lang);
+    let edits = grep.root().replace_all(pattern_str, replacement_str);
+
+    if edits.is_empty() {
+        println!("cargo:warning=ast-grep pattern not found (skipping): {} in {:?}", pattern_str, path);
+        return content.to_string();
+    }
+
+    for edit in edits.into_iter().rev() {
+        grep.edit(edit).unwrap();
+    }
+    grep.generate()
+}
+
 fn patch_files(dir: &Path) {
     let crates = vec![
         "brush_core",
@@ -186,7 +204,7 @@ fn patch_files(dir: &Path) {
             // Patch brush-core/src/sys/stubs/users.rs to avoid "operation not supported" on WASI
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/users.rs")) {
                 // Use helpers that read startup JSON at /dev/host/washm/startup and cache values
-                new_content = regex_replace(new_content, r#"Err\s*\(\s*error::ErrorKind::NotSupportedOnThisPlatform\s*\(\s*"getting current uid"\s*\)\s*\.into\(\)\s*\)"#, "Ok(crate::stubs_impl::startup_uid())", path);
+                new_content = ast_grep_replace(&new_content, r#"Err(error::ErrorKind::NotSupportedOnThisPlatform("getting current uid").into())"#, "Ok(crate::stubs_impl::startup_uid())", path);
                 new_content = regex_replace(new_content, r#"Err\s*\(\s*error::ErrorKind::NotSupportedOnThisPlatform\s*\(\s*"getting current gid"\s*\)\s*\.into\(\)\s*\)"#, "Ok(crate::stubs_impl::startup_gid())", path);
                 new_content = regex_replace(new_content, r#"Err\s*\(\s*error::ErrorKind::NotSupportedOnThisPlatform\s*\(\s*"getting effective uid"\s*\)\s*\.into\(\)\s*\)"#, "Ok(crate::stubs_impl::startup_uid())", path);
                 new_content = regex_replace(new_content, r#"Err\s*\(\s*error::ErrorKind::NotSupportedOnThisPlatform\s*\(\s*"getting effective gid"\s*\)\s*\.into\(\)\s*\)"#, "Ok(crate::stubs_impl::startup_gid())", path);
