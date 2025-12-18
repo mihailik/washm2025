@@ -205,27 +205,31 @@ fn patch_files(dir: &Path) {
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/users.rs")) {
                 // Use helpers that read startup JSON at /dev/host/washm/startup and cache values
                 new_content = ast_grep_replace(&new_content, r#"Err(error::ErrorKind::NotSupportedOnThisPlatform("getting current uid").into())"#, "Ok(crate::stubs_impl::startup_uid())", path);
-                new_content = regex_replace(new_content, r#"Err\s*\(\s*error::ErrorKind::NotSupportedOnThisPlatform\s*\(\s*"getting current gid"\s*\)\s*\.into\(\)\s*\)"#, "Ok(crate::stubs_impl::startup_gid())", path);
-                new_content = regex_replace(new_content, r#"Err\s*\(\s*error::ErrorKind::NotSupportedOnThisPlatform\s*\(\s*"getting effective uid"\s*\)\s*\.into\(\)\s*\)"#, "Ok(crate::stubs_impl::startup_uid())", path);
-                new_content = regex_replace(new_content, r#"Err\s*\(\s*error::ErrorKind::NotSupportedOnThisPlatform\s*\(\s*"getting effective gid"\s*\)\s*\.into\(\)\s*\)"#, "Ok(crate::stubs_impl::startup_gid())", path);
-                new_content = regex_replace(new_content, r#"Err\s*\(\s*error::ErrorKind::NotSupportedOnThisPlatform\s*\(\s*"getting current username"\s*\)\s*\.into\(\)\s*\)"#, "Ok(crate::stubs_impl::startup_username())", path);
+                new_content = ast_grep_replace(&new_content, r#"Err(error::ErrorKind::NotSupportedOnThisPlatform("getting current gid").into())"#, "Ok(crate::stubs_impl::startup_gid())", path);
+                new_content = ast_grep_replace(&new_content, r#"Err(error::ErrorKind::NotSupportedOnThisPlatform("getting effective uid").into())"#, "Ok(crate::stubs_impl::startup_uid())", path);
+                new_content = ast_grep_replace(&new_content, r#"Err(error::ErrorKind::NotSupportedOnThisPlatform("getting effective gid").into())"#, "Ok(crate::stubs_impl::startup_gid())", path);
+                new_content = ast_grep_replace(&new_content, r#"Err(error::ErrorKind::NotSupportedOnThisPlatform("getting current username").into())"#, "Ok(crate::stubs_impl::startup_username())", path);
             }
 
             // Patch brush-core/src/openfiles.rs to avoid panics when cloning isn't supported on WASI
             if path.ends_with(std::path::Path::new("brush-core/src/openfiles.rs")) {
-                // Match `fn clone` signature and the specific `unwrap()` call inside.
-                // We capture the function header in group 1 and the closing brace in group 2.
-                let pattern = r"(?s)(fn\s+clone\s*\([^)]*\)\s*->\s*Self\s*\{\s*)self\.try_clone\(\)\s*\.\s*unwrap\(\)(\s*\})";
-                
-                let replacement = "${1}crate::stubs_impl::clone_open_file(self)${2}";
-                new_content = regex_replace(new_content, pattern, &replacement, path);
+                // Match `fn clone` and replace the `unwrap()` call with our safe implementation.
+                let pattern = r"fn clone(&self) -> Self {
+        self.try_clone().unwrap()
+    }";
+                let replacement = r"fn clone(&self) -> Self {
+        crate::stubs_impl::clone_open_file(self)
+    }";
+                new_content = ast_grep_replace(&new_content, pattern, replacement, path);
             }
 
             // Patch brush-core/src/sys/stubs/network.rs to use host-provided hostname
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/network.rs")) {
-                let pattern = r#"(?s)pub\(crate\)\s+fn\s+get_hostname\s*\(\)\s*->\s*std::io::Result<std::ffi::OsString>\s*\{\s*Ok\(""\.into\(\)\)\s*\}"#;
+                let pattern = r#"pub(crate) fn get_hostname() -> std::io::Result<std::ffi::OsString> {
+    Ok("".into())
+}"#;
                 let replacement = "pub(crate) fn get_hostname() -> std::io::Result<std::ffi::OsString> {\n    // Use host-provided hostname (via startup JSON) when available\n    Ok(std::ffi::OsString::from(crate::stubs_impl::startup_hostname()))\n}";
-                new_content = regex_replace(new_content, pattern, replacement, path);
+                new_content = ast_grep_replace(&new_content, pattern, replacement, path);
             }
 
             // Re-export startup helpers at `crate::brush_core::sys::stubs` so
@@ -271,85 +275,118 @@ fn patch_files(dir: &Path) {
 
             // Patch brush-core/src/sys/stubs/fs.rs to trampoline to our safe implementation
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/fs.rs")) {
-                let pattern = r#"(?s)pub\s+fn\s+open_null_file\s*\(\)\s*->\s*Result<std::fs::File,\s*error::Error>\s*\{\s*Err\(error::ErrorKind::NotSupportedOnThisPlatform\("opening null file"\)\.into\(\)\)\s*\}"#;
+                let pattern = r#"pub fn open_null_file() -> Result<std::fs::File, error::Error> {
+    Err(error::ErrorKind::NotSupportedOnThisPlatform("opening null file").into())
+}"#;
                 let to = r#"pub fn open_null_file() -> Result<std::fs::File, error::Error> {
     crate::stubs_impl::open_null_file()
 }"#;
-                new_content = regex_replace(new_content, pattern, to, path);
+                new_content = ast_grep_replace(&new_content, pattern, to, path);
             }
 
             // Patch brush-core/src/sys/stubs/process.rs to use VFS bridge
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/process.rs")) {
                 // Replace the spawn function
-                let spawn_pattern = r#"(?s)pub\(crate\)\s+fn\s+spawn\s*\(\s*mut\s+command:\s*std::process::Command\s*\)\s*->\s*std::io::Result<Child>\s*\{\s*let\s+child\s*=\s*command\.spawn\(\)\?;\s*Ok\(Child\s*\{\s*inner:\s*child\s*\}\)\s*\}"#;
+                let spawn_pattern = r#"pub(crate) fn spawn(mut command: std::process::Command) -> std::io::Result<Child> {
+    let child = command.spawn()?;
+    Ok(Child { inner: child })
+}"#;
                 let spawn_to = r#"pub(crate) fn spawn(command: std::process::Command) -> std::io::Result<Child> {
     let guest_child = crate::stubs_impl::spawn_process(command)?;
     Ok(Child { inner: guest_child })
 }"#;
-                new_content = regex_replace(new_content, spawn_pattern, spawn_to, path);
+                new_content = ast_grep_replace(&new_content, spawn_pattern, spawn_to, path);
                 
                 // Replace Child struct to use GuestChild
-                let struct_pattern = r#"(?s)pub\s+struct\s+Child\s*\{\s*inner:\s*std::process::Child,\s*\}"#;
+                let struct_pattern = r#"pub struct Child {
+    inner: std::process::Child,
+}"#;
                 let struct_to = r#"pub struct Child {
     inner: crate::stubs_impl::GuestChild,
 }"#;
-                new_content = regex_replace(new_content, struct_pattern, struct_to, path);
+                new_content = ast_grep_replace(&new_content, struct_pattern, struct_to, path);
                 
                 // Update id method to delegate to GuestChild
-                let id_pattern = r#"(?s)pub\s+fn\s+id\s*\(\s*&self\s*\)\s*->\s*Option<u32>\s*\{\s*None\s*\}"#;
+                let id_pattern = r#"pub fn id(&self) -> Option<u32> {
+        None
+    }"#;
                 let id_to = r#"pub fn id(&self) -> Option<u32> {
         self.inner.id()
     }"#;
-                new_content = regex_replace(new_content, id_pattern, id_to, path);
+                new_content = ast_grep_replace(&new_content, id_pattern, id_to, path);
                 
                 // Update wait method to delegate to GuestChild
-                let wait_pattern = r#"(?s)pub\s+async\s+fn\s+wait\s*\(\s*&mut\s+self\s*\)\s*->\s*std::io::Result<ExitStatus>\s*\{\s*self\.inner\.wait\(\)\s*\}"#;
+                let wait_pattern = r#"pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        self.inner.wait()
+    }"#;
                 let wait_to = r#"pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
         self.inner.wait().await
     }"#;
-                new_content = regex_replace(new_content, wait_pattern, wait_to, path);
+                new_content = ast_grep_replace(&new_content, wait_pattern, wait_to, path);
                 
                 // Update wait_with_output method
-                let wait_out_pattern = r#"(?s)pub\s+async\s+fn\s+wait_with_output\s*\(\s*self\s*\)\s*->\s*std::io::Result<Output>\s*\{\s*self\.inner\.wait_with_output\(\)\s*\}"#;
+                let wait_out_pattern = r#"pub async fn wait_with_output(self) -> std::io::Result<Output> {
+        self.inner.wait_with_output()
+    }"#;
                 let wait_out_to = r#"pub async fn wait_with_output(self) -> std::io::Result<Output> {
         self.inner.wait_with_output().await
     }"#;
-                new_content = regex_replace(new_content, wait_out_pattern, wait_out_to, path);
+                new_content = ast_grep_replace(&new_content, wait_out_pattern, wait_out_to, path);
             }
 
             // Patch brush-core/src/sys/stubs/signal.rs to trampoline to our safe implementation
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/signal.rs")) {
-                let pattern1 = r#"(?s)(pub\(crate\)\s+fn\s+continue_process\s*\(_pid:\s*sys::process::ProcessId\)\s*->\s*Result<\(\),\s*error::Error>\s*\{)\s*Err\(error::ErrorKind::NotSupportedOnThisPlatform\("continuing process"\)\.into\(\)\)\s*\}"#;
-                let to1 = "${1} crate::stubs_impl::continue_process(_pid) }";
-                new_content = regex_replace(new_content, pattern1, to1, path);
+                let pattern1 = r#"pub(crate) fn continue_process(_pid: sys::process::ProcessId) -> Result<(), error::Error> {
+    Err(error::ErrorKind::NotSupportedOnThisPlatform("continuing process").into())
+}"#;
+                let to1 = r#"pub(crate) fn continue_process(_pid: sys::process::ProcessId) -> Result<(), error::Error> {
+    crate::stubs_impl::continue_process(_pid)
+}"#;
+                new_content = ast_grep_replace(&new_content, pattern1, to1, path);
 
-                let pattern2 = r#"(?s)(pub\s+fn\s+kill_process\s*\(\s*_pid:\s*sys::process::ProcessId,\s*_signal:\s*traps::TrapSignal,\s*\)\s*->\s*Result<\(\),\s*error::Error>\s*\{)\s*Err\(error::ErrorKind::NotSupportedOnThisPlatform\("killing process"\)\.into\(\)\)\s*\}"#;
-                let to2 = "${1} crate::stubs_impl::kill_process(_pid, _signal) }";
-                new_content = regex_replace(new_content, pattern2, to2, path);
+                let pattern2 = r#"pub fn kill_process(_pid: sys::process::ProcessId, _signal: traps::TrapSignal) -> Result<(), error::Error> {
+    Err(error::ErrorKind::NotSupportedOnThisPlatform("killing process").into())
+}"#;
+                let to2 = r#"pub fn kill_process(_pid: sys::process::ProcessId, _signal: traps::TrapSignal) -> Result<(), error::Error> {
+    crate::stubs_impl::kill_process(_pid, _signal)
+}"#;
+                new_content = ast_grep_replace(&new_content, pattern2, to2, path);
             }
 
             // Patch brush-core/src/sys/stubs/commands.rs to trampoline to our safe implementation
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/commands.rs")) {
-                let pattern = r#"(?s)fn\s+inject_fds\s*\(\s*&mut\s+self,\s*mut\s+open_files:\s*impl\s+Iterator<Item\s*=\s*\(ShellFd,\s*openfiles::OpenFile\)>\s*,\s*\)\s*->\s*Result<\(\),\s*error::Error>\s*\{\s*if\s+open_files\.next\(\)\.is_some\(\)\s*\{\s*return\s+Err\(error::ErrorKind::NotSupportedOnThisPlatform\("fd redirections"\)\.into\(\)\);\s*\}\s*Ok\(\(\)\)\s*\}"#;
-                let to = r#"    fn inject_fds(
+                let pattern = r#"fn inject_fds(
+        &mut self,
+        mut open_files: impl Iterator<Item = (ShellFd, openfiles::OpenFile)>,
+    ) -> Result<(), error::Error> {
+        if open_files.next().is_some() {
+            return Err(error::ErrorKind::NotSupportedOnThisPlatform("fd redirections").into());
+        }
+        Ok(())
+    }"#;
+                let to = r#"fn inject_fds(
         &mut self,
         mut open_files: impl Iterator<Item = (ShellFd, openfiles::OpenFile)>,
     ) -> Result<(), error::Error> {
         crate::stubs_impl::inject_fds(open_files.collect::<Vec<_>>())
     }"#;
-                new_content = regex_replace(new_content, pattern, to, path);
+                new_content = ast_grep_replace(&new_content, pattern, to, path);
             }
 
             // Patch brush-core/src/interp.rs to log interpreter errors
             if path.ends_with(std::path::Path::new("brush-core/src/interp.rs")) {
-                let pattern = r#"(?s)Err\(err\)\s*=>\s*\{\s*// Display the error and convert to an execution result\.\s*let _ = shell\.display_error\(&mut params\.stderr\(shell\), &err\)\.await;\s*result = err\.into_result\(shell\);\s*\}"#;
+                let pattern = r#"Err(err) => {
+                    // Display the error and convert to an execution result.
+                    let _ = shell.display_error(&mut params.stderr(shell), &err).await;
+                    result = err.into_result(shell);
+                }"#;
                 let to = r#"Err(err) => {
                     // Display the error and convert to an execution result.
                     crate::tty::interp_log_shim::log_interp_error(command, &err, shell);
                     let _ = shell.display_error(&mut params.stderr(shell), &err).await;
                     result = err.into_result(shell);
                 }"#;
-                new_content = regex_replace(new_content, pattern, to, path);
+                new_content = ast_grep_replace(&new_content, pattern, to, path);
             }
 
 
