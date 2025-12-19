@@ -97,14 +97,8 @@ pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
             panic!("Failed to copy source");
         }
 
-        // For brush-interactive, do NOT copy `src/wasm_interactive.rs` or `src/tty/bridge.js` into OUT_DIR.
-        // The `patch_files` function will inject an include!-based module and rewrite any
-        // `include_str!("tty/bridge.js")` occurrences to point at the project `src/` path
-        // (using `concat!(env!("CARGO_MANIFEST_DIR"), "/src/tty/bridge.js")`) so the
-        // implementation stays in `src/` and remains type-checked and deterministic.
-        if dest_name == "brush-interactive" {
-            // No file copy here; transformations are handled below in `patch_files`.
-        }
+        // For brush-interactive, do NOT copy `src/wasm_interactive.rs` into OUT_DIR.
+       //  The implementation stays in `src/` and remains type-checked and deterministic.
         // Patch files
         patch_files(&dest_path);
 
@@ -197,10 +191,6 @@ fn patch_files(dir: &Path) {
             let content = fs::read_to_string(path).unwrap();
             let mut new_content = content.clone();
 
-            // Make any `include_str!("tty/bridge.js")` point at the project's src
-            // (so a physical copy of the JS file is not required in the vendored tree).
-            new_content = new_content.replace("include_str!(\"tty/bridge.js\")", "include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/tty/bridge.js\"))");
-
             // Patch brush-core/src/sys/stubs/users.rs to avoid "operation not supported" on WASI
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/users.rs")) {
                 // Use helpers that read startup JSON at /dev/host/washm/startup and cache values
@@ -246,32 +236,12 @@ fn patch_files(dir: &Path) {
             // contain `NotSupportedOnThisPlatform(` which would indicate we missed
             // a stub. Fail fast so we can fix the mapping rather than shipping
             // a runtime with unexpected generic errors.
-            if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs.rs")) {
-                // Perform a quick scan over the copied `brush-core` directory and fail
-                // the build if any `NotSupportedOnThisPlatform(` remains in the stubs.
-                let mut found = vec![];
-                // Only scan the `stubs` subtree rather than the whole `sys` tree,
-                // since other platform modules (e.g. windows) legitimately contain
-                // `NotSupportedOnThisPlatform` entries.
-                let stubs_dir = path.parent().unwrap().join("stubs");
-                if stubs_dir.exists() {
-                    for entry in WalkDir::new(&stubs_dir) {
-                        let entry = entry.unwrap();
-                        if entry.file_type().is_file() {
-                            let p = entry.path();
-                            if let Ok(s) = fs::read_to_string(p) {
-                                if s.contains("NotSupportedOnThisPlatform(") {
-                                    found.push(p.to_path_buf());
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if !found.is_empty() {
-                    panic!("Unpatched NotSupportedOnThisPlatform stubs found: {:?}", found);
-                }
-            }
+            //
+            // NOTE: We used to check this here when visiting stubs.rs, but that
+            // is flaky because WalkDir order is undefined - if stubs.rs is visited
+            // before the individual stub files (users.rs etc), they won't be patched
+            // yet and this check will fail. We rely on verify_no_stubs() at the end
+            // of main() instead.
 
             // Patch brush-core/src/sys/stubs/fs.rs to trampoline to our safe implementation
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/fs.rs")) {
@@ -681,6 +651,28 @@ pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>
             if content != new_content {
                 fs::write(path, new_content).unwrap();
             }
+        }
+    }
+
+    // After patching all files in this directory, perform a targeted check for stubs
+    // to ensure we didn't miss anything in the stubs directory.
+    // This is safe here because the loop above has finished processing all files.
+    let stubs_dir = dir.join("sys/stubs");
+    if stubs_dir.exists() {
+        let mut found = vec![];
+        for entry in WalkDir::new(&stubs_dir) {
+            let entry = entry.unwrap();
+            if entry.file_type().is_file() {
+                let p = entry.path();
+                if let Ok(s) = fs::read_to_string(p) {
+                    if s.contains("NotSupportedOnThisPlatform(") {
+                        found.push(p.to_path_buf());
+                    }
+                }
+            }
+        }
+        if !found.is_empty() {
+            panic!("Unpatched NotSupportedOnThisPlatform stubs found in {:?}: {:?}", stubs_dir, found);
         }
     }
 }

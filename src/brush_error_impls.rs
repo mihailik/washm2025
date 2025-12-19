@@ -13,7 +13,6 @@ macro_rules! impl_from_error {
 }
 
 impl_from_error!(std::io::Error);
-impl_from_error!(std::num::ParseIntError);
 impl_from_error!(std::num::TryFromIntError);
 impl_from_error!(std::string::FromUtf8Error);
 impl_from_error!(std::str::Utf8Error);
