@@ -15,7 +15,7 @@ impl SimpleCommand for CatCommand {
     ) -> Result<results::ExecutionResult, error::Error> {
         let args_vec: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
         
-        let code = crate::uutils_bridge::UutilsBridge::run("cat", &args_vec);
+        let code = crate::coreutils_dispatch::CoreutilsDispatch::run("cat", &args_vec);
         Ok(results::ExecutionResult::new(code as u8))
     }
 }

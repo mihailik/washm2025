@@ -1,10 +1,10 @@
-/// A tiny bridge stub for `uutils` coreutils library in the root crate.
+/// A tiny dispatcher stub for `uutils` coreutils library in the root crate.
 ///
 /// For now we only log the command name and arguments — the user may later
 /// wire this to `coreutils-fork` sub-crate `uu` libraries when they want an in-process call.
-pub struct UutilsBridge;
+pub struct CoreutilsDispatch;
 
-impl UutilsBridge {
+impl CoreutilsDispatch {
     /// Run a command by name; return an exit code.
     pub fn run(name: &str, args: &[String]) -> i32 {
         match name {

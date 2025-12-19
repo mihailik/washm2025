@@ -75,15 +75,15 @@ impl Default for JobManager {
 
 // Primary `execute_command_sync` now lives below (always uses coreutils/uucore crates as required)
 
-// Keep a minimal set of `uu_*` utilities wired directly; others route to the UutilsBridge
+// Keep a minimal set of `uu_*` utilities wired directly; others route to the CoreutilsDispatch
 pub fn execute_command_sync(command: &str, args: &[String]) -> i32 {
     let _args_os: Vec<OsString> = args.iter().map(|s| OsString::from(s)).collect();
 
     match command {
         // Tier 1: File operations (a small subset)
-        "cat" => crate::uutils_bridge::UutilsBridge::run("cat", args),
-        // For now, `ls` delegates to the bridge to avoid heavy crate features for wasm.
-        "ls" => crate::uutils_bridge::UutilsBridge::run("ls", args),
+        "cat" => crate::coreutils_dispatch::CoreutilsDispatch::run("cat", args),
+        // For now, `ls` delegates to the dispatcher to avoid heavy crate features for wasm.
+        "ls" => crate::coreutils_dispatch::CoreutilsDispatch::run("ls", args),
 
         // Built-ins and simpler utilities
         "echo" => {
@@ -98,11 +98,11 @@ pub fn execute_command_sync(command: &str, args: &[String]) -> i32 {
             0
         }
 
-        "pwd" => crate::uutils_bridge::UutilsBridge::run("pwd", args),
+        "pwd" => crate::coreutils_dispatch::CoreutilsDispatch::run("pwd", args),
 
-        // Fallback: delegate to UutilsBridge if configured
+        // Fallback: delegate to CoreutilsDispatch if configured
         _ => {
-            crate::uutils_bridge::UutilsBridge::run(command, args)
+            crate::coreutils_dispatch::CoreutilsDispatch::run(command, args)
         }
     }
 }

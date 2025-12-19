@@ -1,5 +1,5 @@
 (function() {
-    if (globalThis.washm_tty) return JSON.stringify({ ok: true });
+    if (globalThis.washm_tty) return { ok: true };
 
     const fs = require('fs');
     let buffer = [];

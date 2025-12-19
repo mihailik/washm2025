@@ -12,7 +12,7 @@ macro_rules! make_coreutil {
 
             fn execute<I: Iterator<Item = S>, S: AsRef<str>>( _context: commands::ExecutionContext<'_>, args: I,) -> Result<results::ExecutionResult, error::Error> {
                 let args_vec: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
-                let code = crate::uutils_bridge::UutilsBridge::run($cmd, &args_vec);
+                let code = crate::coreutils_dispatch::CoreutilsDispatch::run($cmd, &args_vec);
                 Ok(results::ExecutionResult::new(code as u8))
             }
         }

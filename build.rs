@@ -94,7 +94,7 @@ pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
         if dest_name == "brush-core" {
             // Do NOT copy `src/interp_log.rs` into the vendored tree. Instead,
             // `patch_files` will rewrite interpreter error handling sites to call
-            // a host shim under `crate::tty::interp_log_shim` so the real
+            // a host shim under `crate::shims::interp_log` so the real
             // implementation lives in `src/` and is type-checked and deterministic.
         }
     }
@@ -348,7 +348,7 @@ fn patch_files(dir: &Path) {
                 }"#;
                 let to = r#"Err(err) => {
                     // Display the error and convert to an execution result.
-                    crate::tty::interp_log_shim::log_interp_error(command, &err, shell);
+                    crate::shims::interp_log::log_interp_error(command, &err, shell);
                     let _ = shell.display_error(&mut params.stderr(shell), &err).await;
                     result = err.into_result(shell);
                 }"#;
@@ -461,12 +461,12 @@ fn patch_files(dir: &Path) {
                     new_content = new_content.replace(&host_stub_prefix, "crate::stubs_impl");
                 }
                 // Revert accidental rewrites of the interp_log_shim trampoline which should
-                // call into the host `crate::tty::interp_log_shim` rather than
-                // `crate::<vendored>::tty::interp_log_shim` after the generic `crate::`
+                // call into the host `crate::shims::interp_log` rather than
+                // `crate::<vendored>::shims::interp_log` after the generic `crate::`
                 // qualification rewrites above.
-                let interp_shim_prefix = format!("crate::{}::tty::interp_log_shim", c_name);
+                let interp_shim_prefix = format!("crate::{}::shims::interp_log", c_name);
                 if new_content.contains(&interp_shim_prefix) {
-                    new_content = new_content.replace(&interp_shim_prefix, "crate::tty::interp_log_shim");
+                    new_content = new_content.replace(&interp_shim_prefix, "crate::shims::interp_log");
                 }
 
                 // Handle `use crate::{...}` style imports which our simple
@@ -504,9 +504,9 @@ fn patch_files(dir: &Path) {
             }).to_string();
 
             // Patch: Redirect crossterm to our local shim
-            new_content = new_content.replace("crossterm::", "crate::tty::crossterm_shim::");
-            new_content = new_content.replace("use crossterm;", "use crate::tty::crossterm_shim as crossterm;");
-            new_content = new_content.replace("use crossterm ", "use crate::tty::crossterm_shim ");
+            new_content = new_content.replace("crossterm::", "crate::shims::crossterm::");
+            new_content = new_content.replace("use crossterm;", "use crate::shims::crossterm as crossterm;");
+            new_content = new_content.replace("use crossterm ", "use crate::shims::crossterm ");
 
             // 4. Special case: Disable conflicting blanket impl in brush-core/src/error.rs
             if path.ends_with(std::path::Path::new("brush-core/src/error.rs")) {
