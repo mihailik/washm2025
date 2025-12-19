@@ -74,7 +74,15 @@ impl UutilsBridge {
             "ls" => {
                 use std::io::Write;
                 let mut out = std::io::stdout();
-                let targets = if args.len() > 1 { args[1..].to_vec() } else { vec![".".to_string()] };
+                let mut targets = Vec::new();
+                for arg in &args[1..] {
+                    if !arg.starts_with('-') {
+                        targets.push(arg.clone());
+                    }
+                }
+                if targets.is_empty() {
+                    targets.push(".".to_string());
+                }
                 for t in targets {
                     match std::fs::read_dir(&t) {
                         Ok(entries) => {
@@ -90,6 +98,59 @@ impl UutilsBridge {
                     }
                 }
                 let _ = out.flush();
+                0
+            }
+            "head" => {
+                use std::io::{self, BufRead, Write};
+                let mut n = 10;
+                let mut files = Vec::new();
+                let mut i = 1;
+                while i < args.len() {
+                    if args[i] == "-n" && i + 1 < args.len() {
+                        if let Ok(val) = args[i+1].parse::<usize>() {
+                            n = val;
+                            i += 2;
+                            continue;
+                        }
+                    } else if args[i].starts_with("-n") {
+                        if let Ok(val) = args[i][2..].parse::<usize>() {
+                            n = val;
+                            i += 1;
+                            continue;
+                        }
+                    }
+                    if !args[i].starts_with('-') {
+                        files.push(args[i].clone());
+                    }
+                    i += 1;
+                }
+
+                let mut stdout = io::stdout();
+                if files.is_empty() {
+                    let stdin = io::stdin();
+                    for line in stdin.lock().lines().take(n) {
+                        if let Ok(l) = line {
+                            let _ = writeln!(stdout, "{}", l);
+                        }
+                    }
+                } else {
+                    for filename in files {
+                        match std::fs::File::open(&filename) {
+                            Ok(f) => {
+                                let reader = io::BufReader::new(f);
+                                for line in reader.lines().take(n) {
+                                    if let Ok(l) = line {
+                                        let _ = writeln!(stdout, "{}", l);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("head: {}: {}", filename, e);
+                                return 1;
+                            }
+                        }
+                    }
+                }
                 0
             }
             "mkdir" => {

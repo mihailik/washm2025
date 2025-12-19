@@ -6,7 +6,7 @@ use crate::tty::crossterm_shim::platform::{TtyDelegates, set_tty_delegates};
 include!(concat!(env!("OUT_DIR"), "/embedded_mods.rs"));
 
 mod host_startup;
-mod process_bridge;
+mod bootstrap;
 pub mod stubs_impl;
 pub mod async_sleep;
 
@@ -35,7 +35,10 @@ mod test_command;
 
 /// Standard WASI Reactor initialization.
 #[no_mangle]
-pub extern "C" fn _initialize() {
+pub extern "C" fn washm_init() {
+    // Bootstrap the host protocol first
+    bootstrap::bootstrap_host_protocol();
+
     // Always start the Brush REPL
     // The test command is registered as a builtin when wasm-test feature is enabled
     {
@@ -62,3 +65,8 @@ pub extern "C" fn _initialize() {
 
 // Re-export _continue from wasm_async for the Host
 pub use crate::wasm_async::_continue;
+
+#[no_mangle]
+pub extern "C" fn _start() {
+    washm_init();
+}

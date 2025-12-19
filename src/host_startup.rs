@@ -27,9 +27,7 @@ fn ensure_cache() -> &'static StartupJson {
     unsafe {
         if CACHE.is_none() {
             CACHE = load_startup_from_fs().or_else(|| Some(StartupJson::default()));
-            // Install guest-side process bridge JS via eval bridge if possible.
-            // Best-effort: do not panic if host/filesystem aren't available.
-            crate::process_bridge::install_process_bridge();
+            // Process bridge is installed automatically via protocol.js bootstrap
         }
         CACHE.as_ref().unwrap()
     }
@@ -59,6 +57,17 @@ pub(crate) fn startup_gid() -> u32 {
     v.userInfo.as_ref()
         .and_then(|ui| ui.gid)
         .unwrap_or(1000)
+}
+
+pub(crate) fn set_env_vars() {
+    let v = ensure_cache();
+    if let Some(env) = &v.env {
+        for (k, v) in env {
+            if std::env::var(k).is_err() {
+                std::env::set_var(k, v);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

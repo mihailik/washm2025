@@ -126,8 +126,7 @@ use std::io::{Read, Write};
 
 /// Spawn a process via the VFS bridge
 pub fn spawn_process(command: std::process::Command) -> std::io::Result<GuestChild> {
-    // Ensure guest-side process bridge is installed via eval bridge (best-effort)
-    crate::process_bridge::install_process_bridge();
+    // Process bridge is installed automatically via protocol.js bootstrap
 
     // Build spawn request JSON
     let mut request = serde_json::Map::new();

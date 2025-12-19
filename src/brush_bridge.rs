@@ -97,6 +97,7 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
         map.insert("mkdir".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::MkdirCommand>());
         map.insert("rmdir".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::RmdirCommand>());
         map.insert("touch".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::TouchCommand>());
+        map.insert("head".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::HeadCommand>());
         // map.insert("pwd".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::PwdCommand>());
         
         #[cfg(feature = "wasm-test")]

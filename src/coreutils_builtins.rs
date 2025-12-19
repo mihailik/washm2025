@@ -27,6 +27,7 @@ make_coreutil!(RmCommand, "rm", "remove files or directories");
 make_coreutil!(MkdirCommand, "mkdir", "make directories");
 make_coreutil!(RmdirCommand, "rmdir", "remove empty directories");
 make_coreutil!(TouchCommand, "touch", "change file timestamps or create files");
+make_coreutil!(HeadCommand, "head", "output the first part of files");
 
 pub struct PwdCommand;
 
