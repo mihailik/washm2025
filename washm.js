@@ -11,7 +11,7 @@ async function main() {
     args: ['washm.js', ...argv.slice(2)],
     env: process.env,
     preopens: {
-      '/': '.',
+      '/': '/',
     },
     version: 'preview1'
   });
