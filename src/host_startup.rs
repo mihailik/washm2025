@@ -9,7 +9,6 @@ struct UserInfo {
 
 #[derive(Debug, Deserialize, Default, Clone)]
 struct StartupJson {
-    env: Option<std::collections::HashMap<String, String>>,
     hostname: Option<String>,
     userInfo: Option<UserInfo>,
 }
@@ -59,16 +58,8 @@ pub(crate) fn startup_gid() -> u32 {
         .unwrap_or(1000)
 }
 
-pub(crate) fn set_env_vars() {
-    let v = ensure_cache();
-    if let Some(env) = &v.env {
-        for (k, v) in env {
-            if std::env::var(k).is_err() {
-                std::env::set_var(k, v);
-            }
-        }
-    }
-}
+// Environment variables are now provided by the host at instantiation time (WASI env).
+// The protocol no longer injects environment variables post-startup, so this helper has been removed.
 
 #[cfg(test)]
 mod tests {

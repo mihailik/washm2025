@@ -16,7 +16,6 @@ pub fn run_custom(
     let _ = crate::host_startup::startup_uid();
     let _ = crate::host_startup::startup_gid();
     let _ = crate::host_startup::startup_hostname();
-    crate::host_startup::set_env_vars();
 
     // Special handling for --version: print washm version instead of brush version
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {

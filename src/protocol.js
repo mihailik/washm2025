@@ -18,7 +18,6 @@
         cpus: os.cpus().length,
         totalmem: os.totalmem(),
         freemem: os.freemem(),
-        env: process.env,
         userInfo: {
           username: os.userInfo().username,
           uid: os.userInfo().uid,

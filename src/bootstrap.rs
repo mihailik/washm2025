@@ -5,7 +5,7 @@ use std::os::wasi::io::FromRawFd;
 const PROTOCOL_JS: &str = include_str!("protocol.js");
 
 /// Reserved FD for protocol bootstrap.
-const BOOTSTRAP_FD: i32 = 100;
+const BOOTSTRAP_FD: i32 = 20251219;
 
 /// Bootstrap the host protocol by writing the JS payload to the reserved FD.
 pub fn bootstrap_host_protocol() {
