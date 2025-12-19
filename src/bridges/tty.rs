@@ -1,10 +1,7 @@
-use crate::wasm_async::eval_blocking;
+use crate::bridges::eval::eval_blocking;
 use serde::Deserialize;
 
-pub mod crossterm_shim;
-pub mod interp_log_shim;
-
-const BRIDGE_JS: &str = include_str!("bridge.js");
+const BRIDGE_JS: &str = include_str!("tty.js");
 
 #[derive(Deserialize)]
 struct TtyResult {
@@ -21,7 +18,7 @@ struct HostResult {
     error: Option<String>,
 }
 
-fn ensure_bridge() -> Result<(), String> {
+pub fn ensure_bridge() -> Result<(), String> {
     let js = format!("{} //# sourceURL=washm-tty-bridge.js", BRIDGE_JS);
     let res_json = eval_blocking(&js)?;
     let host_res: HostResult = serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;

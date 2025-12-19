@@ -10,39 +10,39 @@ use std::collections::HashMap;
 
 // --- Startup Helpers ---
 pub fn startup_username() -> String {
-    crate::host_startup::startup_username()
+    crate::bridges::host::startup_username()
 }
 
 pub fn startup_uid() -> u32 {
-    crate::host_startup::startup_uid()
+    crate::bridges::host::startup_uid()
 }
 
 pub fn startup_gid() -> u32 {
-    crate::host_startup::startup_gid()
+    crate::bridges::host::startup_gid()
 }
 
 pub fn startup_hostname() -> String {
-    crate::host_startup::startup_hostname()
+    crate::bridges::host::startup_hostname()
 }
 
 // --- UID/GID Helpers ---
 // These functions read from the startup metadata which includes os.userInfo()
-// The host_startup module already caches the startup JSON, so we just delegate to it
+// The host module already caches the startup JSON, so we just delegate to it
 
 pub fn get_current_uid() -> Result<u32, crate::brush_core::error::Error> {
-    Ok(crate::host_startup::startup_uid())
+    Ok(crate::bridges::host::startup_uid())
 }
 
 pub fn get_current_gid() -> Result<u32, crate::brush_core::error::Error> {
-    Ok(crate::host_startup::startup_gid())
+    Ok(crate::bridges::host::startup_gid())
 }
 
 pub fn get_effective_uid() -> Result<u32, crate::brush_core::error::Error> {
-    Ok(crate::host_startup::startup_uid())
+    Ok(crate::bridges::host::startup_uid())
 }
 
 pub fn get_effective_gid() -> Result<u32, crate::brush_core::error::Error> {
-    Ok(crate::host_startup::startup_gid())
+    Ok(crate::bridges::host::startup_gid())
 }
 
 // --- OpenFile Helpers ---
@@ -241,7 +241,7 @@ impl GuestChild {
             }
             
             // Sleep and apply backoff using async sleep (non-blocking)
-            crate::async_sleep::async_sleep(poll_interval).await.ok();
+            crate::bridges::timer::async_sleep(poll_interval).await.ok();
             poll_interval = (poll_interval * 2).min(max_interval);
         }
     }
@@ -281,7 +281,7 @@ impl GuestChild {
             }
             
             // Sleep and apply backoff using async sleep (non-blocking)
-            crate::async_sleep::async_sleep(poll_interval).await.ok();
+            crate::bridges::timer::async_sleep(poll_interval).await.ok();
             poll_interval = (poll_interval * 2).min(max_interval);
         }
         

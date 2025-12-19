@@ -10,12 +10,12 @@ pub fn run_custom(
     extra_builtins: impl FnOnce(&mut HashMap<String, crate::brush_core::builtins::Registration>),
 ) {
     // Force initialization of startup parameters (read once from VFS)
-    // Use the crate-local `host_startup` helpers directly rather than
+    // Use the crate-local `bridges::host` helpers directly rather than
     // depending on vendored stubs so we avoid fragile re-exports.
-    let _ = crate::host_startup::startup_username();
-    let _ = crate::host_startup::startup_uid();
-    let _ = crate::host_startup::startup_gid();
-    let _ = crate::host_startup::startup_hostname();
+    let _ = crate::bridges::host::startup_username();
+    let _ = crate::bridges::host::startup_uid();
+    let _ = crate::bridges::host::startup_gid();
+    let _ = crate::bridges::host::startup_hostname();
 
     // Special handling for --version: print washm version instead of brush version
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
@@ -43,7 +43,7 @@ pub fn run_custom(
     }
 
     // Run the async main and record its exit code to a file the host can inspect.
-    crate::wasm_async::spawn(async move {
+    crate::bridges::eval::spawn(async move {
         let code = match entry::run_async(args, parsed_args).await {
             Ok(c) => c,
             Err(_) => 1u8,
@@ -53,5 +53,5 @@ pub fn run_custom(
     });
 
     // Tick the runtime until the spawned task completes.
-    crate::wasm_async::tick();
+    crate::bridges::eval::tick();
 }

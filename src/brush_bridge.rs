@@ -1,4 +1,4 @@
-use crate::wasm_async::WasmHostFuture;
+use crate::bridges::eval::WasmHostFuture;
 use crate::brush_core::builtins::{SimpleCommand, ContentType, ContentOptions};
 use crate::brush_core::{commands, results, error};
 
@@ -30,7 +30,7 @@ pub async fn host_eval(js: &str) -> Result<String, &'static str> {
 
 pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     // Try to get terminal size to verify TTY integration
-    if let Ok((_cols, _rows)) = crate::tty::size() {
+    if let Ok((_cols, _rows)) = crate::bridges::tty::size() {
         // TTY is available
     }
 
@@ -50,11 +50,9 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     let user_args: Vec<String> = raw_args.iter().skip(start_index).cloned().collect();
     
     // Change to the host's starting directory
-    if let Ok(start_pwd) = std::fs::read_to_string("/dev/host/washm/start_pwd") {
-        let start_pwd = start_pwd.trim();
-        if !start_pwd.is_empty() {
-            let _ = std::env::set_current_dir(start_pwd);
-        }
+    let start_pwd = crate::bridges::host::startup_pwd();
+    if !start_pwd.is_empty() {
+        let _ = std::env::set_current_dir(start_pwd);
     }
 
     // Build arguments for brush

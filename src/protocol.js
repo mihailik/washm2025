@@ -2,92 +2,11 @@
   const target = globalThis.__washm_bootstrap.wasiSnapshot;
   const memory = globalThis.__washm_bootstrap.instance.exports.memory;
   const require = globalThis.__washm_bootstrap.require;
-  const os = require('os');
 
   const fdToVfs = new Map();
   let nextFakeFd = 500;
 
-  const evalState = new Map();
-
-  globalThis.mounted = {
-    washm: {
-      startup: JSON.stringify({
-        hostname: os.hostname(),
-        platform: os.platform(),
-        arch: os.arch(),
-        cpus: os.cpus().length,
-        totalmem: os.totalmem(),
-        freemem: os.freemem(),
-        userInfo: {
-          username: os.userInfo().username,
-          uid: os.userInfo().uid,
-          gid: os.userInfo().gid
-        }
-      }, null, 2),
-      start_pwd: process.cwd(),
-      exit_code: {
-        _isVirtualFile: true,
-        write(chunk) { this._code = (this._code || "") + chunk; },
-        close() {
-          const code = parseInt((this._code || "0").trim(), 10);
-          process.exit(code);
-        }
-      }
-    },
-    eval: new Proxy({}, {
-      get(target, prop) {
-        if (typeof prop === 'string') {
-          const parts = prop.split('.');
-          const cookie = parts[0];
-          const ext = parts[1];
-          if (!evalState.has(cookie)) {
-            evalState.set(cookie, { js: '', json: null });
-          }
-          const state = evalState.get(cookie);
-          if (ext === 'js') {
-            return {
-              _isVirtualFile: true,
-              path: `dev/host/eval/${prop}`,
-              write: (chunk) => { state.js += chunk; },
-              close: () => {
-                let jsText = state.js;
-                const handleResult = (result) => {
-                  state.json = JSON.stringify({ ok: true, result });
-                  const instance = globalThis.__washm_bootstrap.instance;
-                  if (instance && typeof instance.exports._continue === 'function') {
-                    instance.exports._continue(Number(cookie) || 0);
-                  }
-                };
-                const handleError = (err) => {
-                  console.error("VFS: JS Error:", err);
-                  state.json = JSON.stringify({ ok: false, error: String(err) });
-                  const instance = globalThis.__washm_bootstrap.instance;
-                  if (instance && typeof instance.exports._continue === 'function') {
-                    instance.exports._continue(Number(cookie) || 0);
-                  }
-                };
-                try {
-                  let result = eval(jsText);
-                  if (result instanceof Promise) {
-                    result.then(handleResult).catch(handleError);
-                  } else {
-                    handleResult(result);
-                  }
-                } catch (err) { handleError(err); }
-              }
-            };
-          } else if (ext === 'json') {
-            return {
-              _isVirtualFile: true,
-              path: `dev/host/eval/${prop}`,
-              read: () => state.json || ''
-            };
-          }
-        }
-        return Reflect.get(target, prop);
-      }
-    })
-  };
+  globalThis.mounted = globalThis.mounted || {};
 
   function readStringFromMemory(ptr, len) {
     return new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
@@ -224,60 +143,5 @@
       }
     }
     return orig_path_filestat_get(fd, flags, path_ptr, path_len, buf_ptr);
-  };
-
-  // Install process bridge
-  globalThis.mounted.process = globalThis.mounted.process || {};
-  globalThis.mounted.process['spawn.json'] = {
-    _isVirtualFile: true,
-    write(chunk) { this._buf = (this._buf || '') + chunk; },
-    close() {
-      try {
-        if (!this._buf) return;
-        const req = JSON.parse(this._buf);
-        if (!req.program) return;
-        const cp = require('child_process');
-        const stdio = [
-          req.fds && req.fds['0'] === 'pipe' ? 'pipe' : 'inherit',
-          req.fds && req.fds['1'] === 'pipe' ? 'pipe' : 'inherit',
-          req.fds && req.fds['2'] === 'pipe' ? 'pipe' : 'inherit'
-        ];
-        let programToSpawn = req.program || '';
-        if (programToSpawn.includes('/') && !require('fs').existsSync(programToSpawn)) {
-          programToSpawn = programToSpawn.split('/').pop();
-        }
-        const child = cp.spawn(programToSpawn, req.args || [], { 
-          cwd: req.cwd || process.cwd(), 
-          env: req.env ? Object.assign({}, process.env, req.env) : process.env, 
-          stdio, 
-          shell: true 
-        });
-        const pid = String(child.pid || -1);
-        globalThis.mounted.process[pid] = { 
-          _isDir: true, 
-          stdout: { _isVirtualFile: true, read() { return this._buf || ''; } }, 
-          stderr: { _isVirtualFile: true, read() { return this._buf || ''; } }, 
-          status: { _isVirtualFile: true, read() { return JSON.stringify(this._status || {}); } }, 
-          stdin: { _isVirtualFile: true, write(chunk) { if (child.stdin) child.stdin.write(chunk); }, close() { if (child.stdin) child.stdin.end(); } }, 
-          signal: { _isVirtualFile: true, write(chunk) { try { child.kill(chunk.trim()); } catch(e) {} } } 
-        };
-        if (child.stdout) child.stdout.on('data', d => { globalThis.mounted.process[pid].stdout._buf = (globalThis.mounted.process[pid].stdout._buf || '') + d.toString(); });
-        if (child.stderr) child.stderr.on('data', d => { globalThis.mounted.process[pid].stderr._buf = (globalThis.mounted.process[pid].stderr._buf || '') + d.toString(); });
-        child.on('exit', (code, sig) => { 
-          globalThis.mounted.process[pid].status._status = { exited: true, code: code !== null ? code : -1, signal: sig || null }; 
-          const instance = globalThis.__washm_bootstrap.instance;
-          if (instance && typeof instance.exports._continue === 'function') {
-            instance.exports._continue(0); 
-          }
-        });
-        this._reply = pid;
-        this._buf = '';
-      } catch (e) { 
-        console.error("VFS: spawn error:", e);
-        this._reply = JSON.stringify({ error: String(e) }); 
-        this._buf = ''; 
-      }
-    },
-    read() { return this._reply || ''; }
   };
 })();

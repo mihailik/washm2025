@@ -13,7 +13,7 @@ static VTABLE: RawWakerVTable = RawWakerVTable::new(
 
 /// Non-exported helper used by tests to exercise the async host-guest REPL flow.
 pub fn test_async_callback() -> i32 {
-    use crate::wasm_async::WasmHostFuture;
+    use crate::bridges::eval::WasmHostFuture;
 
     println!("Creating async task...");
     std::io::stdout().flush().unwrap();

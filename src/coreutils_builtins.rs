@@ -41,8 +41,7 @@ impl SimpleCommand for PwdCommand {
         _args: I,
     ) -> Result<results::ExecutionResult, error::Error> {
         // Read host start path
-        let start_pwd = std::fs::read_to_string("/dev/host/washm/start_pwd")
-            .unwrap_or_else(|_| String::from("/"));
+        let start_pwd = crate::bridges::host::startup_pwd();
         let start_pwd = start_pwd.trim();
 
         // Get shell's current working directory (relative to WASI root)

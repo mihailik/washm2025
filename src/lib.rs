@@ -27,10 +27,10 @@ pub mod brush_shell;
 #[path = "../target/vendor/uucore/src/lib/lib.rs"]
 pub mod uucore;
 
-mod host_startup;
 mod bootstrap;
 pub mod stubs_impl;
-pub mod async_sleep;
+pub mod bridges;
+pub mod tty;
 
 mod command;
 pub mod brush_bridge;
@@ -38,9 +38,6 @@ mod uutils_bridge;
 mod async_test;
 mod jobs;
 mod coreutils_builtins;
-
-pub mod wasm_async;
-pub mod tty;
 
 #[cfg(feature = "wasm-test")]
 pub mod test_harness;
@@ -61,6 +58,10 @@ pub extern "C" fn washm_init() {
     // Bootstrap the host protocol first
     bootstrap::bootstrap_host_protocol();
 
+    // Initialize core bridges
+    let _ = bridges::eval::ensure_bridge();
+    let _ = bridges::host::ensure_bridge();
+
     // Always start the Brush REPL
     // The test command is registered as a builtin when wasm-test feature is enabled
     {
@@ -70,23 +71,23 @@ pub extern "C" fn washm_init() {
     }
 
     // Register the platform delegates with the crossterm shim so it can
-    // call into `washm::tty` without creating a dependency cycle.
+    // call into `washm::bridges::tty` without creating a dependency cycle.
     set_tty_delegates(TtyDelegates {
         enable_raw_mode: Arc::new(|| {
-            crate::tty::enable_raw_mode().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            crate::bridges::tty::enable_raw_mode().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
         }),
         disable_raw_mode: Arc::new(|| {
-            crate::tty::disable_raw_mode().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            crate::bridges::tty::disable_raw_mode().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
         }),
         size: Arc::new(|| {
-            crate::tty::size().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            crate::bridges::tty::size().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
         }),
     });
 }
 
 
-// Re-export _continue from wasm_async for the Host
-pub use crate::wasm_async::_continue;
+// Re-export _continue from bridges::eval for the Host
+pub use crate::bridges::eval::_continue;
 
 #[no_mangle]
 pub extern "C" fn _start() {

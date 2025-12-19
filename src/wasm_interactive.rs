@@ -1,9 +1,7 @@
-use super::super::wasm_async::{eval_blocking, WasmHostFuture};
+use crate::bridges::eval::{eval_blocking, WasmHostFuture};
 use std::io::{self, Write};
 use serde::Deserialize;
 use super::{InputBackend, ReadResult, InteractivePrompt, ShellError, ShellRef};
-
-const BRIDGE_JS: &str = include_str!("tty/bridge.js");
 
 /// Event types parsed from raw input
 #[derive(Debug, Clone, PartialEq)]
@@ -217,21 +215,7 @@ impl WasmInputBackend {
 
     async fn ensure_initialized(&mut self) -> Result<(), String> {
         if !self.initialized {
-            let js = format!("{} //# sourceURL=washm-tty-bridge.js", BRIDGE_JS);
-            let fut = WasmHostFuture::new(&js);
-            let res = fut.await.map_err(|e| e.to_string())?;
-            
-            #[derive(Deserialize)]
-            struct InitResult {
-                ok: bool,
-                error: Option<String>,
-            }
-            
-            let init_res: InitResult = serde_json::from_str(&res).map_err(|e| format!("JSON error: {}", e))?;
-            if !init_res.ok {
-                return Err(init_res.error.unwrap_or_else(|| "Unknown init error".to_string()));
-            }
-
+            crate::bridges::tty::ensure_bridge()?;
             self.initialized = true;
         }
         Ok(())

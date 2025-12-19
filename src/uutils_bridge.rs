@@ -40,34 +40,19 @@ impl UutilsBridge {
                 }
             }
             "pwd" => {
-                match std::fs::read_to_string("/dev/host/washm/start_pwd") {
-                    Ok(start_pwd) => {
-                        let start_pwd = start_pwd.trim();
-                        match std::env::current_dir() {
-                            Ok(cwd) => {
-                                let cwd_path = std::path::Path::new(&cwd);
-                                let relative_cwd = cwd_path.strip_prefix("/").unwrap_or(cwd_path);
-                                let final_path = std::path::Path::new(start_pwd).join(relative_cwd);
-                                println!("{}", final_path.display());
-                                0
-                            }
-                            Err(e) => {
-                                eprintln!("pwd: error getting current dir: {}", e);
-                                1
-                            }
-                        }
+                let start_pwd = crate::bridges::host::startup_pwd();
+                let start_pwd = start_pwd.trim();
+                match std::env::current_dir() {
+                    Ok(cwd) => {
+                        let cwd_path = std::path::Path::new(&cwd);
+                        let relative_cwd = cwd_path.strip_prefix("/").unwrap_or(cwd_path);
+                        let final_path = std::path::Path::new(start_pwd).join(relative_cwd);
+                        println!("{}", final_path.display());
+                        0
                     }
-                    Err(_) => {
-                        match std::env::current_dir() {
-                            Ok(p) => {
-                                println!("{}", p.display());
-                                0
-                            }
-                            Err(e) => {
-                                eprintln!("pwd: {}", e);
-                                1
-                            }
-                        }
+                    Err(e) => {
+                        eprintln!("pwd: error getting current dir: {}", e);
+                        1
                     }
                 }
             }

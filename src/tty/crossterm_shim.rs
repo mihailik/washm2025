@@ -42,7 +42,7 @@ pub mod event {
 pub mod terminal { pub use super::terminal_shim::{Clear, ClearType, size, enable_raw_mode, disable_raw_mode}; }
 mod terminal_shim {
     use std::io;
-    use crate::tty;
+    use crate::bridges::tty;
     #[derive(Clone, Copy, Debug)] pub enum ClearType { All }
     pub struct Clear(pub ClearType);
     pub fn size() -> io::Result<(u16, u16)> { 
