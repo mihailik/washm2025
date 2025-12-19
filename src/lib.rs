@@ -33,7 +33,7 @@ pub mod shims;
 pub mod interp_log;
 
 mod command;
-pub mod brush_bridge;
+pub mod brush_run;
 mod coreutils_dispatch;
 mod async_test;
 mod jobs;
@@ -67,7 +67,7 @@ pub extern "C" fn washm_init() {
     {
         // Start the Brush REPL immediately after initialization.
         // Errors are ignored; the REPL runs until stdin is closed.
-        let _ = brush_bridge::run(&[]);
+        let _ = brush_run::run(&[]);
     }
 
 

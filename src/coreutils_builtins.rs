@@ -29,6 +29,10 @@ make_coreutil!(RmdirCommand, "rmdir", "remove empty directories");
 make_coreutil!(TouchCommand, "touch", "change file timestamps or create files");
 make_coreutil!(HeadCommand, "head", "output the first part of files");
 
+// Cat is a common coreutils wrapper. Centralized here instead of being duplicated
+// in various integration stubs (e.g., `brush_bridge`).
+make_coreutil!(CatCommand, "cat", "concatenate files and print on the standard output");
+
 pub struct PwdCommand;
 
 impl SimpleCommand for PwdCommand {
