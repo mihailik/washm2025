@@ -1,6 +1,6 @@
 [package]
 name = "washm"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 authors = ["Oleg Mihailik <mihailik@gmail.com>"]
 description = "WASM shell using brush and made to work on any platform."

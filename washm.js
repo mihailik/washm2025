@@ -4,7 +4,7 @@ const { WASI } = require('wasi');
 const argv = process.argv;
 
 async function main() {
-  const wasmPath = './washm.wasm';
+  const wasmPath = __dirname + '/washm.wasm';
   const wasmBuffer = fs.readFileSync(wasmPath);
 
   const wasi = new WASI({
