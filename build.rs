@@ -136,6 +136,18 @@ pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
     verify_no_stubs(out_path);
 }
 
+fn regex_replace(content: String, pattern: &str, replacement: &str, path: &Path) -> String {
+    let re = Regex::new(pattern).unwrap();
+    if !re.is_match(&content) {
+        // Pattern not present - skip patch rather than failing so the build
+        // script is idempotent when re-run or when files have already been
+        // updated by a prior invocation.
+        println!("cargo:warning=Patch pattern not found (skipping): {} in {:?}", pattern, path);
+        return content;
+    }
+    re.replace_all(&content, replacement).to_string()
+}
+
 fn ast_grep_replace(content: &str, pattern_str: &str, replacement_str: &str, path: &Path) -> String {
     let lang = SupportLang::Rust;
     let mut grep = AstGrep::new(content, lang);
@@ -187,7 +199,7 @@ fn patch_files(dir: &Path) {
 
             // Make any `include_str!("tty/bridge.js")` point at the project's src
             // (so a physical copy of the JS file is not required in the vendored tree).
-            new_content = ast_grep_replace(&new_content, r#"include_str!("tty/bridge.js")"#, r#"include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tty/bridge.js"))"#, path);
+            new_content = new_content.replace("include_str!(\"tty/bridge.js\")", "include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/tty/bridge.js\"))");
 
             // Patch brush-core/src/sys/stubs/users.rs to avoid "operation not supported" on WASI
             if path.ends_with(std::path::Path::new("brush-core/src/sys/stubs/users.rs")) {
@@ -424,15 +436,17 @@ fn patch_files(dir: &Path) {
                 new_content.push_str("\npub use wasm_interactive::{WasmInputBackend, ReedlineInputBackend, BasicInputBackend, MinimalInputBackend};");
                 
                 // Inline refs module to avoid resolution issues
-                if new_content.contains("mod refs;") {
+                let refs_re = Regex::new(r"(?m)^mod\s+refs\s*;").unwrap();
+                if refs_re.is_match(&new_content) {
                     println!("cargo:warning=Inlining refs module");
-                    new_content = ast_grep_replace(&new_content, "mod refs;", r#"pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>;"#, path);
+                    new_content = refs_re.replace(&new_content, r#"
+pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>;
+"#).to_string();
                 } else {
                     println!("cargo:warning=Could not find 'mod refs;' to inline");
                 }
                 
                 // Remove pub use refs::ShellRef; since we defined it directly
-                // Comment it out rather than removing to preserve file structure
                 let use_refs_re = Regex::new(r"(?m)^pub\s+use\s+refs::ShellRef\s*;").unwrap();
                 new_content = use_refs_re.replace_all(&new_content, "// $0").to_string();
             }
@@ -526,12 +540,9 @@ fn patch_files(dir: &Path) {
             }).to_string();
 
             // Patch: Redirect crossterm to our local shim
-            // Note: ast-grep patterns match AST nodes (identifiers/paths), not substrings,
-            // so "crossterm" will only match actual uses of the crossterm identifier
-            new_content = ast_grep_replace(&new_content, "crossterm", "crate::tty::crossterm_shim", path);
-            // Handle use statements specifically
-            new_content = ast_grep_replace(&new_content, "use crossterm;", "use crate::tty::crossterm_shim as crossterm;", path);
-            new_content = ast_grep_replace(&new_content, "use crossterm::$REST", "use crate::tty::crossterm_shim::$REST", path);
+            new_content = new_content.replace("crossterm::", "crate::tty::crossterm_shim::");
+            new_content = new_content.replace("use crossterm;", "use crate::tty::crossterm_shim as crossterm;");
+            new_content = new_content.replace("use crossterm ", "use crate::tty::crossterm_shim ");
 
             // 4. Special case: Disable conflicting blanket impl in brush-core/src/error.rs
             if path.ends_with(std::path::Path::new("brush-core/src/error.rs")) {
@@ -543,10 +554,10 @@ fn patch_files(dir: &Path) {
 
             // Patch: Expose brushctl for use in stubs_impl
             if path.ends_with(std::path::Path::new("brush-shell/src/lib.rs")) {
-                 new_content = ast_grep_replace(&new_content, "mod brushctl;", "pub mod brushctl;", path);
+                 new_content = new_content.replace("mod brushctl;", "pub mod brushctl;");
             }
             if path.ends_with(std::path::Path::new("brush-shell/src/brushctl.rs")) {
-                 new_content = ast_grep_replace(&new_content, "pub(crate) trait ShellBuilderBrushBuiltinExt", "pub trait ShellBuilderBrushBuiltinExt", path);
+                 new_content = new_content.replace("pub(crate) trait ShellBuilderBrushBuiltinExt", "pub trait ShellBuilderBrushBuiltinExt");
             }
 
             // 5. Patch `mod name;` with absolute paths
@@ -603,8 +614,8 @@ fn patch_files(dir: &Path) {
             }
 
             if path.ends_with(std::path::Path::new("brush-shell/src/entry.rs")) {
-                 new_content = ast_grep_replace(&new_content, "async fn run_async", "pub async fn run_async", path);
-                 new_content = ast_grep_replace(&new_content, "fn try_parse_from", "pub fn try_parse_from", path);
+                 new_content = new_content.replace("async fn run_async", "pub async fn run_async");
+                 new_content = new_content.replace("fn try_parse_from", "pub fn try_parse_from");
                  
                  // Add extra builtins support (after crate:: patching has already happened)
                  if new_content.contains("crate::brush_core::Shell::builder()") {
@@ -616,8 +627,9 @@ fn patch_files(dir: &Path) {
                   }
                  
                  // Patch MinimalInputBackend instantiation
-                 new_content = ast_grep_replace(&new_content, "let mut ui = brush_interactive::MinimalInputBackend;", "let mut ui = brush_interactive::MinimalInputBackend::new();", path);
-                 new_content = ast_grep_replace(&new_content, "let mut ui = crate::brush_interactive::MinimalInputBackend;", "let mut ui = crate::brush_interactive::MinimalInputBackend::new();", path);
+                 // Match both original and transformed versions
+                 let minimal_re = Regex::new(r"(let mut ui = (?:crate::)?brush_interactive::MinimalInputBackend);").unwrap();
+                 new_content = minimal_re.replace_all(&new_content, "$1::new();").to_string();
             }
             
             if path.ends_with(std::path::Path::new("brush-shell/src/lib.rs")) {
@@ -626,19 +638,19 @@ fn patch_files(dir: &Path) {
 
             // Patch InputBackend trait and usages
             if new_content.contains("trait InputBackend") {
-                 new_content = ast_grep_replace(&new_content, "fn read_line", "async fn read_line", path);
+                 new_content = new_content.replace("fn read_line", "async fn read_line");
             }
             
             // Patch impls and calls
             if (new_content.contains("impl InputBackend") || path.to_string_lossy().contains("interactive")) && !path.ends_with(std::path::Path::new("wasm_interactive.rs")) {
-                 // Make impl methods async - ensure it's async even if already async
-                 // First pass adds async, second pass cleans up any double-async
-                 new_content = ast_grep_replace(&new_content, "fn read_line", "async fn read_line", path);
-                 new_content = ast_grep_replace(&new_content, "async async fn read_line", "async fn read_line", path);
+                 // Make impl methods async
+                 // Use regex to avoid double async
+                 let async_re = Regex::new(r"(?m)(async\s+)?fn\s+read_line").unwrap();
+                 new_content = async_re.replace_all(&new_content, "async fn read_line").to_string();
                  
                  // Patch call sites: .read_line(prompt)? -> .read_line(prompt).await?
-                 // This pattern won't match calls that already have .await, making it idempotent
-                 new_content = ast_grep_replace(&new_content, "$EXPR.read_line($$$ARGS)?", "$EXPR.read_line($$$ARGS).await?", path);
+                 let call_re = Regex::new(r"\.read_line\(([^)]*)\)\?").unwrap();
+                 new_content = call_re.replace_all(&new_content, ".read_line($1).await?").to_string();
             }
 
             // Deduplicate identical `use ...;` imports which can be
