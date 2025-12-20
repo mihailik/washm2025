@@ -1,9 +1,16 @@
 use serde::{Serialize, Deserialize};
 use std::fs;
-use crate::bridges::eval::WasmHostFuture;
+use crate::bridges::eval::{WasmHostFuture, eval_blocking};
+
+const BRIDGE_JS: &str = include_str!("process.js");
+
+pub fn ensure_bridge() -> Result<(), String> {
+    eval_blocking(BRIDGE_JS).map(|_| ())
+}
 
 #[derive(Serialize)]
 pub struct SpawnRequest {
+
     pub program: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,

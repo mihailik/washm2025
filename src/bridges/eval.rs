@@ -61,15 +61,11 @@ pub fn next_cookie() -> u32 {
 const BRIDGE_JS: &str = include_str!("eval.js");
 
 pub fn ensure_bridge() -> Result<(), String> {
-    // The eval bridge is special: it's the only one that can't use eval_blocking to load itself
-    // because eval_blocking depends on the eval bridge being already mounted in the VFS.
-    // However, the bootstrap.rs already loaded the VFS infrastructure.
-    // We can just write the eval.js to the bootstrap FD again, or use a different mechanism.
-    // For now, we'll assume the bootstrap.rs might have concatenated it, or we use a side channel.
-    
-    // Actually, the simplest way is to have bootstrap.rs load the "core" bridges.
+    crate::bootstrap::write_js(BRIDGE_JS);
+    crate::bootstrap::write_js("\n//# sourceURL=bridges/eval.js\n");
     Ok(())
 }
+
 
 pub struct WasmHostFuture {
     cookie: u32,

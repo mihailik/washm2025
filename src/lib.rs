@@ -55,12 +55,23 @@ mod test_command;
 /// Standard WASI Reactor initialization.
 #[no_mangle]
 pub extern "C" fn washm_init() {
-    // Bootstrap the host protocol first
+    // 1. Load fs_windows (critical for Windows)
+    bridges::fs_windows::ensure_bridge();
+
+    // 2. Load protocol (critical for VFS)
     bootstrap::bootstrap_host_protocol();
 
-    // Initialize core bridges
+    // 3. Load eval (critical for other bridges)
     let _ = bridges::eval::ensure_bridge();
+
+    // 4. Close bootstrap FD to trigger host eval
+    bootstrap::close_bootstrap();
+
+    // 5. Initialize other bridges
     let _ = bridges::host::ensure_bridge();
+    let _ = bridges::process::ensure_bridge();
+    let _ = bridges::tty::ensure_bridge();
+    let _ = bridges::timer::ensure_bridge();
 
     // Always start the Brush REPL
     // The test command is registered as a builtin when wasm-test feature is enabled
@@ -69,9 +80,8 @@ pub extern "C" fn washm_init() {
         // Errors are ignored; the REPL runs until stdin is closed.
         let _ = brush_run::run(&[]);
     }
-
-
 }
+
 
 
 // Re-export _continue from bridges::eval for the Host

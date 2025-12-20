@@ -6,9 +6,10 @@ use std::time::Duration;
 
 const BRIDGE_JS: &str = include_str!("timer.js");
 
-fn ensure_bridge() -> Result<(), String> {
+pub fn ensure_bridge() -> Result<(), String> {
     eval_blocking(BRIDGE_JS).map(|_| ())
 }
+
 
 /// Asynchronously sleep for the given duration by delegating to JS setTimeout.
 /// This is non-blocking and yields control back to the host event loop.
