@@ -1,6 +1,6 @@
 [package]
 name = "washm"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 authors = ["Oleg Mihailik <mihailik@gmail.com>"]
 description = "WASM shell using brush and made to work on any platform."
@@ -191,8 +191,16 @@ walkdir = "2.5"
 fs_extra = "1.3"
 regex = "1.10"
 pathdiff = "0.2"
-ast-grep-core = "0.40.3"
-ast-grep-language = "0.40.3"
+# rust-analyzer dependencies for semantic transformation engine
+ra_ap_ide = "0.0.310"
+ra_ap_ide_db = "0.0.310"
+ra_ap_hir = "0.0.310"
+ra_ap_base_db = "0.0.310"
+ra_ap_vfs = "0.0.310"
+ra_ap_paths = "0.0.310"
+ra_ap_project_model = "0.0.310"
+ra_ap_syntax = "0.0.310"
+ra_ap_ide_ssr = "0.0.310"
 
 
 [profile.release]
