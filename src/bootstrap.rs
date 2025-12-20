@@ -19,6 +19,7 @@ pub fn close_bootstrap() {
 
 /// Bootstrap the host protocol by writing the JS payload to the reserved FD.
 pub fn bootstrap_host_protocol() {
-    write_js(PROTOCOL_JS);
-    write_js("\n//# sourceURL=protocol.js\n");
+    let js = format!("{}\n//# sourceURL=protocol.js\n", PROTOCOL_JS);
+    write_js(&js);
 }
+

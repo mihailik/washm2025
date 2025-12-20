@@ -19,7 +19,7 @@ struct HostResult {
 }
 
 pub fn ensure_bridge() -> Result<(), String> {
-    let js = format!("{} //# sourceURL=washm-tty-bridge.js", BRIDGE_JS);
+    let js = format!("{}\n//# sourceURL=bridges/tty.js\n", BRIDGE_JS);
     let res_json = eval_blocking(&js)?;
     let host_res: HostResult = serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
     if !host_res.ok {

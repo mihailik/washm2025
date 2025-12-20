@@ -4,8 +4,10 @@ use crate::bridges::eval::eval_blocking;
 const BRIDGE_JS: &str = include_str!("host.js");
 
 pub fn ensure_bridge() -> Result<(), String> {
-    eval_blocking(BRIDGE_JS).map(|_| ())
+    let js = format!("{}\n//# sourceURL=bridges/host.js\n", BRIDGE_JS);
+    eval_blocking(&js).map(|_| ())
 }
+
 
 #[derive(Debug, Deserialize, Default, Clone)]
 struct UserInfo {

@@ -7,8 +7,10 @@ use std::time::Duration;
 const BRIDGE_JS: &str = include_str!("timer.js");
 
 pub fn ensure_bridge() -> Result<(), String> {
-    eval_blocking(BRIDGE_JS).map(|_| ())
+    let js = format!("{}\n//# sourceURL=bridges/timer.js\n", BRIDGE_JS);
+    eval_blocking(&js).map(|_| ())
 }
+
 
 
 /// Asynchronously sleep for the given duration by delegating to JS setTimeout.

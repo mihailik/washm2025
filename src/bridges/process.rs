@@ -5,8 +5,10 @@ use crate::bridges::eval::{WasmHostFuture, eval_blocking};
 const BRIDGE_JS: &str = include_str!("process.js");
 
 pub fn ensure_bridge() -> Result<(), String> {
-    eval_blocking(BRIDGE_JS).map(|_| ())
+    let js = format!("{}\n//# sourceURL=bridges/process.js\n", BRIDGE_JS);
+    eval_blocking(&js).map(|_| ())
 }
+
 
 #[derive(Serialize)]
 pub struct SpawnRequest {

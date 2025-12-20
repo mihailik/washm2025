@@ -1,7 +1,7 @@
 {
   "name": "washm",
   "description": "WASM shell: Bash inside WASM",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "keywords": [
     "MIT",
     "WASM",

@@ -61,10 +61,11 @@ pub fn next_cookie() -> u32 {
 const BRIDGE_JS: &str = include_str!("eval.js");
 
 pub fn ensure_bridge() -> Result<(), String> {
-    crate::bootstrap::write_js(BRIDGE_JS);
-    crate::bootstrap::write_js("\n//# sourceURL=bridges/eval.js\n");
+    let js = format!("{}\n//# sourceURL=bridges/eval.js\n", BRIDGE_JS);
+    crate::bootstrap::write_js(&js);
     Ok(())
 }
+
 
 
 pub struct WasmHostFuture {
