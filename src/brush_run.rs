@@ -58,6 +58,7 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     let extra_builtins = |map: &mut std::collections::HashMap<String, crate::brush_core::builtins::Registration>| {
         // Coreutils wrappers
         map.insert("cat".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::CatCommand>());
+        map.insert("pwd".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::PwdCommand>());
         map.insert("ls".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::LsCommand>());
         map.insert("cp".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::CpCommand>());
         map.insert("mv".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::MvCommand>());
@@ -66,6 +67,7 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
         map.insert("rmdir".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::RmdirCommand>());
         map.insert("touch".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::TouchCommand>());
         map.insert("head".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::HeadCommand>());
+        map.insert("env".to_string(), crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::EnvCommand>());
     };
 
     crate::brush_shell::embedded::run_custom(args, extra_builtins);

@@ -4,34 +4,36 @@
 /// wire this to `coreutils-fork` sub-crate `uu` libraries when they want an in-process call.
 pub struct CoreutilsDispatch;
 
+use std::io::Write;
+
 impl CoreutilsDispatch {
     /// Run a command by name; return an exit code.
-    pub fn run(name: &str, args: &[String]) -> i32 {
+    pub fn run<R: std::io::Read, W: std::io::Write, E: std::io::Write>(
+        name: &str,
+        args: &[String],
+        mut stdin: R,
+        mut stdout: W,
+        mut stderr: E,
+    ) -> i32 {
         match name {
             "cat" => {
                 if args.len() <= 1 {
                     // Read stdin and write to stdout
-                    use std::io::{self, Read, Write};
-                    let mut buf = String::new();
-                    let mut stdin = io::stdin();
-                    let mut stdout = io::stdout();
-                    if let Err(_) = stdin.read_to_string(&mut buf) {}
-                    let _ = stdout.write_all(buf.as_bytes());
+                    let mut buf = Vec::new();
+                    if let Err(_) = std::io::Read::read_to_end(&mut stdin, &mut buf) {}
+                    let _ = stdout.write_all(&buf);
                     0
                 } else {
                     // Read each file and write contents
-                    use std::fs::File;
-                    use std::io::{self, Read, Write};
-                    let mut stdout = io::stdout();
                     for filename in &args[1..] {
-                        match File::open(filename) {
+                        match std::fs::File::open(filename) {
                             Ok(mut f) => {
-                                let mut b = String::new();
-                                if let Err(_) = f.read_to_string(&mut b) {}
-                                let _ = stdout.write_all(b.as_bytes());
+                                let mut b = Vec::new();
+                                if let Err(_) = std::io::Read::read_to_end(&mut f, &mut b) {}
+                                let _ = stdout.write_all(&b);
                             }
                             Err(e) => {
-                                eprintln!("cat: {}: {}", filename, e);
+                                let _ = writeln!(stderr, "cat: {}: {}", filename, e);
                                 return 1;
                             }
                         }
@@ -44,21 +46,24 @@ impl CoreutilsDispatch {
                 let start_pwd = start_pwd.trim();
                 match std::env::current_dir() {
                     Ok(cwd) => {
-                        let cwd_path = std::path::Path::new(&cwd);
-                        let relative_cwd = cwd_path.strip_prefix("/").unwrap_or(cwd_path);
-                        let final_path = std::path::Path::new(start_pwd).join(relative_cwd);
-                        println!("{}", final_path.display());
+                        let cwd_str = cwd.to_string_lossy();
+                        let final_path = if cwd_str.starts_with(start_pwd) {
+                            std::path::PathBuf::from(cwd_str.as_ref())
+                        } else {
+                            let cwd_path = std::path::Path::new(&cwd);
+                            let relative_cwd = cwd_path.strip_prefix("/").unwrap_or(cwd_path);
+                            std::path::Path::new(start_pwd).join(relative_cwd)
+                        };
+                        let _ = writeln!(stdout, "{}", final_path.display());
                         0
                     }
                     Err(e) => {
-                        eprintln!("pwd: error getting current dir: {}", e);
+                        let _ = writeln!(stderr, "pwd: error getting current dir: {}", e);
                         1
                     }
                 }
             }
             "ls" => {
-                use std::io::Write;
-                let mut out = std::io::stdout();
                 let mut targets = Vec::new();
                 for arg in &args[1..] {
                     if !arg.starts_with('-') {
@@ -73,20 +78,26 @@ impl CoreutilsDispatch {
                         Ok(entries) => {
                             for entry in entries.flatten() {
                                 let p = entry.file_name();
-                                let _ = write!(&mut out, "{}\n", p.to_string_lossy());
+                                let _ = writeln!(stdout, "{}", p.to_string_lossy());
                             }
                         }
                         Err(e) => {
-                            eprintln!("ls: {}: {}", t, e);
+                            let _ = writeln!(stderr, "ls: {}: {}", t, e);
                             return 1;
                         }
                     }
                 }
-                let _ = out.flush();
+                let _ = stdout.flush();
+                0
+            }
+            "env" => {
+                for (key, value) in std::env::vars() {
+                    let _ = writeln!(stdout, "{}={}", key, value);
+                }
                 0
             }
             "head" => {
-                use std::io::{self, BufRead, Write};
+                use std::io::BufRead;
                 let mut n = 10;
                 let mut files = Vec::new();
                 let mut i = 1;
@@ -110,10 +121,9 @@ impl CoreutilsDispatch {
                     i += 1;
                 }
 
-                let mut stdout = io::stdout();
                 if files.is_empty() {
-                    let stdin = io::stdin();
-                    for line in stdin.lock().lines().take(n) {
+                    let reader = std::io::BufReader::new(stdin);
+                    for line in reader.lines().take(n) {
                         if let Ok(l) = line {
                             let _ = writeln!(stdout, "{}", l);
                         }
@@ -122,7 +132,7 @@ impl CoreutilsDispatch {
                     for filename in files {
                         match std::fs::File::open(&filename) {
                             Ok(f) => {
-                                let reader = io::BufReader::new(f);
+                                let reader = std::io::BufReader::new(f);
                                 for line in reader.lines().take(n) {
                                     if let Ok(l) = line {
                                         let _ = writeln!(stdout, "{}", l);
@@ -130,7 +140,7 @@ impl CoreutilsDispatch {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("head: {}: {}", filename, e);
+                                let _ = writeln!(stderr, "head: {}: {}", filename, e);
                                 return 1;
                             }
                         }
@@ -141,7 +151,7 @@ impl CoreutilsDispatch {
             "mkdir" => {
                 for dir in &args[1..] {
                     if let Err(e) = std::fs::create_dir_all(dir) {
-                        eprintln!("mkdir: {}: {}", dir, e);
+                        let _ = writeln!(stderr, "mkdir: {}: {}", dir, e);
                         return 1;
                     }
                 }
@@ -150,18 +160,17 @@ impl CoreutilsDispatch {
             "rmdir" => {
                 for dir in &args[1..] {
                     if let Err(e) = std::fs::remove_dir(dir) {
-                        eprintln!("rmdir: {}: {}", dir, e);
+                        let _ = writeln!(stderr, "rmdir: {}: {}", dir, e);
                         return 1;
                     }
                 }
                 0
             }
             "touch" => {
-                use std::io::Write;
                 for f in &args[1..] {
                     match std::fs::OpenOptions::new().create(true).append(true).open(f) {
                         Ok(mut file) => { let _ = file.write_all(b""); }
-                        Err(e) => { eprintln!("touch: {}: {}", f, e); return 1; }
+                        Err(e) => { let _ = writeln!(stderr, "touch: {}: {}", f, e); return 1; }
                     }
                 }
                 0
@@ -172,7 +181,7 @@ impl CoreutilsDispatch {
                     if let Err(e) = std::fs::remove_file(f) {
                         // Try remove_dir_all as a fallback
                         if let Err(e2) = std::fs::remove_dir_all(f) {
-                            eprintln!("rm: {}: {}", f, e2);
+                            let _ = writeln!(stderr, "rm: {}: {}", f, e2);
                             code = 1;
                         }
                     }
@@ -181,41 +190,39 @@ impl CoreutilsDispatch {
             }
             "cp" => {
                 if args.len() < 3 {
-                    eprintln!("cp: missing destination file operand");
+                    let _ = writeln!(stderr, "cp: missing destination file operand");
                     return 1;
                 }
                 let srcs = &args[1..args.len()-1];
                 let dest = &args[args.len()-1];
                 // If multiple sources, dest must be a directory
                 if srcs.len() > 1 {
-                    if let Err(e) = std::fs::create_dir_all(dest) { eprintln!("cp: {}: {}", dest, e); return 1; }
+                    if let Err(e) = std::fs::create_dir_all(dest) { let _ = writeln!(stderr, "cp: {}: {}", dest, e); return 1; }
                 }
                 for s in srcs {
                     let filename = std::path::Path::new(s).file_name().unwrap_or_default();
                     let outp = if srcs.len() > 1 { std::path::Path::new(dest).join(filename) } else { std::path::Path::new(dest).to_path_buf() };
-                    if let Err(e) = std::fs::copy(s, outp) { eprintln!("cp: {}: {}", s, e); return 1; }
+                    if let Err(e) = std::fs::copy(s, outp) { let _ = writeln!(stderr, "cp: {}: {}", s, e); return 1; }
                 }
                 0
             }
             "mv" => {
-                if args.len() < 3 { eprintln!("mv: missing destination"); return 1; }
+                if args.len() < 3 { let _ = writeln!(stderr, "mv: missing destination"); return 1; }
                 let src = &args[1]; let dest = &args[2];
-                if let Err(e) = std::fs::rename(src, dest) { eprintln!("mv: {}: {}", src, e); return 1; }
+                if let Err(e) = std::fs::rename(src, dest) { let _ = writeln!(stderr, "mv: {}: {}", src, e); return 1; }
                 0
             }
             "echo" => {
-                use std::io::Write;
-                let mut out = std::io::stdout();
                 if args.len() > 1 {
-                    let _ = writeln!(&mut out, "{}", args[1..].join(" "));
+                    let _ = writeln!(stdout, "{}", args[1..].join(" "));
                 } else {
-                    let _ = writeln!(&mut out);
+                    let _ = writeln!(stdout);
                 }
-                let _ = out.flush();
+                let _ = stdout.flush();
                 0
             }
             _ => {
-                eprintln!("[uutils] command not found: {}", name);
+                let _ = writeln!(stderr, "[uutils] command not found: {}", name);
                 127
             }
         }

@@ -243,6 +243,13 @@ fn patch_files(dir: &Path) {
                 }
             }
 
+            // Patch brush-core/src/shell.rs to sync process CWD
+            if path.ends_with(std::path::Path::new("brush-core/src/shell.rs")) {
+                let pattern = "let oldpwd = std::mem::replace(self.working_dir_mut(), cleaned_path);";
+                let replacement = "let oldpwd = std::mem::replace(self.working_dir_mut(), cleaned_path);\n        let _ = std::env::set_current_dir(&self.working_dir);";
+                new_content = new_content.replace(pattern, replacement);
+            }
+
             // After all individual patches, verify that no vendored files still
             // contain `NotSupportedOnThisPlatform(` which would indicate we missed
             // a stub. Fail fast so we can fix the mapping rather than shipping

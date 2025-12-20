@@ -81,9 +81,9 @@ pub fn execute_command_sync(command: &str, args: &[String]) -> i32 {
 
     match command {
         // Tier 1: File operations (a small subset)
-        "cat" => crate::coreutils_dispatch::CoreutilsDispatch::run("cat", args),
+        "cat" => crate::coreutils_dispatch::CoreutilsDispatch::run("cat", args, std::io::stdin(), std::io::stdout(), std::io::stderr()),
         // For now, `ls` delegates to the dispatcher to avoid heavy crate features for wasm.
-        "ls" => crate::coreutils_dispatch::CoreutilsDispatch::run("ls", args),
+        "ls" => crate::coreutils_dispatch::CoreutilsDispatch::run("ls", args, std::io::stdin(), std::io::stdout(), std::io::stderr()),
 
         // Built-ins and simpler utilities
         "echo" => {
@@ -98,11 +98,11 @@ pub fn execute_command_sync(command: &str, args: &[String]) -> i32 {
             0
         }
 
-        "pwd" => crate::coreutils_dispatch::CoreutilsDispatch::run("pwd", args),
+        "pwd" => crate::coreutils_dispatch::CoreutilsDispatch::run("pwd", args, std::io::stdin(), std::io::stdout(), std::io::stderr()),
 
         // Fallback: delegate to CoreutilsDispatch if configured
         _ => {
-            crate::coreutils_dispatch::CoreutilsDispatch::run(command, args)
+            crate::coreutils_dispatch::CoreutilsDispatch::run(command, args, std::io::stdin(), std::io::stdout(), std::io::stderr())
         }
     }
 }
