@@ -25,33 +25,15 @@ async function main() {
     preopens: (function() {
       const preopens = { '/': '/' };
       if (process.platform !== 'win32') return preopens;
-      try {
-        const out = require('child_process').execFileSync(
-          'powershell',
-          ['-NoProfile', '-Command', 'Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root'],
-          { encoding: 'utf8', timeout: 1500 }
-        );
-        out.split(/\r?\n/)
-          .map(s => s.trim())
-          .filter(Boolean)
-          .forEach(root => {
-            const path = root.endsWith('\\') ? root : root + '\\';
-            const letter = path[0].toUpperCase();
-            preopens[`/${letter}:/`] = path;
-          });
-      } catch (e) {
-        // Fallback: use roots from current directory and user's home
-        const pathModule = require('path');
-        const os = require('os');
-        const cwdRoot = pathModule.parse(process.cwd()).root;
-        const homeRoot = pathModule.parse(os.homedir()).root;
-        [cwdRoot, homeRoot].filter(Boolean).forEach(r => {
-          const rootPath = r.endsWith('\\') ? r : r + '\\';
-          const letter = rootPath[0].toUpperCase();
-          preopens[`/${letter}:/`] = rootPath;
-        });
-      }
-      preopens['/'] = '/';
+      const pathModule = require('path');
+      const os = require('os');
+      const cwdRoot = pathModule.parse(process.cwd()).root;
+      const homeRoot = pathModule.parse(os.homedir()).root;
+      [cwdRoot, homeRoot].filter(Boolean).forEach(r => {
+        const rootPath = r.endsWith('\\') ? r : r + '\\';
+        const letter = rootPath[0].toUpperCase();
+        preopens[`/${letter}:/`] = rootPath;
+      });
       return preopens;
     })(),
     version: 'preview1'
