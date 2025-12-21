@@ -1,7 +1,7 @@
 {
   "name": "washm",
   "description": "WASM shell: Bash inside WASM",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "keywords": [
     "MIT",
     "WASM",
@@ -18,6 +18,10 @@
     "washm.js",
     "washm.wasm"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mavity/washm"
+  },
   "scripts": {
     "test": "cargo build --target wasm32-wasip1 --features wasm-test && node washm.js test",
     "build": "cargo build -p washm --release --target wasm32-wasip1 && echo wasm-strip && npx wasm-strip target/wasm32-wasip1/release/washm.wasm && echo wasm-opt && npx wasm-opt --enable-bulk-memory -Oz target/wasm32-wasip1/release/washm.wasm -o ./washm.wasm"
