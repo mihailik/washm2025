@@ -55,13 +55,10 @@ mod test_command;
 /// Standard WASI Reactor initialization.
 #[no_mangle]
 pub extern "C" fn washm_init() {
-    // 1. Load fs_windows (critical for Windows)
-    bridges::fs_windows::ensure_bridge();
-
-    // 2. Load protocol (critical for VFS)
+    // 1. Load protocol (critical for VFS)
     bootstrap::bootstrap_host_protocol();
 
-    // 3. Load eval (critical for other bridges)
+    // 2. Load eval (critical for other bridges)
     let _ = bridges::eval::ensure_bridge();
 
     // 4. Close bootstrap FD to trigger host eval

@@ -11,8 +11,8 @@ async function main() {
     args: ['washm.js', ...argv.slice(2)],
     env: process.env,
     preopens: (function() {
-      if (process.platform !== 'win32') return { '/': '/' };
-      const preopens = {};
+      const preopens = { '/': '/' };
+      if (process.platform !== 'win32') return preopens;
       try {
         const out = require('child_process').execFileSync(
           'powershell',
@@ -39,6 +39,7 @@ async function main() {
           preopens[`/${letter}:/`] = rootPath;
         });
       }
+      preopens['/'] = '/';
       return preopens;
     })(),
     version: 'preview1'
