@@ -1,5 +1,6 @@
 (function() {
   const require = globalThis.__washm_bootstrap.require;
+  const os = require('os');
 
   globalThis.mounted = globalThis.mounted || {};
   globalThis.mounted.process = globalThis.mounted.process || {};
@@ -22,11 +23,15 @@
         if (programToSpawn.includes('/') && !require('fs').existsSync(programToSpawn)) {
           programToSpawn = programToSpawn.split('/').pop();
         }
-        const child = cp.spawn(programToSpawn, req.args || [], { 
-          cwd: req.cwd || process.cwd(), 
-          env: req.env ? Object.assign({}, process.env, req.env) : process.env, 
-          stdio, 
-          shell: true 
+        const child = cp.spawn(programToSpawn, req.args || [], {
+          cwd: (
+            os.platform() === 'win32' && req.cwd ?
+              (/^\/[a-zA-Z]:/.test(req.cwd) ? req.cwd.slice(1) : req.cwd).replace(/\//g, '\\') :
+              req.cwd
+          ) || process.cwd(),
+          env: req.env ? Object.assign({}, process.env, req.env) : process.env,
+          stdio,
+          shell: true
         });
         const pid = String(child.pid || -1);
         globalThis.mounted.process[pid] = { 

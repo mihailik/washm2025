@@ -17,7 +17,10 @@
         gid: os.userInfo().gid
       }
     }, null, 2),
-    start_pwd: process.cwd(),
+    start_pwd:
+      os.platform() === 'win32' ?
+        process.cwd().replace(/^[a-zA-Z]:/, (m) => `/${m[0].toUpperCase()}:`).replace(/\\/g, '/') :
+        process.cwd(),
     exit_code: {
       _isVirtualFile: true,
       write(chunk) { this._code = (this._code || "") + chunk; },

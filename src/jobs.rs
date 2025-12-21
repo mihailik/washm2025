@@ -72,37 +72,3 @@ impl Default for JobManager {
         Self::new()
     }
 }
-
-// Primary `execute_command_sync` now lives below (always uses coreutils/uucore crates as required)
-
-// Keep a minimal set of `uu_*` utilities wired directly; others route to the CoreutilsDispatch
-pub fn execute_command_sync(command: &str, args: &[String]) -> i32 {
-    let _args_os: Vec<OsString> = args.iter().map(|s| OsString::from(s)).collect();
-
-    match command {
-        // Tier 1: File operations (a small subset)
-        "cat" => crate::coreutils_dispatch::CoreutilsDispatch::run("cat", args, std::io::stdin(), std::io::stdout(), std::io::stderr()),
-        // For now, `ls` delegates to the dispatcher to avoid heavy crate features for wasm.
-        "ls" => crate::coreutils_dispatch::CoreutilsDispatch::run("ls", args, std::io::stdin(), std::io::stdout(), std::io::stderr()),
-
-        // Built-ins and simpler utilities
-        "echo" => {
-            use std::io::Write;
-            let mut out = std::io::stdout();
-            if args.len() > 1 {
-                let _ = writeln!(&mut out, "{}", args[1..].join(" "));
-            } else {
-                let _ = writeln!(&mut out);
-            }
-            let _ = out.flush();
-            0
-        }
-
-        "pwd" => crate::coreutils_dispatch::CoreutilsDispatch::run("pwd", args, std::io::stdin(), std::io::stdout(), std::io::stderr()),
-
-        // Fallback: delegate to CoreutilsDispatch if configured
-        _ => {
-            crate::coreutils_dispatch::CoreutilsDispatch::run(command, args, std::io::stdin(), std::io::stdout(), std::io::stderr())
-        }
-    }
-}

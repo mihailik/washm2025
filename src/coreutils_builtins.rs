@@ -29,6 +29,7 @@ macro_rules! make_coreutil {
                 let code = crate::coreutils_dispatch::CoreutilsDispatch::run(
                     $cmd,
                     &args_vec,
+                    context.shell.working_dir(),
                     context.stdin(),
                     context.stdout(),
                     context.stderr(),
@@ -54,50 +55,3 @@ make_coreutil!(EnvCommand, "env", "run a program in a modified environment");
 // in various integration stubs (e.g., `brush_bridge`).
 make_coreutil!(CatCommand, "cat", "concatenate files and print on the standard output");
 
-pub struct PwdCommand;
-
-impl SimpleCommand for PwdCommand {
-    fn get_content(name: &str, _content_type: crate::brush_core::builtins::ContentType, _options: &crate::brush_core::builtins::ContentOptions) -> Result<String, error::Error> {
-        Ok(format!("{} - print name of current/working directory", name))
-    }
-
-    fn execute<I: Iterator<Item = S>, S: AsRef<str>>(
-        context: commands::ExecutionContext<'_>,
-        _args: I,
-    ) -> Result<results::ExecutionResult, error::Error> {
-        // Sync exported environment variables
-        let current_env: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
-        for k in current_env {
-            if context.shell.env.get(&k).map_or(true, |(_, v)| !v.is_exported()) {
-                std::env::remove_var(k);
-            }
-        }
-        for (k, v) in context.shell.env.iter_exported() {
-            if v.value().is_set() {
-                std::env::set_var(k, v.value().to_cow_str(context.shell).as_ref());
-            }
-        }
-
-        // Read host start path
-        let start_pwd = crate::bridges::host::startup_pwd();
-        let start_pwd = start_pwd.trim();
-
-        // Get shell's current working directory (relative to WASI root)
-        let shell_cwd = context.shell.working_dir();
-        let shell_cwd_str = shell_cwd.to_string_lossy();
-
-        // Combine
-        let final_path = if shell_cwd_str.starts_with(start_pwd) {
-            std::path::PathBuf::from(shell_cwd_str.as_ref())
-        } else if shell_cwd_str == "/" {
-            std::path::PathBuf::from(start_pwd)
-        } else {
-            let relative = shell_cwd_str.trim_start_matches('/');
-            std::path::Path::new(start_pwd).join(relative)
-        };
-
-        use std::io::Write;
-        writeln!(context.stdout(), "{}", final_path.display())?;
-        Ok(results::ExecutionResult::success())
-    }
-}
