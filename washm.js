@@ -1,4 +1,16 @@
 #!/usr/bin/env -S node --no-warnings
+// Suppress only the WASI ExperimentalWarning (keeps other warnings intact).
+// This is intentionally minimal: wrap `process.emitWarning` and drop ExperimentalWarning messages that mention 'WASI'.
+const _originalEmitWarning = process.emitWarning;
+process.emitWarning = function(warning, ...args) {
+  try {
+    const name = (typeof args[0] === 'string' ? args[0] : (warning && warning.name)) || '';
+    const message = typeof warning === 'string' ? warning : (warning && warning.message) || '';
+    if ((name === 'ExperimentalWarning' || /ExperimentalWarning/.test(name)) && /WASI/.test(message)) return;
+  } catch (e) { /* fall through to default behavior */ }
+  return _originalEmitWarning.call(process, warning, ...args);
+};
+
 const fs = require('fs');
 const { WASI } = require('wasi');
 const argv = process.argv;
