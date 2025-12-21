@@ -4,7 +4,6 @@
 /// Section 2: Deadlock Avoidance - CARGO_TARGET_DIR is set at the start
 /// Section 3: Dual-Graph Architecture - Uses RA's parser for semantic understanding
 /// Section 4: Core Transformations - Semantic re-rooting, path synthesis, SSR
-use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,7 +11,7 @@ use walkdir::WalkDir;
 
 // rust-analyzer imports for semantic analysis
 use ra_ap_ide::AnalysisHost;
-use ra_ap_syntax::{AstNode, Edition, SourceFile};
+use ra_ap_syntax::{Edition, SourceFile};
 
 fn main() {
     // Section 2: Deadlock Avoidance - Set isolated target directory BEFORE any RA operations
@@ -233,7 +232,9 @@ impl SemanticEngine {
             
             for candidate in candidates {
                 if candidate.exists() {
-                    return format!("#[path = r\"{}\"]\n{}mod {};", candidate.display(), vis, mod_name);
+                    // Normalize to forward slashes for the generated attribute
+                    let path_literal = candidate.to_string_lossy().replace("\\", "/");
+                    return format!("#[path = r\"{}\"]\n{}mod {};", path_literal, vis, mod_name);
                 }
             }
             
@@ -244,8 +245,9 @@ impl SemanticEngine {
     // Section 4.C: Type-Aware SSR for stub replacements
     fn apply_ssr_transforms(&self, content: &str, path: &Path) -> String {
         let mut result = content.to_string();
+        let path_str = normalize_path(path);
         
-        if path.ends_with("brush-core/src/sys/stubs/users.rs") {
+        if path_str.ends_with("brush-core/src/sys/stubs/users.rs") {
             result = result
                 .replace(r#"Err(error::ErrorKind::NotSupportedOnThisPlatform("getting current uid").into())"#, "Ok(crate::stubs_impl::startup_uid())")
                 .replace(r#"Err(error::ErrorKind::NotSupportedOnThisPlatform("getting current gid").into())"#, "Ok(crate::stubs_impl::startup_gid())")
@@ -254,28 +256,28 @@ impl SemanticEngine {
                 .replace(r#"Err(error::ErrorKind::NotSupportedOnThisPlatform("getting current username").into())"#, "Ok(crate::stubs_impl::startup_username())");
         }
         
-        if path.ends_with("brush-core/src/openfiles.rs") {
+        if path_str.ends_with("brush-core/src/openfiles.rs") {
             result = result.replace(
                 "fn clone(&self) -> Self {\n        self.try_clone().unwrap()\n    }",
                 "fn clone(&self) -> Self {\n        crate::stubs_impl::clone_open_file(self)\n    }"
             );
         }
         
-        if path.ends_with("brush-core/src/sys/stubs/network.rs") {
+        if path_str.ends_with("brush-core/src/sys/stubs/network.rs") {
             result = result.replace(
                 "pub(crate) fn get_hostname() -> std::io::Result<std::ffi::OsString> {\n    Ok(\"\".into())\n}",
                 "pub(crate) fn get_hostname() -> std::io::Result<std::ffi::OsString> {\n    Ok(std::ffi::OsString::from(crate::stubs_impl::startup_hostname()))\n}"
             );
         }
         
-        if path.ends_with("brush-core/src/sys/stubs/fs.rs") {
+        if path_str.ends_with("brush-core/src/sys/stubs/fs.rs") {
             result = result.replace(
                 "pub fn open_null_file() -> Result<std::fs::File, error::Error> {\n    Err(error::ErrorKind::NotSupportedOnThisPlatform(\"opening null file\").into())\n}",
                 "pub fn open_null_file() -> Result<std::fs::File, error::Error> {\n    crate::stubs_impl::open_null_file()\n}"
             );
         }
         
-        if path.ends_with("brush-core/src/sys/stubs/process.rs") {
+        if path_str.ends_with("brush-core/src/sys/stubs/process.rs") {
             result = result
                 .replace(
                     "pub(crate) fn spawn(mut command: std::process::Command) -> std::io::Result<Child> {\n    let child = command.spawn()?;\n    Ok(Child { inner: child })\n}",
@@ -299,7 +301,7 @@ impl SemanticEngine {
                 );
         }
         
-        if path.ends_with("brush-core/src/sys/stubs/signal.rs") {
+        if path_str.ends_with("brush-core/src/sys/stubs/signal.rs") {
             let continue_re = regex::Regex::new(
                 r"pub\(crate\)\s+fn\s+continue_process\s*\([^)]*\)\s*->\s*Result<[^>]*>\s*\{[^}]*NotSupportedOnThisPlatform[^}]*\}"
             ).unwrap();
@@ -315,7 +317,7 @@ impl SemanticEngine {
             ).to_string();
         }
         
-        if path.ends_with("brush-core/src/sys/stubs/commands.rs") {
+        if path.to_string_lossy().replace("\\", "/").ends_with("brush-core/src/sys/stubs/commands.rs") {
             if result.contains(r#"NotSupportedOnThisPlatform("fd redirections")"#) {
                 result = result.replace(
                     "if open_files.next().is_some() {\n            return Err(error::ErrorKind::NotSupportedOnThisPlatform(\"fd redirections\").into());\n        }\n\n        Ok(())",
@@ -329,6 +331,7 @@ impl SemanticEngine {
     
     fn apply_additional_transforms(&self, content: &str, path: &Path) -> String {
         let mut result = content.to_string();
+        let path_str = normalize_path(path);
         
         // Convert inner doc comments and attributes
         let doc_re = regex::Regex::new(r"(?m)^//!").unwrap();
@@ -349,25 +352,25 @@ impl SemanticEngine {
             .replace("use crossterm ", "use crate::shims::crossterm ");
         
         // File-specific patches
-        if path.ends_with("uucore/src/lib/mods/locale.rs") {
+        if path_str.ends_with("uucore/src/lib/mods/locale.rs") {
             result = result.replace(
                 r#"include!(concat!(env!("OUT_DIR"), "/embedded_locales.rs"));"#,
                 r#"include!("../../embedded_locales.rs");"#
             );
         }
         
-        if path.ends_with("brush-core/src/sys/stubs.rs") && !result.contains("pub use crate::stubs_impl::") {
+        if path_str.ends_with("brush-core/src/sys/stubs.rs") && !result.contains("pub use crate::stubs_impl::") {
             result.push_str("\n// Re-export startup helpers\npub use crate::stubs_impl::{startup_username, startup_uid, startup_gid};\n");
         }
         
-        if path.ends_with("brush-core/src/shell.rs") {
+        if path_str.ends_with("brush-core/src/shell.rs") {
             result = result.replace(
                 "let oldpwd = std::mem::replace(self.working_dir_mut(), cleaned_path);",
                 "let oldpwd = std::mem::replace(self.working_dir_mut(), cleaned_path);\n        let _ = std::env::set_current_dir(&self.working_dir);"
             );
         }
         
-        if path.ends_with("brush-builtins/src/lib.rs") && result.contains("macro_rules! minus_or_plus_flag_arg") {
+        if path_str.ends_with("brush-builtins/src/lib.rs") && result.contains("macro_rules! minus_or_plus_flag_arg") {
             result = result.replace("#[macro_export]\nmacro_rules! minus_or_plus_flag_arg", "macro_rules! minus_or_plus_flag_arg");
             
             if let Some(macro_start) = result.find("/// Macro to define a struct") {
@@ -381,33 +384,33 @@ impl SemanticEngine {
             }
         }
         
-        if path.ends_with("brush-interactive/src/lib.rs") {
+        if path_str.ends_with("brush-interactive/src/lib.rs") {
             result = self.transform_interactive_lib(&result);
         }
         
-        if path.ends_with("brush-core/src/expansion.rs") && !result.starts_with("use std::future::Future;") {
+        if path_str.ends_with("brush-core/src/expansion.rs") && !result.starts_with("use std::future::Future;") {
             result = format!("use std::future::Future;\n{}", result);
         }
         
-        if path.ends_with("brush-shell/src/lib.rs") {
+        if path_str.ends_with("brush-shell/src/lib.rs") {
             result = result.replace("mod brushctl;", "pub mod brushctl;");
             if !result.contains("pub mod embedded;") {
                 result.push_str("\npub mod embedded;");
             }
         }
         
-        if path.ends_with("brush-shell/src/brushctl.rs") {
+        if path_str.ends_with("brush-shell/src/brushctl.rs") {
             result = result.replace("pub(crate) trait ShellBuilderBrushBuiltinExt", "pub trait ShellBuilderBrushBuiltinExt");
         }
         
-        if path.ends_with("brush-core/src/error.rs") {
+        if path_str.ends_with("brush-core/src/error.rs") {
             result = result.replace(
                 "impl<T> From<T> for Error",
                 "include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/brush_error_impls.rs\"));\n#[cfg(any())] impl<T> From<T> for Error"
             );
         }
         
-        if path.ends_with("brush-shell/src/entry.rs") {
+        if path_str.ends_with("brush-shell/src/entry.rs") {
             result = result
                 .replace("async fn run_async", "pub async fn run_async")
                 .replace("fn try_parse_from", "pub fn try_parse_from");
@@ -429,7 +432,7 @@ impl SemanticEngine {
             result = result.replace("fn read_line", "async fn read_line");
         }
         
-        if (result.contains("impl InputBackend") || path.to_string_lossy().contains("interactive")) 
+        if (result.contains("impl InputBackend") || path_str.contains("interactive")) 
             && !path.ends_with("wasm_interactive.rs") {
             let async_re = regex::Regex::new(r"(?m)(async\s+)?fn\s+read_line").unwrap();
             result = async_re.replace_all(&result, "async fn read_line").to_string();
@@ -462,6 +465,16 @@ impl SemanticEngine {
         
         let use_refs_re = regex::Regex::new(r"(?m)^pub\s+use\s+refs::ShellRef\s*;").unwrap();
         use_refs_re.replace_all(&result, "// $0").to_string()
+    }
+}
+
+// Normalize Path helper: converts backslashes to forward slashes and on Windows lowercases for case-insensitive checks
+fn normalize_path(path: &Path) -> String {
+    let s = path.to_string_lossy().replace("\\", "/");
+    if cfg!(windows) {
+        s.to_lowercase()
+    } else {
+        s
     }
 }
 
@@ -541,14 +554,19 @@ fn verify_no_stubs(vendor_dir: &Path) {
     
     for entry in WalkDir::new(vendor_dir) {
         let entry = entry.unwrap();
+        let path_str = normalize_path(entry.path());
         if !entry.file_type().is_file() || entry.path().extension().map_or(true, |e| e != "rs") {
             continue;
         }
         
         let path = entry.path();
-        let path_str = path.to_string_lossy();
         
-        if path_str.contains("/sys/windows/") || path_str.contains("/sys/unix/") || path.ends_with("brush-core/src/error.rs") {
+        // Skip platform-specific sys folders regardless of separator/case
+        if path_str.contains("sys/windows") || path_str.contains("sys/unix") {
+            continue;
+        }
+        
+        if path_str.ends_with("brush-core/src/error.rs") {
             continue;
         }
         
