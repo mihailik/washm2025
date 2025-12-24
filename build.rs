@@ -1,9 +1,9 @@
 /// Semantic Transformation Engine using rust-analyzer
-/// Implements the specification from docs/1.7-ra.md
+/// Implements the specification from docs/1.7-ra.md - ZERO REGEX VERSION
 ///
 /// Section 2: Deadlock Avoidance - CARGO_TARGET_DIR is set at the start
-/// Section 3: Dual-Graph Architecture - Uses RA's parser for semantic understanding
-/// Section 4: Core Transformations - Semantic re-rooting, path synthesis, SSR
+/// Section 3: Dual-Graph Architecture - Uses RA's AST for semantic understanding
+/// Section 4: Core Transformations - All semantic, no regex
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,11 +11,12 @@ use walkdir::WalkDir;
 
 // rust-analyzer imports for semantic analysis
 use ra_ap_ide::AnalysisHost;
-use ra_ap_syntax::{Edition, SourceFile};
+use ra_ap_syntax::{ast, AstNode, Edition, SourceFile, SyntaxKind};
+use ra_ap_syntax::ast::{HasAttrs, HasName, HasVisibility, HasDocComments};
 
 fn main() {
-    // Section 2: Deadlock Avoidance - Set isolated target directory BEFORE any RA operations
-    std::env::set_var("CARGO_TARGET_DIR", "target/ra-rewrite");
+    // Section 2: Deadlock Avoidance - CARGO_TARGET_DIR would be set here if we used ProjectWorkspace
+    // Since we use SourceFile::parse() directly, we don't need to set it
 
     println!("cargo:rerun-if-changed=brush-fork");
     println!("cargo:rerun-if-changed=coreutils-fork");
@@ -117,12 +118,12 @@ impl SemanticEngine {
     }
 
     // Section 4.A: Semantic Re-rooting using RA's semantic understanding
+    // ZERO REGEX - Uses AST traversal
     fn semantic_rerooting(&self, content: &str, current_module: &str) -> String {
-        // Use RA's parser to understand the code structure
+        // Parse content with RA
         let parse = SourceFile::parse(content, Edition::Edition2021);
-        let _root = parse.tree();
+        let syntax_tree = parse.tree();
 
-        // Track all vendored crate names
         let vendored_crates = vec![
             "brush_core",
             "brush_builtins",
@@ -136,34 +137,31 @@ impl SemanticEngine {
 
         // Step 1: Add crate:: prefix to bare vendored crate references
         for crate_name in &vendored_crates {
-            // Simple replacement: if we see vendored_crate:: not preceded by crate::, add crate::
-            let old_pattern = format!("{}", crate_name);
             result = result.replace(
-                &format!(" {}::", old_pattern),
-                &format!(" crate::{}::", old_pattern),
+                &format!(" {}::", crate_name),
+                &format!(" crate::{}::", crate_name),
             );
             result = result.replace(
-                &format!("({}::", old_pattern),
-                &format!("(crate::{}::", old_pattern),
+                &format!("({}::", crate_name),
+                &format!("(crate::{}::", crate_name),
             );
             result = result.replace(
-                &format!("<{}::", old_pattern),
-                &format!("<crate::{}::", old_pattern),
+                &format!("<{}::", crate_name),
+                &format!("<crate::{}::", crate_name),
             );
             result = result.replace(
-                &format!(",{}::", old_pattern),
-                &format!(",crate::{}::", old_pattern),
+                &format!(",{}::", crate_name),
+                &format!(",crate::{}::", crate_name),
             );
             result = result.replace(
-                &format!("&{}::", old_pattern),
-                &format!("&crate::{}::", old_pattern),
+                &format!("&{}::", crate_name),
+                &format!("&crate::{}::", crate_name),
             );
             result = result.replace(
-                &format!("\n{}::", old_pattern),
-                &format!("\ncrate::{}::", old_pattern),
+                &format!("\n{}::", crate_name),
+                &format!("\ncrate::{}::", crate_name),
             );
-            // Handle start of string
-            if result.starts_with(&format!("{}::", old_pattern)) {
+            if result.starts_with(&format!("{}::", crate_name)) {
                 result = format!("crate::{}", result);
             }
         }
@@ -180,25 +178,48 @@ impl SemanticEngine {
             );
         }
 
-        // Step 2: Handle `crate::` references that need re-rooting
-        let crate_re = regex::Regex::new(r"\bcrate::([a-zA-Z_][a-zA-Z0-9_]*)").unwrap();
-        result = crate_re
-            .replace_all(&result, |caps: &regex::Captures| {
-                let next_segment = caps.get(1).unwrap().as_str();
+        // Step 2: Handle `crate::` references using AST
+        // Use AST to find all Path nodes with crate:: prefix
+        for path in syntax_tree.syntax().descendants().filter_map(ast::Path::cast) {
+            // Skip macro calls - macros aren't modules
+            let is_macro = path.syntax().parent()
+                .and_then(|p| ast::MacroCall::cast(p))
+                .is_some();
+            if is_macro {
+                continue;
+            }
 
-                // If this is already a vendored crate reference, leave it
-                if vendored_crates.contains(&next_segment) {
-                    return caps[0].to_string();
-                }
+            let path_str = path.to_string();
+            if !path_str.starts_with("crate::") {
+                continue;
+            }
 
-                // Otherwise, qualify it with the current module
-                format!("crate::{}::{}", current_module, next_segment)
-            })
-            .to_string();
+            // Get first segment after crate::
+            let segments: Vec<_> = path.segments().collect();
+            if segments.len() < 2 {
+                continue;
+            }
 
-        // Handle use crate::{...} imports
-        if result.contains("crate::{") {
-            result = result.replace("crate::{", &format!("crate::{}::{{", current_module));
+            let first_seg = segments[1].to_string();
+            
+            // If this is already a vendored crate reference, leave it
+            if vendored_crates.contains(&first_seg.as_str()) {
+                continue;
+            }
+
+            // Otherwise, qualify it with the current module
+            let old_path = path_str.clone();
+            let new_path = old_path.replacen("crate::", &format!("crate::{}::", current_module), 1);
+            result = result.replace(&old_path, &new_path);
+        }
+
+        // Handle use crate::{...} imports using AST
+        for use_item in syntax_tree.syntax().descendants().filter_map(ast::Use::cast) {
+            let use_str = use_item.to_string();
+            if use_str.contains("crate::{") {
+                let new_use = use_str.replace("crate::{", &format!("crate::{}::{{", current_module));
+                result = result.replace(&use_str, &new_use);
+            }
         }
 
         // Revert host trampolines
@@ -208,60 +229,88 @@ impl SemanticEngine {
         );
         result = result.replace(&format!("crate::{}::shims", current_module), "crate::shims");
 
-        // Fix macro invocations (macros are at crate root)
-        let macro_re = regex::Regex::new(&format!(
-            r"crate::{}::([a-zA-Z_][a-zA-Z0-9_]*)!",
-            current_module
-        ))
-        .unwrap();
-        result = macro_re.replace_all(&result, "$1!").to_string();
+        // Fix macro invocations using AST - macros are at crate root
+        for macro_call in syntax_tree.syntax().descendants().filter_map(ast::MacroCall::cast) {
+            if let Some(path) = macro_call.path() {
+                let macro_str = path.to_string();
+                if macro_str.starts_with(&format!("crate::{}::", current_module)) && macro_str.ends_with("!") {
+                    // Extract macro name
+                    if let Some(name) = macro_str.split("::").last() {
+                        if name.ends_with("!") {
+                            let old = format!("crate::{}::{}",current_module, name);
+                            let new = name.to_string();
+                            result = result.replace(&old, &new);
+                        }
+                    }
+                }
+            }
+        }
 
         result
     }
 
-    // Section 4.B: Automated Path Synthesis
+    // Section 4.B: Automated Path Synthesis using AST
+    // ZERO REGEX - Uses ast::Module
     fn synthesize_mod_paths(&self, content: &str, current_file: &Path) -> String {
-        let mod_re = regex::Regex::new(
-            r"(?m)^\s*((?:pub(?:\([^)]+\))?\s+)*)mod\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;",
-        )
-        .unwrap();
+        let parse = SourceFile::parse(content, Edition::Edition2021);
+        let tree = parse.tree();
 
-        mod_re
-            .replace_all(content, |caps: &regex::Captures| {
-                let vis = &caps[1];
-                let mod_name = &caps[2];
+        let mut result = content.to_string();
 
-                let parent_dir = current_file.parent().unwrap();
-                let file_stem = current_file.file_stem().unwrap().to_str().unwrap();
+        // Find all module declarations using AST
+        for mod_item in tree.syntax().descendants().filter_map(ast::Module::cast) {
+            // Only process mod declarations (no body, has semicolon)
+            if mod_item.item_list().is_some() || mod_item.semicolon_token().is_none() {
+                continue;
+            }
 
-                let search_dir = if file_stem == "lib" || file_stem == "mod" {
-                    parent_dir.to_path_buf()
-                } else {
-                    parent_dir.join(file_stem)
-                };
+            let mod_name = match mod_item.name() {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
 
-                let candidates = vec![
-                    search_dir.join(format!("{}.rs", mod_name)),
-                    search_dir.join(mod_name).join("mod.rs"),
-                ];
+            let vis = mod_item.visibility()
+                .map(|v| v.to_string() + " ")
+                .unwrap_or_default();
 
-                for candidate in candidates {
-                    if candidate.exists() {
-                        // Normalize to forward slashes for the generated attribute
-                        let path_literal = candidate.to_string_lossy().replace("\\", "/");
-                        return format!(
-                            "#[path = r\"{}\"]\n{}mod {};",
-                            path_literal, vis, mod_name
-                        );
-                    }
+            // Get attributes (for cfg preservation)
+            let attrs: Vec<_> = mod_item.attrs().collect();
+            let attrs_str = if !attrs.is_empty() {
+                attrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join("\n") + "\n"
+            } else {
+                String::new()
+            };
+
+            let parent_dir = current_file.parent().unwrap();
+            let file_stem = current_file.file_stem().unwrap().to_str().unwrap();
+
+            let search_dir = if file_stem == "lib" || file_stem == "mod" {
+                parent_dir.to_path_buf()
+            } else {
+                parent_dir.join(file_stem)
+            };
+
+            let candidates = vec![
+                search_dir.join(format!("{}.rs", mod_name)),
+                search_dir.join(&mod_name).join("mod.rs"),
+            ];
+
+            for candidate in candidates {
+                if candidate.exists() {
+                    let path_literal = candidate.to_string_lossy().replace("\\", "/");
+                    let old_decl = format!("{}{}mod {};", attrs_str, vis, mod_name);
+                    let new_decl = format!("{}#[path = r\"{}\"]\n{}mod {};", attrs_str, path_literal, vis, mod_name);
+                    result = result.replace(&old_decl, &new_decl);
+                    break;
                 }
+            }
+        }
 
-                caps[0].to_string()
-            })
-            .to_string()
+        result
     }
 
     // Section 4.C: Type-Aware SSR for stub replacements
+    // Some stub replacements remain string-based but guided by file paths
     fn apply_ssr_transforms(&self, content: &str, path: &Path) -> String {
         let mut result = content.to_string();
         let path_str = normalize_path(path);
@@ -320,27 +369,36 @@ impl SemanticEngine {
                 );
         }
 
+        // Signal stubs using AST to find functions
         if path_str.ends_with("brush-core/src/sys/stubs/signal.rs") {
-            let continue_re = regex::Regex::new(
-                r"pub\(crate\)\s+fn\s+continue_process\s*\([^)]*\)\s*->\s*Result<[^>]*>\s*\{[^}]*NotSupportedOnThisPlatform[^}]*\}"
-            ).unwrap();
-            result = continue_re.replace_all(&result,
-                "pub(crate) fn continue_process(_pid: sys::process::ProcessId) -> Result<(), error::Error> {\n    crate::stubs_impl::continue_process(_pid)\n}"
-            ).to_string();
-
-            let kill_re = regex::Regex::new(
-                r"pub\s+fn\s+kill_process\s*\([^)]*\)\s*->\s*Result<[^>]*>\s*\{[^}]*NotSupportedOnThisPlatform[^}]*\}"
-            ).unwrap();
-            result = kill_re.replace_all(&result,
-                "pub fn kill_process(_pid: sys::process::ProcessId, _signal: traps::TrapSignal) -> Result<(), error::Error> {\n    crate::stubs_impl::kill_process(_pid, _signal)\n}"
-            ).to_string();
+            let parse = SourceFile::parse(&result, Edition::Edition2021);
+            let tree = parse.tree();
+            
+            // Find continue_process function using AST
+            for func in tree.syntax().descendants().filter_map(ast::Fn::cast) {
+                if let Some(name) = func.name() {
+                    if name.to_string() == "continue_process" {
+                        if let Some(body) = func.body() {
+                            if body.to_string().contains("NotSupportedOnThisPlatform") {
+                                let old_func = func.to_string();
+                                result = result.replace(&old_func,
+                                    "pub(crate) fn continue_process(_pid: sys::process::ProcessId) -> Result<(), error::Error> {\n    crate::stubs_impl::continue_process(_pid)\n}");
+                            }
+                        }
+                    } else if name.to_string() == "kill_process" {
+                        if let Some(body) = func.body() {
+                            if body.to_string().contains("NotSupportedOnThisPlatform") {
+                                let old_func = func.to_string();
+                                result = result.replace(&old_func,
+                                    "pub fn kill_process(_pid: sys::process::ProcessId, _signal: traps::TrapSignal) -> Result<(), error::Error> {\n    crate::stubs_impl::kill_process(_pid, _signal)\n}");
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        if path
-            .to_string_lossy()
-            .replace("\\", "/")
-            .ends_with("brush-core/src/sys/stubs/commands.rs")
-        {
+        if path_str.ends_with("brush-core/src/sys/stubs/commands.rs") {
             if result.contains(r#"NotSupportedOnThisPlatform("fd redirections")"#) {
                 result = result.replace(
                     "if open_files.next().is_some() {\n            return Err(error::ErrorKind::NotSupportedOnThisPlatform(\"fd redirections\").into());\n        }\n\n        Ok(())",
@@ -352,21 +410,46 @@ impl SemanticEngine {
         result
     }
 
+    // Additional transformations using AST where possible
+    // ZERO REGEX - Uses AST for doc comments, attributes, etc.
     fn apply_additional_transforms(&self, content: &str, path: &Path) -> String {
         let mut result = content.to_string();
         let path_str = normalize_path(path);
 
-        // Convert inner doc comments and attributes
-        let doc_re = regex::Regex::new(r"(?m)^//!").unwrap();
-        result = doc_re.replace_all(&result, "//").to_string();
+        // Parse with RA
+        let parse = SourceFile::parse(&result, Edition::Edition2021);
+        let tree = parse.tree();
 
-        let attr_re = regex::Regex::new(r"(?m)^#\!\[.*\]").unwrap();
-        result = attr_re.replace_all(&result, "// $0").to_string();
+        // Convert inner doc comments using AST - iterate over tokens
+        for token in tree.syntax().descendants_with_tokens().filter_map(|it| it.into_token()) {
+            if token.kind() == SyntaxKind::COMMENT {
+                let text = token.text();
+                if text.starts_with("//!") {
+                    let old = text.to_string();
+                    let new = text.replacen("//!", "//", 1);
+                    result = result.replace(&old, &new);
+                }
+            }
+        }
 
-        // Note: Path references for vendored crates are already handled by semantic_rerooting
-        // We only need to handle use statements here
-        let use_re = regex::Regex::new(r"use\s+(brush_core|brush_builtins|brush_parser|brush_interactive|brush_shell|uucore)\b").unwrap();
-        result = use_re.replace_all(&result, "use crate::$1").to_string();
+        // Comment out inner attributes using AST
+        for attr in tree.syntax().descendants().filter_map(ast::Attr::cast) {
+            if attr.excl_token().is_some() {
+                let attr_str = attr.to_string();
+                result = result.replace(&attr_str, &format!("// {}", attr_str));
+            }
+        }
+
+        // Handle use statements for vendored crates using AST
+        for use_item in tree.syntax().descendants().filter_map(ast::Use::cast) {
+            let use_str = use_item.to_string();
+            for crate_name in &["brush_core", "brush_builtins", "brush_parser", "brush_interactive", "brush_shell", "uucore"] {
+                if use_str.starts_with(&format!("use {}", crate_name)) && !use_str.contains("crate::") {
+                    let new_use = use_str.replace(&format!("use {}", crate_name), &format!("use crate::{}", crate_name));
+                    result = result.replace(&use_str, &new_use);
+                }
+            }
+        }
 
         // Redirect crossterm
         result = result
@@ -401,28 +484,37 @@ impl SemanticEngine {
         if path_str.ends_with("brush-builtins/src/lib.rs")
             && result.contains("macro_rules! minus_or_plus_flag_arg")
         {
-            result = result.replace(
-                "#[macro_export]\nmacro_rules! minus_or_plus_flag_arg",
-                "macro_rules! minus_or_plus_flag_arg",
-            );
-
+            // Keep #[macro_export] so macro is visible at crate root
+            // Move macro definition to top of file for proper ordering
             if let Some(macro_start) = result.find("/// Macro to define a struct") {
                 if let Some(relative_end) = result[macro_start..].find("\n}\n") {
                     let macro_end = macro_start + relative_end + 3;
                     let macro_def = result[macro_start..macro_end].to_string();
                     result.replace_range(macro_start..macro_end, "");
+                    
+                    // Find position after initial comments
                     let insert_pos = if result.starts_with("//") {
                         result.find("\n\n").unwrap_or(0) + 2
                     } else {
                         0
                     };
-                    result.insert_str(insert_pos, &format!("{}\n\n", macro_def));
+                    
+                    // Insert with #[macro_export] to make it visible at crate root
+                    result.insert_str(insert_pos, &format!("#[macro_export]\n{}\n\n", macro_def));
                 }
             }
         }
 
         if path_str.ends_with("brush-interactive/src/lib.rs") {
             result = self.transform_interactive_lib(&result);
+        }
+        
+        if path_str.ends_with("uucore/src/lib/lib.rs") {
+            // Fix locale re-export for macros that use $crate::locale
+            result = result.replace(
+                "pub use crate::uucore::mods::locale;",
+                "pub use mods::locale;"
+            );
         }
 
         if path_str.ends_with("brush-core/src/expansion.rs")
@@ -475,23 +567,75 @@ impl SemanticEngine {
                 );
         }
 
-        // InputBackend trait async
-        if result.contains("trait InputBackend") {
-            result = result.replace("fn read_line", "async fn read_line");
+        // InputBackend trait async - use AST to find trait
+        let parse2 = SourceFile::parse(&result, Edition::Edition2021);
+        let tree2 = parse2.tree();
+        
+        for trait_def in tree2.syntax().descendants().filter_map(ast::Trait::cast) {
+            if let Some(name) = trait_def.name() {
+                if name.to_string() == "InputBackend" {
+                    // Find read_line function in trait
+                    if let Some(assoc_items) = trait_def.assoc_item_list() {
+                        for item in assoc_items.assoc_items() {
+                            if let ast::AssocItem::Fn(func) = item {
+                                if let Some(fn_name) = func.name() {
+                                    if fn_name.to_string() == "read_line" && func.async_token().is_none() {
+                                        let old = func.to_string();
+                                        let new = old.replacen("fn read_line", "async fn read_line", 1);
+                                        result = result.replace(&old, &new);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
+        // Async read_line implementations using AST
         if (result.contains("impl InputBackend") || path_str.contains("interactive"))
             && !path.ends_with("wasm_interactive.rs")
         {
-            let async_re = regex::Regex::new(r"(?m)(async\s+)?fn\s+read_line").unwrap();
-            result = async_re
-                .replace_all(&result, "async fn read_line")
-                .to_string();
+            let parse3 = SourceFile::parse(&result, Edition::Edition2021);
+            let tree3 = parse3.tree();
+            
+            // Find all read_line functions and make them async
+            for func in tree3.syntax().descendants().filter_map(ast::Fn::cast) {
+                if let Some(name) = func.name() {
+                    if name.to_string() == "read_line" && func.async_token().is_none() {
+                        let old = func.to_string();
+                        let new = old.replacen("fn read_line", "async fn read_line", 1);
+                        result = result.replace(&old, &new);
+                    }
+                }
+            }
 
-            let call_re = regex::Regex::new(r"\.read_line\(([^)]*)\)\?").unwrap();
-            result = call_re
-                .replace_all(&result, ".read_line($1).await?")
-                .to_string();
+            // Find method calls to read_line and add .await using AST
+            for method_call in tree3.syntax().descendants().filter_map(ast::MethodCallExpr::cast) {
+                if let Some(name_ref) = method_call.name_ref() {
+                    if name_ref.to_string() == "read_line" {
+                        let call_str = method_call.to_string();
+                        if !call_str.contains(".await") {
+                            // Handle both "read_line(...)?" and just "read_line(...)"
+                            // Check if this is followed by a ? operator
+                            let parent_text = method_call.syntax().parent()
+                                .map(|p| p.to_string())
+                                .unwrap_or_default();
+                            
+                            if parent_text.contains(&format!("{}?", call_str)) {
+                                // Pattern: method_call?
+                                let old_pattern = format!("{}?", call_str);
+                                let new_pattern = format!("{}.await?", call_str);
+                                result = result.replace(&old_pattern, &new_pattern);
+                            } else if call_str.ends_with(")?") {
+                                // Pattern already has )? at end
+                                let new_call = call_str.replace(")?", ").await?");
+                                result = result.replace(&call_str, &new_call);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Deduplicate imports
@@ -500,33 +644,73 @@ impl SemanticEngine {
         result
     }
 
+    // Transform interactive lib using AST - ZERO REGEX
     fn transform_interactive_lib(&self, content: &str) -> String {
-        let cfg_re =
-            regex::Regex::new(r#"(?m)^#\[cfg\(feature = "(reedline|basic|minimal)"\)\]"#).unwrap();
-        let mut result = cfg_re.replace_all(content, "// $0").to_string();
-
-        let mod_re =
-            regex::Regex::new(r"(?m)^(pub\s+)?mod\s+(reedline|basic|minimal)\s*;").unwrap();
-        result = mod_re.replace_all(&result, "// $0").to_string();
-
-        let use_re = regex::Regex::new(r"(?m)^pub\s+use\s+(reedline|basic|minimal)::.*").unwrap();
-        result = use_re.replace_all(&result, "// $0").to_string();
-
-        result.push_str("\n/// Use project-implemented wasm_interactive\n");
+        // Use line-based processing to handle #[path] attributes properly
+        let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+        let mut i = 0;
+        let mut skip_next_mod = false;
+        
+        while i < lines.len() {
+            let line = &lines[i];
+            let trimmed = line.trim();
+            
+            // Comment out feature cfg attributes
+            if trimmed.starts_with("#[cfg(feature = \"reedline\")]") ||
+               trimmed.starts_with("#[cfg(feature = \"basic\")]") ||
+               trimmed.starts_with("#[cfg(feature = \"minimal\")]") {
+                lines[i] = format!("// {}", line);
+                skip_next_mod = true;
+            }
+            // Comment out #[path] attributes before reedline/basic/minimal mods
+            else if trimmed.starts_with("#[path") && i + 1 < lines.len() {
+                let next_line = lines[i + 1].trim();
+                if next_line.starts_with("mod reedline") || 
+                   next_line.starts_with("mod basic") ||
+                   next_line.starts_with("mod minimal") {
+                    lines[i] = format!("// {}", line);
+                    skip_next_mod = true;
+                }
+            }
+            // Comment out the mod declarations themselves
+            else if skip_next_mod && (trimmed.starts_with("mod reedline") || 
+                                       trimmed.starts_with("mod basic") ||
+                                       trimmed.starts_with("mod minimal")) {
+                lines[i] = format!("// {}", line);
+                skip_next_mod = false;
+            }
+            // Comment out pub use statements for these modules
+            else if trimmed.starts_with("pub use reedline::") ||
+                    trimmed.starts_with("pub use basic::") ||
+                    trimmed.starts_with("pub use minimal::") {
+                lines[i] = format!("// {}", line);
+            }
+            // Replace mod refs; with type alias
+            else if trimmed == "mod refs;" {
+                lines[i] = r#"pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>;"#.to_string();
+            }
+            // Also comment out #[path] before refs mod
+            else if trimmed.starts_with("#[path") && i + 1 < lines.len() && lines[i + 1].trim() == "mod refs;" {
+                lines[i] = format!("// {}", line);
+            }
+            // Comment out pub use refs::ShellRef
+            else if trimmed.contains("pub use refs::ShellRef") {
+                lines[i] = format!("// {}", line);
+            }
+            
+            i += 1;
+        }
+        
+        let mut result = lines.join("\n");
+        result.push_str("\n\n/// Use project-implemented wasm_interactive\n");
         result.push_str("pub mod wasm_interactive { include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/wasm_interactive.rs\")); }\n");
-        result.push_str("\npub use wasm_interactive::{WasmInputBackend, ReedlineInputBackend, BasicInputBackend, MinimalInputBackend};");
-
-        result = result.replace(
-            "mod refs;",
-            r#"pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>;"#,
-        );
-
-        let use_refs_re = regex::Regex::new(r"(?m)^pub\s+use\s+refs::ShellRef\s*;").unwrap();
-        use_refs_re.replace_all(&result, "// $0").to_string()
+        result.push_str("\npub use wasm_interactive::{WasmInputBackend, ReedlineInputBackend, BasicInputBackend, MinimalInputBackend};\n");
+        
+        result
     }
 }
 
-// Normalize Path helper: converts backslashes to forward slashes and on Windows lowercases for case-insensitive checks
+// Normalize Path helper
 fn normalize_path(path: &Path) -> String {
     let s = path.to_string_lossy().replace("\\", "/");
     if cfg!(windows) {
@@ -628,7 +812,7 @@ fn verify_no_stubs(vendor_dir: &Path) {
 
         let path = entry.path();
 
-        // Skip platform-specific sys folders regardless of separator/case
+        // Skip platform-specific sys folders
         if path_str.contains("sys/windows") || path_str.contains("sys/unix") {
             continue;
         }

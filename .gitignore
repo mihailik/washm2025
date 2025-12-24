@@ -3,3 +3,11 @@
 /node_modules
 washm.wasm
 /washm.wasm
+build_backup.rs
+build_broken.rs
+build_current.rs
+build_incomplete.rs
+build_regex.rs
+build_new_ra.rs
+build_full_ra.rs
+build_with_regex_backup.rs

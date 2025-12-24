@@ -26,6 +26,9 @@ pub mod brush_shell;
 #[path = "../target/vendor/uucore/src/lib/lib.rs"]
 pub mod uucore;
 
+// Re-export locale for uucore macros that use $crate::locale
+pub use uucore::locale;
+
 mod bootstrap;
 pub mod bridges;
 pub mod interp_log;
