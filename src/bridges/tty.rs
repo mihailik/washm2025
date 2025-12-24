@@ -21,9 +21,12 @@ struct HostResult {
 pub fn ensure_bridge() -> Result<(), String> {
     let js = format!("{}\n//# sourceURL=bridges/tty.js\n", BRIDGE_JS);
     let res_json = eval_blocking(&js)?;
-    let host_res: HostResult = serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
+    let host_res: HostResult =
+        serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
     if !host_res.ok {
-        return Err(host_res.error.unwrap_or_else(|| "Unknown bridge init error".to_string()));
+        return Err(host_res
+            .error
+            .unwrap_or_else(|| "Unknown bridge init error".to_string()));
     }
     Ok(())
 }
@@ -31,51 +34,66 @@ pub fn ensure_bridge() -> Result<(), String> {
 pub fn enable_raw_mode() -> Result<(), String> {
     ensure_bridge()?;
     let res_json = eval_blocking("washm_tty.enableRaw()")?;
-    let host_res: HostResult = serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
-    
+    let host_res: HostResult =
+        serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
+
     if !host_res.ok {
-        return Err(host_res.error.unwrap_or_else(|| "Unknown host error".to_string()));
+        return Err(host_res
+            .error
+            .unwrap_or_else(|| "Unknown host error".to_string()));
     }
-    
+
     let tty_res = host_res.result.ok_or("No result from host")?;
     if tty_res.ok {
         Ok(())
     } else {
-        Err(tty_res.error.unwrap_or_else(|| "Unknown error enabling raw mode".to_string()))
+        Err(tty_res
+            .error
+            .unwrap_or_else(|| "Unknown error enabling raw mode".to_string()))
     }
 }
 
 pub fn disable_raw_mode() -> Result<(), String> {
     ensure_bridge()?;
     let res_json = eval_blocking("washm_tty.disableRaw()")?;
-    let host_res: HostResult = serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
-    
+    let host_res: HostResult =
+        serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
+
     if !host_res.ok {
-        return Err(host_res.error.unwrap_or_else(|| "Unknown host error".to_string()));
+        return Err(host_res
+            .error
+            .unwrap_or_else(|| "Unknown host error".to_string()));
     }
-    
+
     let tty_res = host_res.result.ok_or("No result from host")?;
     if tty_res.ok {
         Ok(())
     } else {
-        Err(tty_res.error.unwrap_or_else(|| "Unknown error disabling raw mode".to_string()))
+        Err(tty_res
+            .error
+            .unwrap_or_else(|| "Unknown error disabling raw mode".to_string()))
     }
 }
 
 pub fn size() -> Result<(u16, u16), String> {
     ensure_bridge()?;
     let res_json = eval_blocking("washm_tty.size()")?;
-    let host_res: HostResult = serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
-    
+    let host_res: HostResult =
+        serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
+
     if !host_res.ok {
-        return Err(host_res.error.unwrap_or_else(|| "Unknown host error".to_string()));
+        return Err(host_res
+            .error
+            .unwrap_or_else(|| "Unknown host error".to_string()));
     }
-    
+
     let tty_res = host_res.result.ok_or("No result from host")?;
     if tty_res.ok {
         Ok((tty_res.cols.unwrap_or(80), tty_res.rows.unwrap_or(24)))
     } else {
-        Err(tty_res.error.unwrap_or_else(|| "Unknown error getting size".to_string()))
+        Err(tty_res
+            .error
+            .unwrap_or_else(|| "Unknown error getting size".to_string()))
     }
 }
 

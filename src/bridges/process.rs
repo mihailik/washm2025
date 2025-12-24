@@ -1,6 +1,6 @@
-use serde::{Serialize, Deserialize};
+use crate::bridges::eval::{eval_blocking, WasmHostFuture};
+use serde::{Deserialize, Serialize};
 use std::fs;
-use crate::bridges::eval::{WasmHostFuture, eval_blocking};
 
 const BRIDGE_JS: &str = include_str!("process.js");
 
@@ -9,10 +9,8 @@ pub fn ensure_bridge() -> Result<(), String> {
     eval_blocking(&js).map(|_| ())
 }
 
-
 #[derive(Serialize)]
 pub struct SpawnRequest {
-
     pub program: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
@@ -48,7 +46,9 @@ impl Child {
                 }
             }
             // Wait for a continuation from the host
-            WasmHostFuture::new("null").await.map_err(|e| e.to_string())?;
+            WasmHostFuture::new("null")
+                .await
+                .map_err(|e| e.to_string())?;
         }
     }
 }
@@ -57,10 +57,10 @@ pub fn spawn(req: SpawnRequest) -> Result<Child, String> {
     let json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
     fs::write("/dev/host/process/spawn.json", json).map_err(|e| e.to_string())?;
     let pid = fs::read_to_string("/dev/host/process/spawn.json").map_err(|e| e.to_string())?;
-    
+
     if pid.starts_with('{') {
         return Err(pid); // Error JSON
     }
-    
+
     Ok(Child { pid })
 }

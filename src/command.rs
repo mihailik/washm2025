@@ -15,7 +15,9 @@ pub struct Dispatcher {
 
 impl Dispatcher {
     pub fn new() -> Self {
-        Self { cmds: HashMap::new() }
+        Self {
+            cmds: HashMap::new(),
+        }
     }
 
     pub fn register<C: Command + 'static>(&mut self, cmd: C) {
@@ -38,10 +40,12 @@ mod tests {
     struct Echo;
 
     impl Command for Echo {
-        fn name(&self) -> &'static str { "echo" }
+        fn name(&self) -> &'static str {
+            "echo"
+        }
 
         fn run(&self, args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
-            println!("{}",(args.join(" ")));
+            println!("{}", (args.join(" ")));
             Ok(0)
         }
     }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::ffi::OsString;
+use std::sync::{Arc, Mutex};
 
 pub type JobId = u32;
 
@@ -35,13 +35,13 @@ impl JobManager {
         let mut next_id = self.next_id.lock().unwrap();
         let id = *next_id;
         *next_id += 1;
-        
+
         let job = Job {
             id,
             command: command.clone(),
             status: JobStatus::Running,
         };
-        
+
         self.jobs.lock().unwrap().insert(id, job);
         id
     }

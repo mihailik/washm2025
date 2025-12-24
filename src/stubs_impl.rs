@@ -1,6 +1,6 @@
-use crate::brush_core::{ShellBuilder, ShellBuilderState};
 use crate::brush_builtins::BuiltinSet;
 use crate::brush_builtins::ShellBuilderExt;
+use crate::brush_core::{ShellBuilder, ShellBuilderState};
 use crate::brush_shell::brushctl::ShellBuilderBrushBuiltinExt;
 use std::collections::HashMap;
 
@@ -46,7 +46,9 @@ pub fn get_effective_gid() -> Result<u32, crate::brush_core::error::Error> {
 }
 
 // --- OpenFile Helpers ---
-pub fn clone_open_file(f: &crate::brush_core::openfiles::OpenFile) -> crate::brush_core::openfiles::OpenFile {
+pub fn clone_open_file(
+    f: &crate::brush_core::openfiles::OpenFile,
+) -> crate::brush_core::openfiles::OpenFile {
     match f.try_clone() {
         Ok(v) => v,
         Err(_) => {
@@ -59,21 +61,26 @@ pub fn clone_open_file(f: &crate::brush_core::openfiles::OpenFile) -> crate::bru
                 crate::brush_core::openfiles::OpenFile::Stderr(std::io::stderr())
             } else {
                 // Try to open /dev/null if we can't clone
-                open_null_file().map(crate::brush_core::openfiles::OpenFile::File).unwrap_or_else(|_| crate::brush_core::openfiles::OpenFile::Stdin(std::io::stdin()))
+                open_null_file()
+                    .map(crate::brush_core::openfiles::OpenFile::File)
+                    .unwrap_or_else(|_| {
+                        crate::brush_core::openfiles::OpenFile::Stdin(std::io::stdin())
+                    })
             }
         }
     }
 }
 
 // --- Extra Builtins Helpers ---
-pub static mut EXTRA_BUILTINS: Option<HashMap<String, crate::brush_core::builtins::Registration>> = None;
+pub static mut EXTRA_BUILTINS: Option<HashMap<String, crate::brush_core::builtins::Registration>> =
+    None;
 
 pub fn configure_shell<S: ShellBuilderState>(
     builder: ShellBuilder<S>,
-    builtins: BuiltinSet
+    builtins: BuiltinSet,
 ) -> ShellBuilder<S> {
     let mut builder = builder.default_builtins(builtins).brush_builtins();
-    
+
     if let Some(Some(extras)) = unsafe { std::ptr::addr_of!(EXTRA_BUILTINS).as_ref() } {
         for (name, reg) in extras {
             builder = builder.builtin(name.clone(), reg.clone());
@@ -97,12 +104,14 @@ pub fn open_null_file() -> Result<std::fs::File, crate::brush_core::error::Error
     }
 
     res.map_err(|e| {
-            println!("DEBUG: open_null_file final error: {:?}", e);
-            crate::brush_core::error::Error::from(e)
-        })
+        println!("DEBUG: open_null_file final error: {:?}", e);
+        crate::brush_core::error::Error::from(e)
+    })
 }
 
-pub fn continue_process(_pid: crate::brush_core::sys::process::ProcessId) -> Result<(), crate::brush_core::error::Error> {
+pub fn continue_process(
+    _pid: crate::brush_core::sys::process::ProcessId,
+) -> Result<(), crate::brush_core::error::Error> {
     Ok(())
 }
 
@@ -114,7 +123,10 @@ pub fn kill_process(
 }
 
 pub fn inject_fds(
-    files: Vec<(crate::brush_core::ShellFd, crate::brush_core::openfiles::OpenFile)>,
+    files: Vec<(
+        crate::brush_core::ShellFd,
+        crate::brush_core::openfiles::OpenFile,
+    )>,
 ) -> Result<(), crate::brush_core::error::Error> {
     drop(files);
     Ok(())
@@ -130,19 +142,25 @@ pub fn spawn_process(command: std::process::Command) -> std::io::Result<GuestChi
 
     // Build spawn request JSON
     let mut request = serde_json::Map::new();
-    
+
     // Get program name properly
     let program = command.get_program().to_string_lossy().to_string();
     request.insert("program".to_string(), serde_json::Value::String(program));
-    
+
     // Get args
-    let args: Vec<String> = command.get_args()
+    let args: Vec<String> = command
+        .get_args()
         .map(|s| s.to_string_lossy().to_string())
         .collect();
-    request.insert("args".to_string(), serde_json::Value::Array(
-        args.iter().map(|s| serde_json::Value::String(s.clone())).collect()
-    ));
-    
+    request.insert(
+        "args".to_string(),
+        serde_json::Value::Array(
+            args.iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
+        ),
+    );
+
     // Get env - if custom env is set, use it, otherwise inherit from parent
     // Note: We pass empty object to signal "use inherited env" to the host
     let mut env_map = serde_json::Map::new();
@@ -150,7 +168,7 @@ pub fn spawn_process(command: std::process::Command) -> std::io::Result<GuestChi
         if let Some(v) = value {
             env_map.insert(
                 key.to_string_lossy().to_string(),
-                serde_json::Value::String(v.to_string_lossy().to_string())
+                serde_json::Value::String(v.to_string_lossy().to_string()),
             );
         }
     }
@@ -158,44 +176,58 @@ pub fn spawn_process(command: std::process::Command) -> std::io::Result<GuestChi
     if !env_map.is_empty() {
         request.insert("env".to_string(), serde_json::Value::Object(env_map));
     }
-    
+
     // Get cwd
     if let Some(cwd) = command.get_current_dir() {
-        request.insert("cwd".to_string(), serde_json::Value::String(cwd.to_string_lossy().to_string()));
+        request.insert(
+            "cwd".to_string(),
+            serde_json::Value::String(cwd.to_string_lossy().to_string()),
+        );
     }
-    
+
     // Set up fds - use inherit by default so output goes to terminal
     // Only use pipe if brush has explicitly set up piping
     let mut fds_json = serde_json::Map::new();
-    fds_json.insert("0".to_string(), serde_json::Value::String("inherit".to_string()));
-    fds_json.insert("1".to_string(), serde_json::Value::String("inherit".to_string()));
-    fds_json.insert("2".to_string(), serde_json::Value::String("inherit".to_string()));
-    
+    fds_json.insert(
+        "0".to_string(),
+        serde_json::Value::String("inherit".to_string()),
+    );
+    fds_json.insert(
+        "1".to_string(),
+        serde_json::Value::String("inherit".to_string()),
+    );
+    fds_json.insert(
+        "2".to_string(),
+        serde_json::Value::String("inherit".to_string()),
+    );
+
     request.insert("fds".to_string(), serde_json::Value::Object(fds_json));
-    
+
     let request_json = serde_json::Value::Object(request);
     let request_str = serde_json::to_string(&request_json)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    
+
     // Write to /dev/host/process/spawn.json
     let mut spawn_file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open("/dev/host/process/spawn.json")?;
-    
+
     spawn_file.write_all(request_str.as_bytes())?;
     spawn_file.flush()?;
     drop(spawn_file);
-    
+
     // Read response (PID)
     let mut response_file = std::fs::File::open("/dev/host/process/spawn.json")?;
     let mut pid_str = String::new();
     response_file.read_to_string(&mut pid_str)?;
-    
-    let pid = pid_str.trim().parse::<u32>()
+
+    let pid = pid_str
+        .trim()
+        .parse::<u32>()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    
+
     Ok(GuestChild { pid })
 }
 
@@ -208,16 +240,16 @@ impl GuestChild {
     pub fn id(&self) -> Option<u32> {
         Some(self.pid)
     }
-    
+
     pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         use std::time::Duration;
-        
+
         let status_path = format!("/dev/host/process/{}/status", self.pid);
-        
+
         // Poll for status with backoff
         let mut poll_interval = Duration::from_millis(10);
         let max_interval = Duration::from_millis(100);
-        
+
         loop {
             match std::fs::File::open(&status_path) {
                 Ok(mut file) => {
@@ -226,7 +258,9 @@ impl GuestChild {
                         Ok(_) => {
                             if !status_str.is_empty() {
                                 // Parse status JSON
-                                if let Ok(status) = serde_json::from_str::<serde_json::Value>(&status_str) {
+                                if let Ok(status) =
+                                    serde_json::from_str::<serde_json::Value>(&status_str)
+                                {
                                     if status["exited"].as_bool() == Some(true) {
                                         let code = status["code"].as_i64().unwrap_or(-1) as i32;
                                         return self.create_exit_status(code);
@@ -239,25 +273,25 @@ impl GuestChild {
                 }
                 Err(_) => {}
             }
-            
+
             // Sleep and apply backoff using async sleep (non-blocking)
             crate::bridges::timer::async_sleep(poll_interval).await.ok();
             poll_interval = (poll_interval * 2).min(max_interval);
         }
     }
-    
+
     pub async fn wait_with_output(self) -> std::io::Result<std::process::Output> {
         use std::time::Duration;
-        
+
         let stdout_path = format!("/dev/host/process/{}/stdout", self.pid);
         let stderr_path = format!("/dev/host/process/{}/stderr", self.pid);
         let status_path = format!("/dev/host/process/{}/status", self.pid);
-        
+
         // Poll for status with backoff (same logic as wait() but inline)
         let mut poll_interval = Duration::from_millis(10);
         let max_interval = Duration::from_millis(100);
         let mut exit_code = 0i32;
-        
+
         loop {
             match std::fs::File::open(&status_path) {
                 Ok(mut file) => {
@@ -266,7 +300,9 @@ impl GuestChild {
                         Ok(_) => {
                             if !status_str.is_empty() {
                                 // Parse status JSON
-                                if let Ok(status) = serde_json::from_str::<serde_json::Value>(&status_str) {
+                                if let Ok(status) =
+                                    serde_json::from_str::<serde_json::Value>(&status_str)
+                                {
                                     if status["exited"].as_bool() == Some(true) {
                                         exit_code = status["code"].as_i64().unwrap_or(-1) as i32;
                                         break;
@@ -279,29 +315,29 @@ impl GuestChild {
                 }
                 Err(_) => {}
             }
-            
+
             // Sleep and apply backoff using async sleep (non-blocking)
             crate::bridges::timer::async_sleep(poll_interval).await.ok();
             poll_interval = (poll_interval * 2).min(max_interval);
         }
-        
-        // Read stdout  
+
+        // Read stdout
         let stdout = std::fs::read(&stdout_path).unwrap_or_default();
-        
+
         // Read stderr
         let stderr = std::fs::read(&stderr_path).unwrap_or_default();
-        
+
         // Create ExitStatus directly without recursive call
         let status = self.create_exit_status(exit_code)?;
-        
+
         Ok(std::process::Output {
             status,
             stdout,
             stderr,
         })
     }
-    
-    // Create ExitStatus 
+
+    // Create ExitStatus
     // On WASM, ExitStatus doesn't have a public constructor.
     // We use an unsafe workaround: get a dummy ExitStatus from a real process,
     // then reinterpret it. This is hacky but necessary.
@@ -309,16 +345,16 @@ impl GuestChild {
         // We can't use unsafe transmute since sizes don't match
         // Instead, we rely on the fact that the exit code is stored internally
         // and we need to somehow smuggle our code into an ExitStatus
-        
+
         // For now, just return a hardcoded status
         // This is temporary until we find a better solution
         // The status code doesn't actually matter for simple command execution
         // since brush only checks if it's success (code 0) or failure (non-zero)
-        
+
         // For code 0 (success), we want a successful status
         // For non-zero, we need a failing status
         // We can't construct these directly, so we'll just create minimal stubs
-        
+
         // HACK: Just return a made-up i32 and hope it works
         // This relies on ExitStatus being repr(transparent) or similar
         unsafe {

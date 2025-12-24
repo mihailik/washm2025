@@ -7,7 +7,11 @@ const BOOTSTRAP_FD: i32 = 20251219;
 pub fn write_js(js: &str) {
     unsafe {
         let js_bytes = js.as_bytes();
-        let _ = libc::write(BOOTSTRAP_FD, js_bytes.as_ptr() as *const libc::c_void, js_bytes.len());
+        let _ = libc::write(
+            BOOTSTRAP_FD,
+            js_bytes.as_ptr() as *const libc::c_void,
+            js_bytes.len(),
+        );
     }
 }
 
@@ -22,4 +26,3 @@ pub fn bootstrap_host_protocol() {
     let js = format!("{}\n//# sourceURL=protocol.js\n", PROTOCOL_JS);
     write_js(&js);
 }
-

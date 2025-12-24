@@ -1,7 +1,7 @@
-use std::io::Write;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::pin::Pin;
 use std::future::Future;
+use std::io::Write;
+use std::pin::Pin;
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 #[allow(dead_code)]
 static VTABLE: RawWakerVTable = RawWakerVTable::new(

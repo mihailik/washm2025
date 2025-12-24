@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use crate::bridges::eval::eval_blocking;
+use serde::Deserialize;
 
 const BRIDGE_JS: &str = include_str!("host.js");
 
@@ -7,7 +7,6 @@ pub fn ensure_bridge() -> Result<(), String> {
     let js = format!("{}\n//# sourceURL=bridges/host.js\n", BRIDGE_JS);
     eval_blocking(&js).map(|_| ())
 }
-
 
 #[derive(Debug, Deserialize, Default, Clone)]
 struct UserInfo {
@@ -28,7 +27,9 @@ fn parse_startup_str(s: &str) -> Option<StartupJson> {
 }
 
 fn load_startup_from_fs() -> Option<StartupJson> {
-    std::fs::read_to_string("/dev/host/washm/startup").ok().and_then(|s| parse_startup_str(&s))
+    std::fs::read_to_string("/dev/host/washm/startup")
+        .ok()
+        .and_then(|s| parse_startup_str(&s))
 }
 
 fn ensure_cache() -> &'static StartupJson {
@@ -44,28 +45,28 @@ fn ensure_cache() -> &'static StartupJson {
 
 pub(crate) fn startup_username() -> String {
     let v = ensure_cache();
-    v.user_info.as_ref()
+    v.user_info
+        .as_ref()
         .and_then(|ui| ui.username.clone())
         .unwrap_or_else(|| "user".to_string())
 }
 
 pub(crate) fn startup_hostname() -> String {
     let v = ensure_cache();
-    v.hostname.clone().or_else(|| std::env::var("HOSTNAME").ok()).unwrap_or_else(|| "localhost".to_string())
+    v.hostname
+        .clone()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "localhost".to_string())
 }
 
 pub(crate) fn startup_uid() -> u32 {
     let v = ensure_cache();
-    v.user_info.as_ref()
-        .and_then(|ui| ui.uid)
-        .unwrap_or(1000)
+    v.user_info.as_ref().and_then(|ui| ui.uid).unwrap_or(1000)
 }
 
 pub(crate) fn startup_gid() -> u32 {
     let v = ensure_cache();
-    v.user_info.as_ref()
-        .and_then(|ui| ui.gid)
-        .unwrap_or(1000)
+    v.user_info.as_ref().and_then(|ui| ui.gid).unwrap_or(1000)
 }
 
 pub fn startup_pwd() -> String {
@@ -86,7 +87,10 @@ mod tests {
     fn parse_valid_json() {
         let s = r#"{"userInfo":{"username":"alice","uid":42,"gid":43}}"#;
         let got = parse_startup_str(s).unwrap();
-        assert_eq!(got.user_info.as_ref().unwrap().username.as_ref().unwrap(), "alice");
+        assert_eq!(
+            got.user_info.as_ref().unwrap().username.as_ref().unwrap(),
+            "alice"
+        );
         assert_eq!(got.user_info.as_ref().unwrap().uid.unwrap(), 42);
         assert_eq!(got.user_info.as_ref().unwrap().gid.unwrap(), 43);
     }
@@ -95,7 +99,10 @@ mod tests {
     fn parse_partial_json() {
         let s = r#"{"userInfo":{"username":"bob"}}"#;
         let got = parse_startup_str(s).unwrap();
-        assert_eq!(got.user_info.as_ref().unwrap().username.as_ref().unwrap(), "bob");
+        assert_eq!(
+            got.user_info.as_ref().unwrap().username.as_ref().unwrap(),
+            "bob"
+        );
         assert!(got.user_info.as_ref().unwrap().uid.is_none());
     }
 

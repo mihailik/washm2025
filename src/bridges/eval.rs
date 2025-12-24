@@ -1,13 +1,13 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
-use std::path::Path;
 use std::fs;
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::task::{Context, Poll, Waker};
 
 static COOKIE_COUNTER: AtomicU32 = AtomicU32::new(1);
 static CONTINUATIONS: OnceLock<Mutex<HashMap<u32, Waker>>> = OnceLock::new();
@@ -28,11 +28,17 @@ thread_local! {
 }
 
 pub fn get_runtime() -> &'static Runtime {
-    RT.get_or_init(|| tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap())
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    })
 }
 
-pub fn spawn<F>(future: F) 
-where F: Future<Output = ()> + 'static 
+pub fn spawn<F>(future: F)
+where
+    F: Future<Output = ()> + 'static,
 {
     LOCAL_SET.with(|ls| ls.spawn_local(future));
 }
@@ -66,8 +72,6 @@ pub fn ensure_bridge() -> Result<(), String> {
     Ok(())
 }
 
-
-
 pub struct WasmHostFuture {
     cookie: u32,
 }
@@ -85,7 +89,9 @@ impl WasmHostFuture {
         WasmHostFuture { cookie }
     }
 
-    pub fn cookie(&self) -> u32 { self.cookie }
+    pub fn cookie(&self) -> u32 {
+        self.cookie
+    }
 }
 
 impl Future for WasmHostFuture {
@@ -118,7 +124,7 @@ pub fn eval_blocking(js: &str) -> Result<String, String> {
         return Err(e.to_string());
     }
     // eprintln!("eval_blocking: waiting for result");
-    
+
     loop {
         let mut results = RESULTS.get().unwrap().lock().unwrap();
         if let Some(res) = results.remove(&cookie) {
@@ -138,20 +144,23 @@ pub extern "C" fn _continue(cookie: u32) {
     // Read result from VFS file
     let path = std::path::Path::new("/dev/host/eval");
     let result_file = path.join(format!("{}.json", cookie));
-    
+
     if let Ok(result_json) = std::fs::read_to_string(&result_file) {
         // eprintln!("_continue: read {} bytes from {:?}", result_json.len(), result_file);
         let results = RESULTS.get_or_init(|| Mutex::new(HashMap::new()));
         results.lock().unwrap().insert(cookie, result_json);
-        
+
         // Clean up the result file
         let _ = std::fs::remove_file(&result_file);
-        
+
         // Wake the corresponding future
-        if let Some(waker) = CONTINUATIONS.get().and_then(|m| m.lock().unwrap().remove(&cookie)) {
+        if let Some(waker) = CONTINUATIONS
+            .get()
+            .and_then(|m| m.lock().unwrap().remove(&cookie))
+        {
             waker.wake();
         }
-        
+
         // Tick the runtime to process the woken task, but only if we are not already running
         IS_RUNNING.with(|flag| {
             if !flag.get() {
@@ -161,7 +170,6 @@ pub extern "C" fn _continue(cookie: u32) {
     }
 }
 
-
 #[cfg(not(target_arch = "wasm32"))]
 #[no_mangle]
-pub extern "C" fn _continue(_cookie: u32) { }
+pub extern "C" fn _continue(_cookie: u32) {}

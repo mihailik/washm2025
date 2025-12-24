@@ -1,7 +1,7 @@
 // Example tests for POC
 #![cfg(feature = "wasm-test")]
 
-use crate::test_harness::{register_test};
+use crate::test_harness::register_test;
 
 // Simple sync test
 fn test_basic_math() {

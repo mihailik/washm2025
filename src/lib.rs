@@ -27,17 +27,17 @@ pub mod brush_shell;
 pub mod uucore;
 
 mod bootstrap;
-pub mod stubs_impl;
 pub mod bridges;
-pub mod shims;
 pub mod interp_log;
+pub mod shims;
+pub mod stubs_impl;
 
-mod command;
-pub mod brush_run;
-mod coreutils_dispatch;
 mod async_test;
-mod jobs;
+pub mod brush_run;
+mod command;
 mod coreutils_builtins;
+mod coreutils_dispatch;
+mod jobs;
 
 #[cfg(feature = "wasm-test")]
 pub mod test_harness;
@@ -78,8 +78,6 @@ pub extern "C" fn washm_init() {
         let _ = brush_run::run(&[]);
     }
 }
-
-
 
 // Re-export _continue from bridges::eval for the Host
 pub use crate::bridges::eval::_continue;
