@@ -11,8 +11,8 @@ use walkdir::WalkDir;
 
 // rust-analyzer imports for semantic analysis
 use ra_ap_ide::AnalysisHost;
+use ra_ap_syntax::ast::{HasAttrs, HasDocComments, HasName, HasVisibility};
 use ra_ap_syntax::{ast, AstNode, Edition, SourceFile, SyntaxKind};
-use ra_ap_syntax::ast::{HasAttrs, HasName, HasVisibility, HasDocComments};
 
 fn main() {
     // Section 2: Deadlock Avoidance - CARGO_TARGET_DIR would be set here if we used ProjectWorkspace
@@ -180,9 +180,15 @@ impl SemanticEngine {
 
         // Step 2: Handle `crate::` references using AST
         // Use AST to find all Path nodes with crate:: prefix
-        for path in syntax_tree.syntax().descendants().filter_map(ast::Path::cast) {
+        for path in syntax_tree
+            .syntax()
+            .descendants()
+            .filter_map(ast::Path::cast)
+        {
             // Skip macro calls - macros aren't modules
-            let is_macro = path.syntax().parent()
+            let is_macro = path
+                .syntax()
+                .parent()
                 .and_then(|p| ast::MacroCall::cast(p))
                 .is_some();
             if is_macro {
@@ -201,7 +207,7 @@ impl SemanticEngine {
             }
 
             let first_seg = segments[1].to_string();
-            
+
             // If this is already a vendored crate reference, leave it
             if vendored_crates.contains(&first_seg.as_str()) {
                 continue;
@@ -214,10 +220,15 @@ impl SemanticEngine {
         }
 
         // Handle use crate::{...} imports using AST
-        for use_item in syntax_tree.syntax().descendants().filter_map(ast::Use::cast) {
+        for use_item in syntax_tree
+            .syntax()
+            .descendants()
+            .filter_map(ast::Use::cast)
+        {
             let use_str = use_item.to_string();
             if use_str.contains("crate::{") {
-                let new_use = use_str.replace("crate::{", &format!("crate::{}::{{", current_module));
+                let new_use =
+                    use_str.replace("crate::{", &format!("crate::{}::{{", current_module));
                 result = result.replace(&use_str, &new_use);
             }
         }
@@ -230,14 +241,20 @@ impl SemanticEngine {
         result = result.replace(&format!("crate::{}::shims", current_module), "crate::shims");
 
         // Fix macro invocations using AST - macros are at crate root
-        for macro_call in syntax_tree.syntax().descendants().filter_map(ast::MacroCall::cast) {
+        for macro_call in syntax_tree
+            .syntax()
+            .descendants()
+            .filter_map(ast::MacroCall::cast)
+        {
             if let Some(path) = macro_call.path() {
                 let macro_str = path.to_string();
-                if macro_str.starts_with(&format!("crate::{}::", current_module)) && macro_str.ends_with("!") {
+                if macro_str.starts_with(&format!("crate::{}::", current_module))
+                    && macro_str.ends_with("!")
+                {
                     // Extract macro name
                     if let Some(name) = macro_str.split("::").last() {
                         if name.ends_with("!") {
-                            let old = format!("crate::{}::{}",current_module, name);
+                            let old = format!("crate::{}::{}", current_module, name);
                             let new = name.to_string();
                             result = result.replace(&old, &new);
                         }
@@ -269,14 +286,20 @@ impl SemanticEngine {
                 None => continue,
             };
 
-            let vis = mod_item.visibility()
+            let vis = mod_item
+                .visibility()
                 .map(|v| v.to_string() + " ")
                 .unwrap_or_default();
 
             // Get attributes (for cfg preservation)
             let attrs: Vec<_> = mod_item.attrs().collect();
             let attrs_str = if !attrs.is_empty() {
-                attrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join("\n") + "\n"
+                attrs
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n"
             } else {
                 String::new()
             };
@@ -299,7 +322,10 @@ impl SemanticEngine {
                 if candidate.exists() {
                     let path_literal = candidate.to_string_lossy().replace("\\", "/");
                     let old_decl = format!("{}{}mod {};", attrs_str, vis, mod_name);
-                    let new_decl = format!("{}#[path = r\"{}\"]\n{}mod {};", attrs_str, path_literal, vis, mod_name);
+                    let new_decl = format!(
+                        "{}#[path = r\"{}\"]\n{}mod {};",
+                        attrs_str, path_literal, vis, mod_name
+                    );
                     result = result.replace(&old_decl, &new_decl);
                     break;
                 }
@@ -373,7 +399,7 @@ impl SemanticEngine {
         if path_str.ends_with("brush-core/src/sys/stubs/signal.rs") {
             let parse = SourceFile::parse(&result, Edition::Edition2021);
             let tree = parse.tree();
-            
+
             // Find continue_process function using AST
             for func in tree.syntax().descendants().filter_map(ast::Fn::cast) {
                 if let Some(name) = func.name() {
@@ -421,7 +447,11 @@ impl SemanticEngine {
         let tree = parse.tree();
 
         // Convert inner doc comments using AST - iterate over tokens
-        for token in tree.syntax().descendants_with_tokens().filter_map(|it| it.into_token()) {
+        for token in tree
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|it| it.into_token())
+        {
             if token.kind() == SyntaxKind::COMMENT {
                 let text = token.text();
                 if text.starts_with("//!") {
@@ -443,9 +473,21 @@ impl SemanticEngine {
         // Handle use statements for vendored crates using AST
         for use_item in tree.syntax().descendants().filter_map(ast::Use::cast) {
             let use_str = use_item.to_string();
-            for crate_name in &["brush_core", "brush_builtins", "brush_parser", "brush_interactive", "brush_shell", "uucore"] {
-                if use_str.starts_with(&format!("use {}", crate_name)) && !use_str.contains("crate::") {
-                    let new_use = use_str.replace(&format!("use {}", crate_name), &format!("use crate::{}", crate_name));
+            for crate_name in &[
+                "brush_core",
+                "brush_builtins",
+                "brush_parser",
+                "brush_interactive",
+                "brush_shell",
+                "uucore",
+            ] {
+                if use_str.starts_with(&format!("use {}", crate_name))
+                    && !use_str.contains("crate::")
+                {
+                    let new_use = use_str.replace(
+                        &format!("use {}", crate_name),
+                        &format!("use crate::{}", crate_name),
+                    );
                     result = result.replace(&use_str, &new_use);
                 }
             }
@@ -491,14 +533,14 @@ impl SemanticEngine {
                     let macro_end = macro_start + relative_end + 3;
                     let macro_def = result[macro_start..macro_end].to_string();
                     result.replace_range(macro_start..macro_end, "");
-                    
+
                     // Find position after initial comments
                     let insert_pos = if result.starts_with("//") {
                         result.find("\n\n").unwrap_or(0) + 2
                     } else {
                         0
                     };
-                    
+
                     // Insert with #[macro_export] to make it visible at crate root
                     result.insert_str(insert_pos, &format!("#[macro_export]\n{}\n\n", macro_def));
                 }
@@ -508,12 +550,12 @@ impl SemanticEngine {
         if path_str.ends_with("brush-interactive/src/lib.rs") {
             result = self.transform_interactive_lib(&result);
         }
-        
+
         if path_str.ends_with("uucore/src/lib/lib.rs") {
             // Fix locale re-export for macros that use $crate::locale
             result = result.replace(
                 "pub use crate::uucore::mods::locale;",
-                "pub use mods::locale;"
+                "pub use mods::locale;",
             );
         }
 
@@ -570,7 +612,7 @@ impl SemanticEngine {
         // InputBackend trait async - use AST to find trait
         let parse2 = SourceFile::parse(&result, Edition::Edition2021);
         let tree2 = parse2.tree();
-        
+
         for trait_def in tree2.syntax().descendants().filter_map(ast::Trait::cast) {
             if let Some(name) = trait_def.name() {
                 if name.to_string() == "InputBackend" {
@@ -579,9 +621,12 @@ impl SemanticEngine {
                         for item in assoc_items.assoc_items() {
                             if let ast::AssocItem::Fn(func) = item {
                                 if let Some(fn_name) = func.name() {
-                                    if fn_name.to_string() == "read_line" && func.async_token().is_none() {
+                                    if fn_name.to_string() == "read_line"
+                                        && func.async_token().is_none()
+                                    {
                                         let old = func.to_string();
-                                        let new = old.replacen("fn read_line", "async fn read_line", 1);
+                                        let new =
+                                            old.replacen("fn read_line", "async fn read_line", 1);
                                         result = result.replace(&old, &new);
                                     }
                                 }
@@ -598,7 +643,7 @@ impl SemanticEngine {
         {
             let parse3 = SourceFile::parse(&result, Edition::Edition2021);
             let tree3 = parse3.tree();
-            
+
             // Find all read_line functions and make them async
             for func in tree3.syntax().descendants().filter_map(ast::Fn::cast) {
                 if let Some(name) = func.name() {
@@ -611,17 +656,23 @@ impl SemanticEngine {
             }
 
             // Find method calls to read_line and add .await using AST
-            for method_call in tree3.syntax().descendants().filter_map(ast::MethodCallExpr::cast) {
+            for method_call in tree3
+                .syntax()
+                .descendants()
+                .filter_map(ast::MethodCallExpr::cast)
+            {
                 if let Some(name_ref) = method_call.name_ref() {
                     if name_ref.to_string() == "read_line" {
                         let call_str = method_call.to_string();
                         if !call_str.contains(".await") {
                             // Handle both "read_line(...)?" and just "read_line(...)"
                             // Check if this is followed by a ? operator
-                            let parent_text = method_call.syntax().parent()
+                            let parent_text = method_call
+                                .syntax()
+                                .parent()
                                 .map(|p| p.to_string())
                                 .unwrap_or_default();
-                            
+
                             if parent_text.contains(&format!("{}?", call_str)) {
                                 // Pattern: method_call?
                                 let old_pattern = format!("{}?", call_str);
@@ -650,39 +701,44 @@ impl SemanticEngine {
         let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
         let mut i = 0;
         let mut skip_next_mod = false;
-        
+
         while i < lines.len() {
             let line = &lines[i];
             let trimmed = line.trim();
-            
+
             // Comment out feature cfg attributes
-            if trimmed.starts_with("#[cfg(feature = \"reedline\")]") ||
-               trimmed.starts_with("#[cfg(feature = \"basic\")]") ||
-               trimmed.starts_with("#[cfg(feature = \"minimal\")]") {
+            if trimmed.starts_with("#[cfg(feature = \"reedline\")]")
+                || trimmed.starts_with("#[cfg(feature = \"basic\")]")
+                || trimmed.starts_with("#[cfg(feature = \"minimal\")]")
+            {
                 lines[i] = format!("// {}", line);
                 skip_next_mod = true;
             }
             // Comment out #[path] attributes before reedline/basic/minimal mods
             else if trimmed.starts_with("#[path") && i + 1 < lines.len() {
                 let next_line = lines[i + 1].trim();
-                if next_line.starts_with("mod reedline") || 
-                   next_line.starts_with("mod basic") ||
-                   next_line.starts_with("mod minimal") {
+                if next_line.starts_with("mod reedline")
+                    || next_line.starts_with("mod basic")
+                    || next_line.starts_with("mod minimal")
+                {
                     lines[i] = format!("// {}", line);
                     skip_next_mod = true;
                 }
             }
             // Comment out the mod declarations themselves
-            else if skip_next_mod && (trimmed.starts_with("mod reedline") || 
-                                       trimmed.starts_with("mod basic") ||
-                                       trimmed.starts_with("mod minimal")) {
+            else if skip_next_mod
+                && (trimmed.starts_with("mod reedline")
+                    || trimmed.starts_with("mod basic")
+                    || trimmed.starts_with("mod minimal"))
+            {
                 lines[i] = format!("// {}", line);
                 skip_next_mod = false;
             }
             // Comment out pub use statements for these modules
-            else if trimmed.starts_with("pub use reedline::") ||
-                    trimmed.starts_with("pub use basic::") ||
-                    trimmed.starts_with("pub use minimal::") {
+            else if trimmed.starts_with("pub use reedline::")
+                || trimmed.starts_with("pub use basic::")
+                || trimmed.starts_with("pub use minimal::")
+            {
                 lines[i] = format!("// {}", line);
             }
             // Replace mod refs; with type alias
@@ -690,22 +746,25 @@ impl SemanticEngine {
                 lines[i] = r#"pub type ShellRef = std::sync::Arc<tokio::sync::Mutex<super::brush_core::Shell>>;"#.to_string();
             }
             // Also comment out #[path] before refs mod
-            else if trimmed.starts_with("#[path") && i + 1 < lines.len() && lines[i + 1].trim() == "mod refs;" {
+            else if trimmed.starts_with("#[path")
+                && i + 1 < lines.len()
+                && lines[i + 1].trim() == "mod refs;"
+            {
                 lines[i] = format!("// {}", line);
             }
             // Comment out pub use refs::ShellRef
             else if trimmed.contains("pub use refs::ShellRef") {
                 lines[i] = format!("// {}", line);
             }
-            
+
             i += 1;
         }
-        
+
         let mut result = lines.join("\n");
         result.push_str("\n\n/// Use project-implemented wasm_interactive\n");
         result.push_str("pub mod wasm_interactive { include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/wasm_interactive.rs\")); }\n");
         result.push_str("\npub use wasm_interactive::{WasmInputBackend, ReedlineInputBackend, BasicInputBackend, MinimalInputBackend};\n");
-        
+
         result
     }
 }
