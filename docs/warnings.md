@@ -30,6 +30,13 @@ There are two primary ways to handle these warnings:
 
 Given that `uucore` is vendored and we are essentially "absorbing" it into `washm`, declaring the features or suppressing the lint at the crate level are both viable. Suppressing the lint is likely cleaner as it avoids cluttering our `[features]` list with dozens of flags we don't directly control.
 
+### Resolution
+We have opted to declare the features in [Cargo.toml](../Cargo.toml). This silences the warnings and provides a clear roadmap of the coreutils capabilities we intend to integrate. A note has been added to the `Cargo.toml` file explaining their relevance.
+
+### Decision
+
+Enabling them in Cargo.toml so they can be used later and resolving the warnings.
+
 ## Unused import in `jobs.rs`
 
 **File:** [src/jobs.rs](../src/jobs.rs#L2)
