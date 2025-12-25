@@ -18,9 +18,17 @@ warning: unexpected `cfg` condition value: `fsxattr`
 ```
 
 ### Analysis
-This warning is triggered by Rust's `check-cfg` feature, which validates that all `#[cfg]` conditions refer to known features or configuration flags. In this case, the vendored `uucore` crate (part of the `uutils` coreutils) uses several feature flags that are not explicitly declared in its `Cargo.toml` or are being checked against a list that doesn't include them during the build process of the main workspace.
+This warning is triggered by Rust's `check-cfg` feature. Unlike typical dependencies, `uucore` is not being built as an external crate; instead, `build.rs` copies its source into `target/vendor/uucore` and it is included directly as a module in `washm` via a `#[path]` attribute in [src/lib.rs](../src/lib.rs). Because it is now part of the `washm` crate, the compiler validates its `#[cfg(feature = "...")]` attributes against the features defined in `washm`'s `Cargo.toml`. Since `washm` does not define features like `fsxattr` or `selinux`, the compiler flags them as unexpected.
 
-In the context of `washm`, these warnings are mostly noise coming from the dependency tree. Since `uucore` provides the foundational utilities for the shell's environment, these warnings indicate that some platform-specific features (like SELinux or extended attributes) are being checked for but aren't active in the current WASM-targeted build. They can be silenced by configuring the workspace lints to ignore `unexpected_cfgs` for these dependencies.
+Currently, `uucore` is integrated into the source tree but is not yet actively used by the `CoreutilsDispatch` logic in [src/coreutils_dispatch.rs](../src/coreutils_dispatch.rs), which still uses manual stubs. As we move towards a more complete coreutils integration, these warnings will persist unless the features are declared or the lint is suppressed.
+
+### Suggestion
+There are two primary ways to handle these warnings:
+
+1.  **Declare the features in `Cargo.toml`**: We can add all the features used by `uucore` (e.g., `fsxattr`, `selinux`, `backup-control`) to the `[features]` section of our `Cargo.toml`. This is the "correct" way according to the compiler, as it makes the features known to the crate.
+2.  **Suppress the lint in `Cargo.toml`**: We can add a lint configuration to `Cargo.toml` to explicitly allow these specific unexpected values or to disable the check for the `feature` cfg entirely within this crate.
+
+Given that `uucore` is vendored and we are essentially "absorbing" it into `washm`, declaring the features or suppressing the lint at the crate level are both viable. Suppressing the lint is likely cleaner as it avoids cluttering our `[features]` list with dozens of flags we don't directly control.
 
 ## Unused import in `jobs.rs`
 
