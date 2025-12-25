@@ -51,9 +51,16 @@ warning: unused import: `std::ffi::OsString`
 ```
 
 ### Analysis
-The `OsString` type is imported but never used within the [src/jobs.rs](../src/jobs.rs) file. This often happens during development when code is refactored or removed, leaving behind orphaned imports.
+The `OsString` import is a remnant of a previous implementation of `execute_command_sync` that lived in this file. Historical analysis shows that this function was used to bridge command execution to coreutils, but it was removed in commit `61d30494d2aa1c6928186c257b1546ad2d9a7c97` ("Working directory fixes.") when the project shifted to using `CoreutilsDispatch`.
 
-In the shell architecture, `jobs.rs` is intended to handle job control (background processes, process groups, etc.). Since `washm` is running in a WASM environment where traditional process management is limited or handled via shims, the job control logic is likely in an early or transitional state, leading to unused imports as the implementation evolves.
+The file `src/jobs.rs` itself appears to be a leftover from "Phase 2" of development (commit `7c4035c2f0e7586411a05be3da93d4239197d6fc`). While it defines a `JobManager`, the `brush-core` crate (which is vendored and transformed) provides its own `JobManager` which is what the shell actually uses.
+
+### Suggestion
+Since the entire file `src/jobs.rs` is currently unused by the rest of the project (though it is included as a module in `lib.rs`), the cleanest fix is to remove the unused import. If the `JobManager` in this file is intended to eventually replace or augment the one in `brush-core`, it should be kept but marked with `#[allow(dead_code)]`. However, given it's a duplicate of `brush-core` functionality, it might be better to eventually remove the file entirely if it's not needed. For now, simply removing the `OsString` import will silence the warning.
+
+### Decision
+
+Remove the unused jobs.rs file entirely since it's not used.
 
 ## Unused assignment in `stubs_impl.rs`
 
@@ -70,9 +77,14 @@ warning: value assigned to `exit_code` is never read
 ```
 
 ### Analysis
-A variable `exit_code` is initialized with a value of `0`, but that specific initial value is never used before the variable is either overwritten or the scope ends. This is a minor lint indicating redundant code.
+The variable `exit_code` is initialized to `0i32`, but it is always overwritten inside the `loop` before it is ever read. The loop only breaks when a status is successfully parsed, at which point `exit_code` is assigned a value from the status file.
 
-[src/stubs_impl.rs](../src/stubs_impl.rs) contains the implementation of various system-level stubs required to make the `brush` shell run in a WASM environment. This specific warning suggests that the logic for capturing or returning exit codes from stubbed commands might be incomplete or has been simplified, leaving the initial assignment redundant.
+### Suggestion
+The initialization `0i32` can be removed. Instead, the variable can be declared without an initial value, or the loop can be refactored to return the exit code directly.
+
+### Decision
+
+Remove the initialiser. Exiting right out of the loop seems a bit audacious: there is a little bot more logic happening after the loop.
 
 ## Unused variable in `stubs_impl.rs`
 
@@ -88,27 +100,47 @@ warning: unused variable: `code`
 ```
 
 ### Analysis
-The parameter `code` is passed to the `create_exit_status` function but is never used in the function body. This usually indicates a placeholder implementation or a change in how exit statuses are constructed.
+The `create_exit_status` function is a stub that attempts to construct a `std::process::ExitStatus` on WASM, which is difficult because the standard library doesn't provide a public constructor for it. The current implementation ignores the `code` parameter and returns a zeroed (successful) status.
 
-In the `washm` architecture, creating a `std::process::ExitStatus` in WASM is non-trivial because the standard library's implementation is platform-specific. This stub is likely part of the bridge that allows the shell to report command results, and the fact that `code` is unused suggests the current implementation might be returning a default or dummy status regardless of the input.
+### Suggestion
+Prefix the parameter with an underscore (`_code`) to indicate it is intentionally unused for now.
 
-## Unused variant and method in `wasm_interactive.rs`
+### Decision
 
-**File:** [src/wasm_interactive.rs](../src/wasm_interactive.rs#L16)
+Prefix the parameter with an underscore (`_code`).
+
+We attempted to implement an `ExitStatusExt` trait to allow creating an `ExitStatus` from a raw integer (using unsafe pointer casting). However, on the `wasm32-wasip1` target, `std::process::ExitStatus` appears to be a Zero-Sized Type (0 bytes), meaning it cannot physically store an exit code. Therefore, we are forced to ignore the code and return a dummy status.
+
+## Dead code in `wasm_interactive.rs`
+
+**File:** [src/wasm_interactive.rs](../src/wasm_interactive.rs)
 
 ### Warning
 ```text
 warning: variant `Esc` is never constructed
-  --> /home/mihailik/washm/src/wasm_interactive.rs:16:5
+  --> src/wasm_interactive.rs:16:5
+   |
+ 8 | enum Event {
+   |      ----- variant in this enum
 ...
+16 |     Esc,
+   |     ^^^
+
 warning: method `clear` is never used
-  --> /home/mihailik/washm/src/wasm_interactive.rs:88:8
+  --> src/wasm_interactive.rs:88:8
+   |
+34 | impl LineBuffer {
+   | --------------- method in this implementation
+...
+88 |     fn clear(&mut self) {
+   |        ^^^^^
 ```
 
 ### Analysis
-The `Event::Esc` variant and the `LineBuffer::clear` method are defined but never used. This indicates that certain interactive features, like handling the Escape key or clearing the input buffer, have been defined in the data structures but not yet wired up to the input handling logic.
+The `Event::Esc` variant and `LineBuffer::clear` method are defined but never used in the current interactive shell implementation.
 
-[src/wasm_interactive.rs](../src/wasm_interactive.rs) manages the interactive loop and line editing for the shell when running in a browser or WASM host. These unused items represent "dead" parts of the interactive UI logic that should either be implemented to support better terminal emulation or removed to keep the codebase clean.
+### Suggestion
+If these are intended for future use (e.g., handling the Escape key or clearing the line), they can be marked with `#[allow(dead_code)]`. Otherwise, they can be removed.
 
 ## Unused async callback test
 
@@ -160,9 +192,10 @@ warning: struct `JobManager` is never constructed
 ```
 
 ### Analysis
-A significant portion of [src/jobs.rs](../src/jobs.rs) is unused, including the `JobId` type, `Job` and `JobManager` structs, and all their methods. This is a clear indication that job control (tracking background tasks) is not yet active in the shell.
+As previously researched, `src/jobs.rs` contains a `JobManager` implementation that is a duplicate of functionality provided by `brush-core`. Historical analysis shows this file was part of "Phase 2" of development, but the project has since shifted to using the `JobManager` provided by the vendored `brush-core` crate.
 
-Job control is a complex feature for a WASM shell because it requires managing multiple execution contexts or "processes" in an environment that is traditionally single-threaded or has limited threading support. These structures represent the architectural intent to support jobs, but they currently contribute only to build noise.
+### Suggestion
+Since the entire file `src/jobs.rs` is currently unused by the rest of the project (though it is included as a module in `lib.rs`), the cleanest fix is to remove the unused code. If the `JobManager` in this file is intended to eventually replace or augment the one in `brush-core`, it should be kept but marked with `#[allow(dead_code)]`.
 
 ## Shared reference to mutable static in `host.rs`
 
@@ -175,13 +208,42 @@ warning: creating a shared reference to mutable static
    |
 38 |         if CACHE.is_none() {
    |            ^^^^^^^^^^^^^^^ shared reference to mutable static
-   = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
 ```
 
 ### Analysis
 This warning highlights a pattern that is being phased out in Rust 2024: taking a shared reference to a `static mut` variable. This is inherently unsafe because there are no guarantees against concurrent access or mutation, which can lead to undefined behavior.
 
-In [src/bridges/host.rs](../src/bridges/host.rs), the `CACHE` is likely used to store host-provided information or handles to avoid repeated expensive calls across the WASM boundary. This is a critical part of the shell's performance and interop layer. To fix this while maintaining the architecture, the `static mut` should be replaced with a thread-safe alternative like `std::sync::OnceLock` or `lazy_static`.
+In [src/bridges/host.rs](../src/bridges/host.rs), the `CACHE` is used to store host-provided information (like username and hostname) to avoid repeated expensive calls across the WASM boundary.
+
+### Suggestion
+Replace `static mut CACHE` with `std::sync::OnceLock<StartupJson>`. This provides a thread-safe and modern way to handle global state and is the standard replacement for this pattern in modern Rust.
+
+## Unexpected `cfg` condition values in `brush` crates
+
+**Files:** Various files in `brush-core`, `brush-parser`, `brush-interactive`, `brush-shell`.
+
+### Warning
+```text
+warning: unexpected `cfg` condition value: `serde`
+  --> /home/mihailik/washm/target/vendor/brush-core/src/openfiles.rs:27:7
+   |
+27 | #[cfg(feature = "serde")]
+   |       ^^^^^^^^^^^^^^^^^
+```
+
+### Analysis
+Similar to the `uucore` warnings, these are triggered because the vendored `brush` crates are included as modules, and their features are not declared in `washm`'s `Cargo.toml`. The compiler validates all `#[cfg(feature = "...")]` attributes against the features defined in the root crate.
+
+### Suggestion
+Add the missing features to `washm`'s `Cargo.toml`. These include:
+- `serde`
+- `arbitrary`
+- `diagnostics`
+- `debug-tracing`
+- `completion`
+- `experimental`
+- `experimental-load`
+- `experimental-builtins`
 
 ## Future-incompatibility and lints in vendored dependencies
 

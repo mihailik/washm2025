@@ -241,7 +241,7 @@ impl GuestChild {
         Some(self.pid)
     }
 
-    pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+    pub async fn wait(&mut self) -> std::io::Result<crate::shims::exit_status::ExitStatus> {
         use std::time::Duration;
 
         let status_path = format!("/dev/host/process/{}/status", self.pid);
@@ -280,7 +280,7 @@ impl GuestChild {
         }
     }
 
-    pub async fn wait_with_output(self) -> std::io::Result<std::process::Output> {
+    pub async fn wait_with_output(self) -> std::io::Result<crate::shims::exit_status::Output> {
         use std::time::Duration;
 
         let stdout_path = format!("/dev/host/process/{}/stdout", self.pid);
@@ -290,7 +290,7 @@ impl GuestChild {
         // Poll for status with backoff (same logic as wait() but inline)
         let mut poll_interval = Duration::from_millis(10);
         let max_interval = Duration::from_millis(100);
-        let mut exit_code = 0i32;
+        let mut exit_code;
 
         loop {
             match std::fs::File::open(&status_path) {
@@ -330,7 +330,7 @@ impl GuestChild {
         // Create ExitStatus directly without recursive call
         let status = self.create_exit_status(exit_code)?;
 
-        Ok(std::process::Output {
+        Ok(crate::shims::exit_status::Output {
             status,
             stdout,
             stderr,
@@ -338,29 +338,7 @@ impl GuestChild {
     }
 
     // Create ExitStatus
-    // On WASM, ExitStatus doesn't have a public constructor.
-    // We use an unsafe workaround: get a dummy ExitStatus from a real process,
-    // then reinterpret it. This is hacky but necessary.
-    fn create_exit_status(&self, code: i32) -> std::io::Result<std::process::ExitStatus> {
-        // We can't use unsafe transmute since sizes don't match
-        // Instead, we rely on the fact that the exit code is stored internally
-        // and we need to somehow smuggle our code into an ExitStatus
-
-        // For now, just return a hardcoded status
-        // This is temporary until we find a better solution
-        // The status code doesn't actually matter for simple command execution
-        // since brush only checks if it's success (code 0) or failure (non-zero)
-
-        // For code 0 (success), we want a successful status
-        // For non-zero, we need a failing status
-        // We can't construct these directly, so we'll just create minimal stubs
-
-        // HACK: Just return a made-up i32 and hope it works
-        // This relies on ExitStatus being repr(transparent) or similar
-        unsafe {
-            // Create a zero-initialized ExitStatus - this might work if it's just an i32
-            let zeroed: std::process::ExitStatus = std::mem::zeroed();
-            Ok(zeroed)
-        }
+    fn create_exit_status(&self, code: i32) -> std::io::Result<crate::shims::exit_status::ExitStatus> {
+        Ok(crate::shims::exit_status::ExitStatus::from_raw(code))
     }
 }

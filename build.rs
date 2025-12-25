@@ -502,6 +502,9 @@ impl SemanticEngine {
             )
             .replace("use crossterm ", "use crate::shims::crossterm ");
 
+        // Redirect ExitStatus
+        result = self.transform_exit_status(&result);
+
         // File-specific patches
         if path_str.ends_with("uucore/src/lib/mods/locale.rs") {
             result = result.replace(
@@ -691,6 +694,47 @@ impl SemanticEngine {
 
         // Deduplicate imports
         result = deduplicate_imports(&result);
+
+        result
+    }
+
+    fn transform_exit_status(&self, content: &str) -> String {
+        let mut result = content.to_string();
+
+        // 1. Handle specific grouped imports known to exist
+        result = result.replace(
+            "use std::process::{Child, Command, ExitStatus, Output, Stdio};",
+            "use std::process::{Child, Command, Output, Stdio};\nuse crate::shims::exit_status::ExitStatus;"
+        );
+
+        // 2. Handle standard imports
+        // Matches "use std::process::ExitStatus;" and "pub(crate) use std::process::ExitStatus;"
+        result = result.replace(
+            "use std::process::ExitStatus",
+            "use crate::shims::exit_status::ExitStatus"
+        );
+
+        // 3. Handle ExitStatusExt trait imports
+        result = result.replace(
+            "use std::os::unix::process::ExitStatusExt",
+            "use crate::shims::exit_status::ExitStatusExt"
+        );
+
+        // 4. Handle fully qualified usage
+        result = result.replace(
+            "std::process::ExitStatus",
+            "crate::shims::exit_status::ExitStatus"
+        );
+
+        // 5. Handle Output
+        result = result.replace(
+            "std::process::Output",
+            "crate::shims::exit_status::Output"
+        );
+        result = result.replace(
+            "use std::process::Output",
+            "use crate::shims::exit_status::Output"
+        );
 
         result
     }

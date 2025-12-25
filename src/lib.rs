@@ -40,7 +40,6 @@ pub mod brush_run;
 mod command;
 mod coreutils_builtins;
 mod coreutils_dispatch;
-mod jobs;
 
 #[cfg(feature = "wasm-test")]
 pub mod test_harness;
