@@ -109,7 +109,7 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
         #[cfg(feature = "wasm-test")]
         {
             map.insert(
-                "test".to_string(),
+                "wasm-test".to_string(),
                 crate::brush_core::builtins::simple_builtin::<crate::test_command::TestCommand>(),
             );
         }

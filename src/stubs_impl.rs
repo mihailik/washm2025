@@ -90,7 +90,6 @@ pub fn configure_shell<S: ShellBuilderState>(
 }
 
 pub fn open_null_file() -> Result<std::fs::File, crate::brush_core::error::Error> {
-    println!("DEBUG: stubs_impl::open_null_file called");
     let res = std::fs::File::options()
         .read(true)
         .write(true)

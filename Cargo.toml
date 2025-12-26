@@ -16,6 +16,16 @@ wasm-test = []
 minimal = []
 basic = []
 reedline = []
+serde = []
+debug-tracing = []
+diagnostics = []
+arbitrary = []
+completion = []
+experimental = []
+experimental-load = []
+experimental-builtins = []
+libc = []
+windows-sys = []
 
 # Enable all brush-builtins features
 brush-builtins = [
