@@ -29,9 +29,11 @@ pub mod uucore;
 // Re-export locale for uucore macros that use $crate::locale
 pub use uucore::locale;
 
-mod bootstrap;
+pub mod bootstrap;
 pub mod bridges;
+pub mod wasm_interactive;
 pub mod interp_log;
+
 pub mod shims;
 pub mod stubs_impl;
 

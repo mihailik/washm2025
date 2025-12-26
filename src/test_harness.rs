@@ -192,8 +192,11 @@ pub fn run_all_tests() -> TestResults {
                 TestStatus::Ignored => {}
             }
             results.push(result);
+            println!("Pushed result. Count: {}", results.len());
         }
     }
+
+    println!("Finished running tests. Results count: {}", results.len());
 
     TestResults {
         results,

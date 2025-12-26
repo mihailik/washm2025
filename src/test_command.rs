@@ -25,9 +25,13 @@ impl SimpleCommand for TestCommand {
 
         let args_vec: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
 
-        // Skip the first argument if it's the command name "test"
-        let args_vec: Vec<String> = if args_vec.first().map(|s| s.as_str()) == Some("test") {
-            args_vec.into_iter().skip(1).collect()
+        // Skip the first argument if it's the command name "test" or "wasm-test"
+        let args_vec: Vec<String> = if let Some(first) = args_vec.first() {
+            if first == "test" || first == "wasm-test" {
+                args_vec.into_iter().skip(1).collect()
+            } else {
+                args_vec
+            }
         } else {
             args_vec
         };

@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 // rust-analyzer imports for semantic analysis
-use ra_ap_ide::AnalysisHost;
-use ra_ap_syntax::ast::{HasAttrs, HasDocComments, HasName, HasVisibility};
-use ra_ap_syntax::{ast, AstNode, Edition, SourceFile, SyntaxKind, SyntaxNode, TextRange};
-use ra_ap_syntax::syntax_editor::{SyntaxEditor, Position};
+// use ra_ap_ide::AnalysisHost;
 use ra_ap_syntax::ast::make;
+use ra_ap_syntax::ast::{HasAttrs, HasName, HasVisibility};
+use ra_ap_syntax::syntax_editor::{Position, SyntaxEditor};
+use ra_ap_syntax::{ast, AstNode, Edition, SourceFile, SyntaxKind, SyntaxNode, TextRange};
 
 fn main() {
     // Section 2: Deadlock Avoidance - CARGO_TARGET_DIR would be set here if we used ProjectWorkspace
@@ -28,6 +28,7 @@ fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let project_root = PathBuf::from(&manifest_dir);
     let vendor_dir = project_root.join("target/vendor");
+    println!("cargo:warning=Vendor dir: {:?}", vendor_dir);
 
     // Define source mappings
     let mappings = vec![
@@ -52,6 +53,7 @@ fn main() {
 
     // Copy source files to vendor directory
     copy_sources(&mappings, &vendor_dir);
+    
 
     // Section 4: Apply semantic transformations using RA
     engine.transform_all(&vendor_dir, &mappings);
@@ -68,11 +70,14 @@ fn parse_stmt<N: AstNode>(text: &str) -> N {
     let parse = SourceFile::parse(&wrapped, Edition::Edition2021);
     let tree = parse.tree();
     let syntax = tree.syntax();
-    
+
     // Find the function body block to avoid matching the function itself
-    let func = syntax.descendants().find_map(ast::Fn::cast).expect("failed to parse dummy fn");
+    let func = syntax
+        .descendants()
+        .find_map(ast::Fn::cast)
+        .expect("failed to parse dummy fn");
     let body = func.body().expect("dummy fn has no body");
-    
+
     if let Some(node) = body.syntax().descendants().find_map(N::cast) {
         N::cast(node.syntax().clone_for_update()).unwrap()
     } else {
@@ -85,8 +90,19 @@ fn parse_expr<N: AstNode>(text: &str) -> N {
     let parse = SourceFile::parse(&wrapped, Edition::Edition2021);
     let tree = parse.tree();
     let syntax = tree.syntax();
-    if let Some(node) = syntax.descendants().find_map(N::cast) {
-        N::cast(node.syntax().clone_for_update()).unwrap()
+
+    // Find the LetStmt
+    let let_stmt = syntax
+        .descendants()
+        .find_map(ast::LetStmt::cast)
+        .expect("failed to parse dummy let");
+    // Get the initializer
+    let init = let_stmt
+        .initializer()
+        .expect("dummy let has no initializer");
+
+    if let Some(node) = N::cast(init.syntax().clone_for_update()) {
+        node
     } else {
         panic!("Failed to parse expr: {}", text);
     }
@@ -112,10 +128,11 @@ fn make_mutable<N: AstNode>(node: N) -> N {
 fn parse_token(text: &str, kind: SyntaxKind) -> ra_ap_syntax::SyntaxToken {
     let parse = SourceFile::parse(text, Edition::Edition2021);
     let root = parse.tree().syntax().clone_for_update();
-    let tokens: Vec<_> = root.descendants_with_tokens()
+    let tokens: Vec<_> = root
+        .descendants_with_tokens()
         .filter_map(|e| e.into_token())
         .collect();
-    
+
     if let Some(token) = tokens.iter().find(|t| t.kind() == kind) {
         token.clone()
     } else {
@@ -125,17 +142,41 @@ fn parse_token(text: &str, kind: SyntaxKind) -> ra_ap_syntax::SyntaxToken {
     }
 }
 
+fn tokenize_path(text: &str) -> Vec<String> {
+    let parse = SourceFile::parse(text, Edition::Edition2021);
+    parse
+        .tree()
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| t.kind() != SyntaxKind::WHITESPACE)
+        .map(|t| t.text().to_string())
+        .collect()
+}
+
+fn tokenize_path_kinds(text: &str) -> Vec<(String, SyntaxKind)> {
+    let parse = SourceFile::parse(text, Edition::Edition2021);
+    parse
+        .tree()
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| t.kind() != SyntaxKind::WHITESPACE)
+        .map(|t| (t.text().to_string(), t.kind()))
+        .collect()
+}
+
 /// Semantic Engine using rust-analyzer's parser and AST
 struct SemanticEngine {
-    analysis_host: AnalysisHost,
+    // analysis_host: AnalysisHost, // Unused for now, using pure AST
 }
 
 impl SemanticEngine {
     fn new() -> Self {
         // Section 3.A: Initialize AnalysisHost for semantic analysis
-        let analysis_host = AnalysisHost::default();
+        // let analysis_host = AnalysisHost::default();
 
-        Self { analysis_host }
+        Self { /* analysis_host */ }
     }
 
     fn transform_all(&mut self, vendor_dir: &Path, mappings: &[(&str, &str)]) {
@@ -161,13 +202,21 @@ impl SemanticEngine {
             }
 
             let path = entry.path();
-            let content = fs::read_to_string(path).unwrap();
+            let content = match fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Failed to read {:?}: {}", path, e);
+                    continue;
+                }
+            };
 
             // Apply AST-based transformations
             match self.transform_with_ast(&content, path, &module_name) {
                 Ok(transformed) => {
                     if content != transformed {
-                        fs::write(path, transformed).unwrap();
+                        if let Err(e) = fs::write(path, transformed) {
+                             eprintln!("Failed to write {:?}: {}", path, e);
+                        }
                     }
                 }
                 Err(_e) => {
@@ -183,71 +232,42 @@ impl SemanticEngine {
         path: &Path,
         current_module: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        // eprintln!("Transforming: {:?}", path);
+        eprintln!("Transforming: {:?}", path);
+        let path_str = normalize_path(path);
+
         let mut content = original_content.to_string();
 
-        let path_str = normalize_path(path);
-        if path_str.contains("input_backend.rs") || path_str.contains("term_line_reader.rs") {
-             return Ok(content);
-        }
-
+        // String-based pre-processing for macros and hard-to-parse constructs
         if path_str.ends_with("brush-core/src/expansion.rs") {
-             content = content.replace("brush_parser::word::SubstringMatchKind", "crate::brush_parser::word::SubstringMatchKind");
-             content = content.replace("brush_parser::word::Parameter", "crate::brush_parser::word::Parameter");
-             content = content.replace("brush_parser::word::SpecialParameter", "crate::brush_parser::word::SpecialParameter");
-             content = content.replace("crate::regex::", "crate::brush_core::regex::");
+             content = content.replace("crate::regex", "crate::brush_core::regex");
         }
-
         if path_str.ends_with("brush-core/src/wellknownvars.rs") {
-             content = content.replace("crate::callstack::", "crate::brush_core::callstack::");
+             content = content.replace("crate::callstack", "crate::brush_core::callstack");
         }
-
         if path_str.ends_with("brush-core/src/prompt.rs") {
-             content = content.replace("brush_parser::prompt::PromptPiece", "crate::brush_parser::prompt::PromptPiece");
+             content = content.replace("brush_parser::", "crate::brush_parser::");
+             content = content.replace("crate::crate::brush_parser", "crate::brush_parser");
         }
 
         if path_str.ends_with("brush-shell/src/entry.rs") {
-             content = content.replace("async fn run_async", "pub async fn run_async");
-             content = content.replace("fn try_parse_from", "pub fn try_parse_from");
-             content = content.replace("brush_interactive::MinimalInputBackend", "brush_interactive::MinimalInputBackend::new()");
-             content = content.replace("shell.default_builtins(builtin_set)", "crate::stubs_impl::configure_shell(shell, builtin_set)");
+             println!("cargo:warning=Patching entry.rs");
+             content = content.replace("brush_interactive::MinimalInputBackend", "crate::wasm_interactive::MinimalInputBackend");
+             content = content.replace("let mut ui = crate::wasm_interactive::MinimalInputBackend;", "let mut ui = crate::wasm_interactive::MinimalInputBackend::new();");
+             content = content.replace("brush_interactive::WasmInputBackend", "crate::wasm_interactive::WasmInputBackend");
+             content = content.replace("brush_interactive::ReedlineInputBackend", "crate::wasm_interactive::ReedlineInputBackend");
+             content = content.replace("brush_interactive::BasicInputBackend", "crate::wasm_interactive::BasicInputBackend");
         }
 
-        if path_str.ends_with("brush-core/src/sys/stubs/users.rs") {
-             content = content.replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current uid\").into())", "crate::stubs_impl::get_current_uid()");
-             content = content.replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current gid\").into())", "crate::stubs_impl::get_current_gid()");
-             content = content.replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting effective uid\").into())", "crate::stubs_impl::get_effective_uid()");
-             content = content.replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting effective gid\").into())", "crate::stubs_impl::get_effective_gid()");
-             content = content.replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"getting current username\").into())", "Ok(crate::stubs_impl::startup_username())");
+        if path_str.ends_with("uucore/src/lib/lib.rs") {
+             println!("cargo:warning=Patching uucore lib.rs");
+             content = content.replace(
+                 "pub fn localized_help_template_with_colors(",
+                 "use crate::translate;\npub fn localized_help_template_with_colors("
+             );
         }
 
-        if path_str.ends_with("brush-core/src/sys/stubs/fs.rs") {
-             content = content.replace("Err(error::ErrorKind::NotSupportedOnThisPlatform(\"opening null file\").into())", "crate::stubs_impl::open_null_file()");
-        }
-
-        if path_str.ends_with("brush-core/src/sys/stubs/commands.rs") {
-             content = content.replace("return Err(error::ErrorKind::NotSupportedOnThisPlatform(\"fd redirections\").into());", "return Ok(());");
-        }
-
-        if path_str.ends_with("brush-interactive/src/interactive_shell.rs") {
-             content = content.replace("fn read_line", "async fn read_line");
-        }
-
-        if path_str.ends_with("brush-interactive/src/lib.rs") {
-             content.push_str("\npub mod wasm_interactive { include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/wasm_interactive.rs\")); }");
-             content.push_str("\npub use wasm_interactive::{WasmInputBackend, ReedlineInputBackend, BasicInputBackend, MinimalInputBackend};");
-        }
-
-        if path_str.ends_with("brush-shell/src/lib.rs") {
-             content = content.replace("mod brushctl;", "pub mod brushctl;");
-             if !content.contains("pub mod embedded;") {
-                 content.push_str("\npub mod embedded;");
-             }
-        }
-
-        if path_str.ends_with("uucore/src/lib/mods/locale.rs") {
-             content = content.replace("include!(concat!(env!(\"OUT_DIR\"), \"/embedded_locales.rs\"));", "include!(\"../../embedded_locales.rs\");");
-             content = content.replace("fn get_embedded_locale", "fn get_embedded_locale_unused");
+        if path_str.contains("input_backend.rs") || path_str.contains("term_line_reader.rs") {
+            return Ok(content);
         }
 
         // Pre-processing: Semantic Rerooting
@@ -262,18 +282,15 @@ impl SemanticEngine {
             "uucore",
             "stubs_impl",
         ];
-        
+
         let edits = self.find_semantic_rerooting_edits(&root, current_module, &vendored_crates);
-        // if !edits.is_empty() {
-        //      eprintln!("Found {} edits for {:?}", edits.len(), path);
-        // }
-        
+
         // Filter out overlapping edits (keep the outer ones)
         let mut filtered_edits = Vec::new();
         for (range, text) in &edits {
-            let is_inner = edits.iter().any(|(other_range, _)| {
-                other_range != range && other_range.contains_range(*range)
-            });
+            let is_inner = edits
+                .iter()
+                .any(|(other_range, _)| other_range != range && other_range.contains_range(*range));
             if !is_inner {
                 filtered_edits.push((*range, text.clone()));
             }
@@ -296,10 +313,11 @@ impl SemanticEngine {
         let root = parse.tree().syntax().clone();
         let mut editor = SyntaxEditor::new(root.clone());
 
-        // self.apply_module_path_synthesis(&mut editor, &root);
+        self.apply_path_rewrites(&mut editor, &root, path);
+        self.apply_macro_fixes(&mut editor, &root, path);
         self.apply_stub_replacements(&mut editor, &root, path);
-        // self.apply_doc_conversions(&mut editor, &root);
-        // self.apply_inner_attributes_commenting(&mut editor, &root);
+        self.apply_doc_conversions(&mut editor, &root);
+        self.apply_inner_attributes_commenting(&mut editor, &root);
         self.apply_async_transforms(&mut editor, &root, path);
         self.apply_interactive_lib_transforms(&mut editor, &root, path);
         self.apply_additional_transforms_ast(&mut editor, &root, path);
@@ -322,35 +340,61 @@ impl SemanticEngine {
         for path in root.descendants().filter_map(ast::Path::cast) {
             // eprintln!("DEBUG: Checking path: {}", path);
             // Skip macro calls (already checking parent)
-            if path.syntax().parent().and_then(ast::MacroCall::cast).is_some() {
+            if path
+                .syntax()
+                .parent()
+                .and_then(ast::MacroCall::cast)
+                .is_some()
+            {
                 continue;
             }
 
             let segments: Vec<_> = path.segments().collect();
             if let Some(first_seg) = segments.first() {
-                let first_seg_text = first_seg.name_ref().map(|n| n.text().to_string()).unwrap_or_default();
-                
+                let first_seg_text = first_seg
+                    .name_ref()
+                    .map(|n| n.text().to_string())
+                    .unwrap_or_default();
+
                 if current_module == "brush_builtins" && path.to_string().contains("brush_core") {
-                     eprintln!("DEBUG: Found brush_core path in brush_builtins: '{}'. First seg: '{}'", path, first_seg_text);
+                    eprintln!(
+                        "DEBUG: Found brush_core path in brush_builtins: '{}'. First seg: '{}'",
+                        path, first_seg_text
+                    );
                 }
-                
+                if current_module == "brush_shell" && path.to_string().contains("brush_core") {
+                    eprintln!(
+                        "DEBUG: Found brush_core path in brush_shell: '{}'. First seg: '{}'",
+                        path, first_seg_text
+                    );
+                }
+
                 if first_seg_text == "crate" {
                     // Handle crate::...
-                    let rest: Vec<String> = segments.iter().skip(1)
+                    let rest: Vec<String> = segments
+                        .iter()
+                        .skip(1)
                         .map(|s| s.name_ref().unwrap().text().to_string())
                         .collect();
-                    
+
                     if !rest.is_empty() {
                         let second_seg = &rest[0];
-                        if !vendored_crates.contains(&second_seg.as_str()) {
-                             // Replace crate::foo with crate::current_module::foo
-                             let new_path_text = format!("crate::{}::{}", current_module, rest.join("::"));
-                             edits.push((path.syntax().text_range(), new_path_text));
+                        let excluded = ["shims", "bridges", "bootstrap", "wasm_interactive", "translate"];
+                        if !vendored_crates.contains(&second_seg.as_str()) && !excluded.contains(&second_seg.as_str()) {
+                            // Replace crate::foo with crate::current_module::foo
+                            let new_path_text =
+                                format!("crate::{}::{}", current_module, rest.join("::"));
+                            edits.push((path.syntax().text_range(), new_path_text));
                         }
                     }
                 } else if vendored_crates.contains(&first_seg_text.as_str()) {
                     // Handle bare crate reference: brush_core::... -> crate::brush_core::...
-                    if path.syntax().parent().map(|p| p.kind() == SyntaxKind::PATH).unwrap_or(false) {
+                    if path
+                        .syntax()
+                        .parent()
+                        .map(|p| p.kind() == SyntaxKind::PATH)
+                        .unwrap_or(false)
+                    {
                         continue; // It's a sub-path
                     }
 
@@ -362,131 +406,371 @@ impl SemanticEngine {
 
         // Handle use crate::{...} imports
         for use_tree in root.descendants().filter_map(ast::UseTree::cast) {
-             if let Some(path) = use_tree.path() {
-                 if path.to_string() == "crate" {
-                     if let Some(_tree_list) = use_tree.use_tree_list() {
-                         let new_path_text = format!("crate::{}", current_module);
-                         edits.push((path.syntax().text_range(), new_path_text));
-                     }
-                 }
-             }
+            if let Some(path) = use_tree.path() {
+                if path.to_string() == "crate" {
+                    if let Some(_tree_list) = use_tree.use_tree_list() {
+                        let new_path_text = format!("crate::{}", current_module);
+                        edits.push((path.syntax().text_range(), new_path_text));
+                    }
+                }
+            }
         }
-        
+
         // Fix macro invocations
         for macro_call in root.descendants().filter_map(ast::MacroCall::cast) {
             if let Some(path) = macro_call.path() {
                 let path_str = path.to_string();
                 if path_str.starts_with(&format!("crate::{}::", current_module)) {
-                     if let Some(name_ref) = path.segment().and_then(|s| s.name_ref()) {
-                         let name = name_ref.text();
-                         edits.push((path.syntax().text_range(), name.to_string()));
-                     }
+                    if let Some(name_ref) = path.segment().and_then(|s| s.name_ref()) {
+                        let name = name_ref.text();
+                        edits.push((path.syntax().text_range(), name.to_string()));
+                    }
                 }
             }
         }
-        
+
         edits
     }
 
-    fn apply_module_path_synthesis(&self, editor: &mut SyntaxEditor, root: &SyntaxNode) {
-        for mod_item in root.descendants().filter_map(ast::Module::cast) {
-            if mod_item.item_list().is_none() && mod_item.semicolon_token().is_some() {
-                let mod_name = mod_item.name().unwrap().text().to_string();
-                
-                let has_path_attr = mod_item.attrs().any(|attr| {
-                    attr.path().and_then(|p| p.segment())
-                        .and_then(|s| s.name_ref())
-                        .map(|n| n.text().to_string()) == Some("path".to_string())
-                });
-                
-                if !has_path_attr {
-                    let path_attr_text = format!("#[path = \"{}.rs\"] mod dummy;", mod_name);
-                    let path_attr = parse_node::<ast::Attr>(&path_attr_text);
-                    
-                    editor.insert(Position::before(mod_item.syntax()), path_attr.syntax());
-                    editor.insert(Position::before(mod_item.syntax()), make::tokens::single_newline());
+
+
+    fn stub_fn(
+        &self,
+        editor: &mut SyntaxEditor,
+        root: &SyntaxNode,
+        path_suffix: &str,
+        current_path: &Path,
+        fn_name: &str,
+        new_body_str: &str,
+    ) {
+        let path_str = normalize_path(current_path);
+        if !path_str.ends_with(path_suffix) {
+            return;
+        }
+
+        for func in root.descendants().filter_map(ast::Fn::cast) {
+            if func.name().map_or(false, |n| n.text() == fn_name) {
+                if let Some(body) = func.body() {
+                    let new_body = parse_stmt::<ast::BlockExpr>(new_body_str);
+                    editor.replace(body.syntax(), new_body.syntax());
                 }
             }
+        }
+    }
+
+    fn rewrite_path(
+        &self,
+        editor: &mut SyntaxEditor,
+        root: &SyntaxNode,
+        old_path: &str,
+        new_path: &str,
+    ) {
+        for path in root.descendants().filter_map(ast::Path::cast) {
+            // Only handle top-level paths to avoid double replacement
+            if path
+                .syntax()
+                .parent()
+                .map_or(false, |p| p.kind() == SyntaxKind::PATH)
+            {
+                continue;
+            }
+
+            let text = path.to_string();
+            if text == old_path || text.starts_with(&format!("{}::", old_path)) {
+                let new_text = text.replacen(old_path, new_path, 1);
+                let new_node = make_mutable(make::path_from_text(&new_text));
+                editor.replace(path.syntax(), new_node.syntax());
+            }
+        }
+    }
+
+    fn rewrite_macro_tokens(
+        &self,
+        editor: &mut SyntaxEditor,
+        root: &SyntaxNode,
+        target_token: &str,
+        replacement_text: &str,
+    ) {
+        for token in root
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+        {
+            if token.text() == target_token {
+                if token
+                    .parent_ancestors()
+                    .any(|n| ast::MacroCall::can_cast(n.kind()))
+                {
+                    let new_node = make_mutable(make::path_from_text(replacement_text));
+                    editor.replace(token, new_node.syntax());
+                }
+            }
+        }
+    }
+
+    fn rewrite_macro_path(
+        &self,
+        editor: &mut SyntaxEditor,
+        root: &SyntaxNode,
+        old_path: &str,
+        new_path: &str,
+    ) {
+        let old_tokens = tokenize_path(old_path);
+        if old_tokens.is_empty() {
+            return;
+        }
+
+        let new_tokens_info = tokenize_path_kinds(new_path);
+        if new_tokens_info.is_empty() {
+            return;
+        }
+
+        let all_tokens: Vec<_> = root
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .collect();
+
+        let mut i = 0;
+        while i < all_tokens.len() {
+            // Skip whitespace in all_tokens
+            if all_tokens[i].kind() == SyntaxKind::WHITESPACE {
+                i += 1;
+                continue;
+            }
+
+            if all_tokens[i].text() == old_tokens[0] {
+                // Check if sequence matches, skipping whitespace in all_tokens
+                let mut match_found = true;
+                let mut current_token_idx = i;
+                let mut tokens_to_replace = Vec::new();
+
+                for token_text in &old_tokens {
+                    // Skip whitespace
+                    while current_token_idx < all_tokens.len()
+                        && all_tokens[current_token_idx].kind() == SyntaxKind::WHITESPACE
+                    {
+                        tokens_to_replace.push(all_tokens[current_token_idx].clone());
+                        current_token_idx += 1;
+                    }
+
+                    if current_token_idx >= all_tokens.len()
+                        || all_tokens[current_token_idx].text() != *token_text
+                    {
+                        match_found = false;
+                        break;
+                    }
+                    tokens_to_replace.push(all_tokens[current_token_idx].clone());
+                    current_token_idx += 1;
+                }
+
+                if match_found {
+                    // Check if inside macro
+                    if all_tokens[i]
+                        .parent_ancestors()
+                        .any(|n| ast::MacroCall::can_cast(n.kind()))
+                    {
+                        println!("cargo:warning=Rewriting macro path '{}' -> '{}'", old_path, new_path);
+                        // Replace first token with first new token
+                        let (first_text, first_kind) = &new_tokens_info[0];
+                        let first_new_token = parse_token(first_text, *first_kind);
+                        editor.replace(tokens_to_replace[0].clone(), first_new_token);
+
+                        // Insert rest
+                        for (text, kind) in new_tokens_info.iter().skip(1) {
+                            let token = parse_token(text, *kind);
+                            editor.insert(Position::after(tokens_to_replace[0].clone()), token);
+                        }
+
+                        // Delete the rest of old tokens
+                        for token in tokens_to_replace.iter().skip(1) {
+                            editor.delete(token.clone());
+                        }
+
+                        i = current_token_idx; // Advance
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    fn apply_path_rewrites(&self, editor: &mut SyntaxEditor, root: &SyntaxNode, path: &Path) {
+        let path_str = normalize_path(path);
+        // println!("cargo:warning=Checking path rewrites for: {}", path_str);
+
+        if path_str.ends_with("brush-core/src/expansion.rs") {
+            println!("cargo:warning=Applying rewrites for expansion.rs");
+            self.rewrite_path(editor, root, "brush_parser", "crate::brush_parser");
+            self.rewrite_path(editor, root, "crate::regex", "crate::brush_core::regex");
+            self.rewrite_macro_path(editor, root, "crate::regex", "crate::brush_core::regex");
+        }
+
+        if path_str.ends_with("brush-core/src/wellknownvars.rs") {
+            println!("cargo:warning=Applying rewrites for wellknownvars.rs");
+            self.rewrite_path(
+                editor,
+                root,
+                "crate::callstack",
+                "crate::brush_core::callstack",
+            );
+            self.rewrite_path(
+                editor,
+                root,
+                "callstack",
+                "crate::brush_core::callstack",
+            );
+            self.rewrite_macro_path(
+                editor,
+                root,
+                "crate::callstack",
+                "crate::brush_core::callstack",
+            );
+        }
+
+        if path_str.ends_with("brush-core/src/prompt.rs") {
+            println!("cargo:warning=Applying rewrites for prompt.rs");
+            self.rewrite_path(editor, root, "brush_parser", "crate::brush_parser");
+        }
+
+        if path_str.ends_with("brush-interactive/src/interactive_shell.rs") {
+            // "fn read_line" -> "async fn read_line" is handled by apply_async_transforms
+        }
+    }
+
+    fn apply_macro_fixes(&self, editor: &mut SyntaxEditor, root: &SyntaxNode, path: &Path) {
+        let path_str = normalize_path(path);
+        if path_str.ends_with("brush-core/src/expansion.rs") {
+            self.rewrite_macro_tokens(editor, root, "brush_parser", "crate::brush_parser");
         }
     }
 
     fn apply_stub_replacements(&self, editor: &mut SyntaxEditor, root: &SyntaxNode, path: &Path) {
-        let path_str = normalize_path(path);
-        
-        for func in root.descendants().filter_map(ast::Fn::cast) {
-            if let Some(name) = func.name() {
-                let fn_name = name.text();
-                
-                // Signal stubs
-                if path_str.ends_with("brush-core/src/sys/stubs/signal.rs") {
-                    if fn_name == "continue_process" || fn_name == "kill_process" {
-                        if let Some(body) = func.body() {
-                            if body.syntax().text().to_string().contains("NotSupportedOnThisPlatform") {
-                                let new_body = parse_stmt::<ast::BlockExpr>("{ Ok(()) }");
-                                editor.replace(body.syntax(), new_body.syntax());
-                            }
-                        }
-                    }
-                }
-                
-                // Other stubs
-                if path_str.ends_with("brush-core/src/sys/stubs/users.rs") && fn_name == "get_current_username" {
-                     if let Some(body) = func.body() {
-                         let new_body = parse_stmt::<ast::BlockExpr>("{ Ok(\"user\".to_string()) }");
-                         editor.replace(body.syntax(), new_body.syntax());
-                     }
-                }
-                
-                if path_str.ends_with("brush-core/src/openfiles.rs") && fn_name == "check_open_files_limit" {
-                     if let Some(body) = func.body() {
-                         let new_body = parse_stmt::<ast::BlockExpr>("{ Ok(()) }");
-                         editor.replace(body.syntax(), new_body.syntax());
-                     }
-                }
-                
-                if path_str.ends_with("brush-core/src/sys/stubs/network.rs") && fn_name == "get_hostname" {
-                     if let Some(body) = func.body() {
-                         let new_body = parse_stmt::<ast::BlockExpr>("{ Ok(std::ffi::OsString::from(\"localhost\")) }");
-                         editor.replace(body.syntax(), new_body.syntax());
-                     }
-                }
-                
-                if path_str.ends_with("brush-core/src/sys/stubs/fs.rs") && fn_name == "get_disk_usage" {
-                     if let Some(body) = func.body() {
-                         let new_body = parse_stmt::<ast::BlockExpr>("{ None }");
-                         editor.replace(body.syntax(), new_body.syntax());
-                     }
-                }
-                
-                if path_str.ends_with("brush-core/src/sys/stubs/process.rs") && fn_name == "get_memory_usage" {
-                     if let Some(body) = func.body() {
-                         let new_body = parse_stmt::<ast::BlockExpr>("{ None }");
-                         editor.replace(body.syntax(), new_body.syntax());
-                     }
-                }
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/users.rs",
+            path,
+            "get_current_username",
+            "{ Ok(\"user\".to_string()) }",
+        );
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/users.rs",
+            path,
+            "get_current_uid",
+            "{ crate::stubs_impl::get_current_uid() }",
+        );
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/users.rs",
+            path,
+            "get_current_gid",
+            "{ crate::stubs_impl::get_current_gid() }",
+        );
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/users.rs",
+            path,
+            "get_effective_uid",
+            "{ crate::stubs_impl::get_effective_uid() }",
+        );
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/users.rs",
+            path,
+            "get_effective_gid",
+            "{ crate::stubs_impl::get_effective_gid() }",
+        );
 
-                if path_str.ends_with("brush-core/src/sys/stubs/process.rs") && fn_name == "spawn" {
-                     if let Some(body) = func.body() {
-                         let new_body = parse_stmt::<ast::BlockExpr>("{ Err(std::io::Error::new(std::io::ErrorKind::Unsupported, \"spawn not supported\")) }");
-                         editor.replace(body.syntax(), new_body.syntax());
-                     }
-                }
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/fs.rs",
+            path,
+            "open_null_file",
+            "{ crate::stubs_impl::open_null_file() }",
+        );
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/fs.rs",
+            path,
+            "get_disk_usage",
+            "{ None }",
+        );
 
-                if path_str.ends_with("brush-core/src/sys/stubs/process.rs") && fn_name == "wait" {
-                     if let Some(body) = func.body() {
-                         let new_body = parse_stmt::<ast::BlockExpr>("{ Ok(crate::shims::exit_status::ExitStatus::from_raw(0)) }");
-                         editor.replace(body.syntax(), new_body.syntax());
-                     }
-                }
-                
-                if path_str.ends_with("brush-core/src/sys/stubs/commands.rs") && fn_name == "invoke_external_command" {
-                     if let Some(body) = func.body() {
-                         let new_body = parse_stmt::<ast::BlockExpr>("{ Err(crate::brush_core::error::Error::NotSupported) }");
-                         editor.replace(body.syntax(), new_body.syntax());
-                     }
-                }
-            }
-        }
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/commands.rs",
+            path,
+            "invoke_external_command",
+            "{ Err(crate::brush_core::error::Error::NotSupported) }",
+        );
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/commands.rs",
+            path,
+            "inject_fds",
+            "{ Ok(()) }",
+        );
+
+        self.stub_fn(editor, root, "brush-core/src/sys/stubs/process.rs", path, "spawn", "{ Err(std::io::Error::new(std::io::ErrorKind::Unsupported, \"spawn not supported\")) }");
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/process.rs",
+            path,
+            "wait",
+            "{ Ok(crate::shims::exit_status::ExitStatus::from_raw(0)) }",
+        );
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/process.rs",
+            path,
+            "get_memory_usage",
+            "{ None }",
+        );
+
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/signal.rs",
+            path,
+            "continue_process",
+            "{ Ok(()) }",
+        );
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/signal.rs",
+            path,
+            "kill_process",
+            "{ Ok(()) }",
+        );
+
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/openfiles.rs",
+            path,
+            "check_open_files_limit",
+            "{ Ok(()) }",
+        );
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/network.rs",
+            path,
+            "get_hostname",
+            "{ Ok(std::ffi::OsString::from(\"localhost\")) }",
+        );
     }
 
     fn apply_doc_conversions(&self, editor: &mut SyntaxEditor, root: &SyntaxNode) {
@@ -527,7 +811,10 @@ impl SemanticEngine {
         for func in root.descendants().filter_map(ast::Fn::cast) {
             if func.name().map(|n| n.text().to_string()) == Some("read_line".to_string()) {
                 // Skip input_backend.rs and read.rs as they handle read_line synchronously
-                if path_str.contains("input_backend.rs") || path_str.contains("read.rs") || path_str.contains("term_line_reader.rs") {
+                if path_str.contains("input_backend.rs")
+                    || path_str.contains("read.rs")
+                    || path_str.contains("term_line_reader.rs")
+                {
                     // eprintln!("Skipping async transform for {}", path_str);
                     continue;
                 }
@@ -535,27 +822,36 @@ impl SemanticEngine {
                 if func.async_token().is_none() {
                     let async_token = parse_token("async", SyntaxKind::ASYNC_KW);
                     if let Some(fn_token) = func.fn_token() {
+                        editor.insert(
+                            Position::before(fn_token.clone()),
+                            make::tokens::single_space(),
+                        );
                         editor.insert(Position::before(fn_token.clone()), async_token.clone());
-                        editor.insert(Position::before(fn_token.clone()), make::tokens::single_space());
                     }
                 }
             }
         }
-        
+
         // Method call .await addition
         for call in root.descendants().filter_map(ast::MethodCallExpr::cast) {
             if call.name_ref().map(|n| n.text().to_string()) == Some("read_line".to_string()) {
                 // Skip input_backend.rs and read.rs as they handle read_line synchronously
-                if path_str.contains("input_backend.rs") || path_str.contains("read.rs") || path_str.contains("term_line_reader.rs") {
+                if path_str.contains("input_backend.rs")
+                    || path_str.contains("read.rs")
+                    || path_str.contains("term_line_reader.rs")
+                {
                     continue;
                 }
 
-                let needs_await = call.syntax().parent()
+                let needs_await = call
+                    .syntax()
+                    .parent()
                     .and_then(ast::AwaitExpr::cast)
                     .is_none();
 
                 if needs_await {
-                    let detached_call = ast::MethodCallExpr::cast(call.syntax().clone_for_update()).unwrap();
+                    let detached_call =
+                        ast::MethodCallExpr::cast(call.syntax().clone_for_update()).unwrap();
                     let await_expr = make::expr_await(ast::Expr::MethodCallExpr(detached_call));
                     editor.replace(call.syntax(), await_expr.syntax().clone_for_update());
                 }
@@ -563,7 +859,12 @@ impl SemanticEngine {
         }
     }
 
-    fn apply_interactive_lib_transforms(&self, editor: &mut SyntaxEditor, root: &SyntaxNode, path: &Path) {
+    fn apply_interactive_lib_transforms(
+        &self,
+        editor: &mut SyntaxEditor,
+        root: &SyntaxNode,
+        path: &Path,
+    ) {
         let path_str = normalize_path(path);
         if !path_str.contains("interactive") {
             return;
@@ -572,13 +873,19 @@ impl SemanticEngine {
         // Find all cfg attributes that gate reedline/basic/minimal features
         for attr in root.descendants().filter_map(ast::Attr::cast) {
             if let Some(path) = attr.path() {
-                if path.segment().and_then(|s| s.name_ref()).map(|n| n.text().to_string()) == Some("cfg".to_string()) {
+                if path
+                    .segment()
+                    .and_then(|s| s.name_ref())
+                    .map(|n| n.text().to_string())
+                    == Some("cfg".to_string())
+                {
                     let attr_text = attr.syntax().text().to_string();
                     if attr_text.contains("feature = \"reedline\"")
                         || attr_text.contains("feature = \"basic\"")
                         || attr_text.contains("feature = \"minimal\"")
                     {
-                        let comment = parse_token(&format!("/* {} */", attr_text), SyntaxKind::COMMENT);
+                        let comment =
+                            parse_token(&format!("/* {} */", attr_text), SyntaxKind::COMMENT);
                         editor.insert(Position::before(attr.syntax()), comment);
                         editor.delete(attr.syntax());
                     }
@@ -591,7 +898,10 @@ impl SemanticEngine {
             if let Some(name) = module.name() {
                 let mod_name = name.text().to_string();
                 if mod_name == "reedline" || mod_name == "basic" || mod_name == "minimal" {
-                    let comment = parse_token(&format!("/* {} */", module.syntax().text()), SyntaxKind::COMMENT);
+                    let comment = parse_token(
+                        &format!("/* {} */", module.syntax().text()),
+                        SyntaxKind::COMMENT,
+                    );
                     editor.insert(Position::before(module.syntax()), comment);
                     editor.delete(module.syntax());
                 }
@@ -610,171 +920,321 @@ impl SemanticEngine {
 
         // Comment out pub use statements
         for use_item in root.descendants().filter_map(ast::Use::cast) {
-             let use_str = use_item.to_string();
-             if use_str.contains("reedline") || use_str.contains("basic") || use_str.contains("minimal") || use_str.contains("refs::ShellRef") {
-                 let comment = parse_token(&format!("/* {} */", use_str), SyntaxKind::COMMENT);
-                 editor.insert(Position::before(use_item.syntax()), comment);
-                 editor.delete(use_item.syntax());
-             }
+            let use_str = use_item.to_string();
+            if use_str.contains("reedline")
+                || use_str.contains("basic")
+                || use_str.contains("minimal")
+                || use_str.contains("refs::ShellRef")
+            {
+                let comment = parse_token(&format!("/* {} */", use_str), SyntaxKind::COMMENT);
+                editor.insert(Position::before(use_item.syntax()), comment);
+                editor.delete(use_item.syntax());
+            }
         }
     }
 
-    fn apply_additional_transforms_ast(&self, editor: &mut SyntaxEditor, root: &SyntaxNode, path: &Path) {
+    fn apply_additional_transforms_ast(
+        &self,
+        editor: &mut SyntaxEditor,
+        root: &SyntaxNode,
+        path: &Path,
+    ) {
         let path_str = normalize_path(path);
+        // println!("cargo:warning=Visiting: {}", path_str);
+        if path_str.ends_with("brush-interactive/src/lib.rs") {
+            println!("cargo:warning=MATCHED brush-interactive/src/lib.rs");
+        }
 
         // Crossterm redirect
         for path in root.descendants().filter_map(ast::Path::cast) {
-             // Skip if this path is part of a larger path (we'll handle the larger path)
-             if path.syntax().parent().map_or(false, |p| p.kind() == SyntaxKind::PATH) {
-                 continue;
-             }
+            // Skip if this path is part of a larger path (we'll handle the larger path)
+            if path
+                .syntax()
+                .parent()
+                .map_or(false, |p| p.kind() == SyntaxKind::PATH)
+            {
+                continue;
+            }
 
-             let segments: Vec<_> = path.segments().collect();
-             if let Some(first) = segments.first() {
-                 if first.name_ref().map_or(false, |n| n.text() == "crossterm") {
-                     let rest: Vec<_> = segments.iter().skip(1).map(|s| s.to_string()).collect();
-                     let new_path_text = if rest.is_empty() {
-                         "crate::brush_interactive::crossterm".to_string()
-                     } else {
-                         format!("crate::brush_interactive::crossterm::{}", rest.join("::"))
-                     };
-                     let new_path = make_mutable(make::path_from_text(&new_path_text));
-                     editor.replace(path.syntax(), new_path.syntax());
-                 }
-             }
+            let segments: Vec<_> = path.segments().collect();
+            if let Some(first) = segments.first() {
+                if first.name_ref().map_or(false, |n| n.text() == "crossterm") {
+                    let rest: Vec<_> = segments.iter().skip(1).map(|s| s.to_string()).collect();
+                    let new_path_text = if rest.is_empty() {
+                        "crate::shims::crossterm".to_string()
+                    } else {
+                        format!("crate::shims::crossterm::{}", rest.join("::"))
+                    };
+                    let new_path = make_mutable(make::path_from_text(&new_path_text));
+                    editor.replace(path.syntax(), new_path.syntax());
+                }
+            }
         }
 
         // ExitStatus redirect
         for path in root.descendants().filter_map(ast::Path::cast) {
-            if path.to_string() == "std::process::ExitStatus" || path.to_string() == "crate::brush_core::ExitStatus" {
-                let new_path = make_mutable(make::path_from_text("crate::shims::exit_status::ExitStatus"));
+            if path.to_string() == "std::process::ExitStatus"
+                || path.to_string() == "crate::brush_core::ExitStatus"
+            {
+                let new_path = make_mutable(make::path_from_text(
+                    "crate::shims::exit_status::ExitStatus",
+                ));
                 editor.replace(path.syntax(), new_path.syntax());
             }
         }
 
         // File specific patches
         if path_str.ends_with("uucore/src/lib/mods/locale.rs") {
-             for func in root.descendants().filter_map(ast::Fn::cast) {
-                 if func.name().map_or(false, |n| n.text() == "get_embedded_locale") {
-                     if let Some(name) = func.name() {
-                         let new_name = make::name("get_embedded_locale_unused");
-                         editor.replace(name.syntax(), new_name.syntax());
-                     }
-                 }
-             }
+            println!("cargo:warning=Patching locale.rs");
+            for func in root.descendants().filter_map(ast::Fn::cast) {
+                if func
+                    .name()
+                    .map_or(false, |n| n.text() == "get_embedded_locale")
+                {
+                    if let Some(name) = func.name() {
+                        let new_name = make::name("get_embedded_locale_unused");
+                        editor.replace(name.syntax(), new_name.syntax());
+                    }
+                }
+            }
+
+            // Fix include! macro
+            for macro_call in root.descendants().filter_map(ast::MacroCall::cast) {
+                if macro_call
+                    .path()
+                    .map_or(false, |p| p.to_string() == "include")
+                {
+                    if macro_call.to_string().contains("embedded_locales.rs") {
+                        let new_call =
+                            parse_stmt::<ast::MacroCall>("include!{\"../../embedded_locales.rs\"}");
+                        editor.replace(macro_call.syntax(), new_call.syntax());
+                    }
+                }
+            }
         }
-        
+
         if path_str.ends_with("brush-core/src/sys/stubs.rs") {
-             let has_use = root.descendants().filter_map(ast::Use::cast).any(|u| {
-                 u.to_string().contains("crate::stubs_impl")
-             });
-             if !has_use {
-                 let use_item = parse_node::<ast::Item>("pub use crate::stubs_impl::*;");
-                 if let Some(last) = root.last_child() {
-                     editor.insert(Position::after(last.clone()), make::tokens::single_newline());
-                     editor.insert(Position::after(last), use_item.syntax());
-                 }
-             }
+            let has_use = root
+                .descendants()
+                .filter_map(ast::Use::cast)
+                .any(|u| u.to_string().contains("crate::stubs_impl"));
+            if !has_use {
+                let use_item = parse_node::<ast::Item>("pub use crate::stubs_impl::*;");
+                if let Some(last) = root.last_child() {
+                    editor.insert(
+                        Position::after(last.clone()),
+                        make::tokens::single_newline(),
+                    );
+                    editor.insert(Position::after(last), use_item.syntax());
+                }
+            }
         }
 
         if path_str.ends_with("brush-core/src/shell.rs") {
-             for let_stmt in root.descendants().filter_map(ast::LetStmt::cast) {
-                 if let Some(pat) = let_stmt.pat() {
-                     if pat.to_string() == "oldpwd" {
-                         if let Some(init) = let_stmt.initializer() {
-                             if init.to_string().contains("std::mem::replace") {
-                                 let new_stmt = parse_stmt::<ast::Stmt>("let _ = std::env::set_current_dir(&self.working_dir);");
-                                 editor.insert(Position::after(let_stmt.syntax().clone()), make::tokens::single_newline());
-                                 editor.insert(Position::after(let_stmt.syntax().clone()), new_stmt.syntax());
-                             }
-                         }
-                     }
-                 }
-             }
+            for let_stmt in root.descendants().filter_map(ast::LetStmt::cast) {
+                if let Some(pat) = let_stmt.pat() {
+                    if pat.to_string() == "oldpwd" {
+                        if let Some(init) = let_stmt.initializer() {
+                            if init.to_string().contains("std::mem::replace") {
+                                let new_stmt = parse_stmt::<ast::Stmt>(
+                                    "let _ = std::env::set_current_dir(&self.working_dir);",
+                                );
+                                editor.insert(
+                                    Position::after(let_stmt.syntax().clone()),
+                                    make::tokens::single_newline(),
+                                );
+                                editor.insert(
+                                    Position::after(let_stmt.syntax().clone()),
+                                    new_stmt.syntax(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if path_str.ends_with("brush-builtins/src/lib.rs") {
-             // Add #[macro_export] to minus_or_plus_flag_arg
-             for macro_def in root.descendants().filter_map(ast::MacroRules::cast) {
-                 if macro_def.name().map_or(false, |n| n.text() == "minus_or_plus_flag_arg") {
-                     let has_attr = macro_def.attrs().any(|a| a.to_string().contains("macro_export"));
-                     if !has_attr {
-                         let attr = parse_node::<ast::Attr>("#[macro_export]");
-                         editor.insert(Position::before(macro_def.syntax()), attr.syntax());
-                         editor.insert(Position::before(macro_def.syntax()), make::tokens::single_newline());
-                     }
-                 }
-             }
+            // Add #[macro_export] to minus_or_plus_flag_arg
+            for macro_def in root.descendants().filter_map(ast::MacroRules::cast) {
+                if macro_def
+                    .name()
+                    .map_or(false, |n| n.text() == "minus_or_plus_flag_arg")
+                {
+                    let has_attr = macro_def
+                        .attrs()
+                        .any(|a| a.to_string().contains("macro_export"));
+                    if !has_attr {
+                        let attr = parse_node::<ast::Attr>("#[macro_export]");
+                        editor.insert(Position::before(macro_def.syntax()), attr.syntax());
+                        editor.insert(
+                            Position::before(macro_def.syntax()),
+                            make::tokens::single_newline(),
+                        );
+                    }
+                }
+            }
         }
 
-        if path_str.ends_with("brush-core/src/expansion.rs") {
-             // Add use std::future::Future;
-             let has_use = root.descendants().filter_map(ast::Use::cast).any(|u| {
-                 u.to_string().contains("std::future::Future")
-             });
-             if !has_use {
-                 let use_item = parse_node::<ast::Item>("use std::future::Future;");
-                 if let Some(last) = root.last_child() {
-                     editor.insert(Position::after(last.clone()), make::tokens::single_newline());
-                     editor.insert(Position::after(last), use_item.syntax());
-                 }
-             }
+
+
+        if path_str.contains("brush-core/src/expansion.rs") {
+            // Add use std::future::Future;
+            let has_use = root
+                .descendants()
+                .filter_map(ast::Use::cast)
+                .any(|u| u.to_string().contains("std::future::Future"));
+            if !has_use {
+                let use_item = parse_node::<ast::Item>("use std::future::Future;");
+                if let Some(last) = root.last_child() {
+                    editor.insert(
+                        Position::after(last.clone()),
+                        make::tokens::single_newline(),
+                    );
+                    editor.insert(Position::after(last), use_item.syntax());
+                }
+            }
         }
 
         if path_str.ends_with("brush-shell/src/lib.rs") {
-             // mod brushctl -> pub mod brushctl
-             for mod_item in root.descendants().filter_map(ast::Module::cast) {
-                 if mod_item.name().map_or(false, |n| n.text() == "brushctl") {
-                     if mod_item.visibility().is_none() {
-                         let pub_token = parse_token("pub", SyntaxKind::PUB_KW);
-                         if let Some(mod_token) = mod_item.mod_token() {
-                             editor.insert(Position::before(mod_token.clone()), pub_token);
-                             editor.insert(Position::before(mod_token), make::tokens::single_space());
-                         }
-                     }
-                 }
-             }
-             // Add pub mod embedded;
-             let has_mod = root.descendants().filter_map(ast::Module::cast).any(|m| {
-                 m.name().map_or(false, |n| n.text() == "embedded")
-             });
-             if !has_mod {
-                 let mod_item = parse_node::<ast::Item>("pub mod embedded;");
-                 if let Some(last) = root.last_child() {
-                     editor.insert(Position::after(last), mod_item.syntax());
-                 }
-             }
+            // mod brushctl -> pub mod brushctl
+            for mod_item in root.descendants().filter_map(ast::Module::cast) {
+                if mod_item.name().map_or(false, |n| n.text() == "brushctl") {
+                    if mod_item.visibility().is_none() {
+                        let pub_token = parse_token("pub", SyntaxKind::PUB_KW);
+                        if let Some(mod_token) = mod_item.mod_token() {
+                            editor.insert(
+                                Position::before(mod_token.clone()),
+                                make::tokens::single_space(),
+                            );
+                            editor.insert(Position::before(mod_token), pub_token);
+                        }
+                    }
+                }
+            }
+            // Add pub mod embedded;
+            let has_mod = root
+                .descendants()
+                .filter_map(ast::Module::cast)
+                .any(|m| m.name().map_or(false, |n| n.text() == "embedded"));
+            if !has_mod {
+                let mod_item = parse_node::<ast::Item>("pub mod embedded;");
+                if let Some(last) = root.last_child() {
+                    editor.insert(Position::after(last), mod_item.syntax());
+                }
+            }
         }
 
         if path_str.ends_with("brush-shell/src/brushctl.rs") {
-             // pub(crate) trait -> pub trait
-             for trait_def in root.descendants().filter_map(ast::Trait::cast) {
-                 if trait_def.name().map_or(false, |n| n.text() == "ShellBuilderBrushBuiltinExt") {
-                     if let Some(vis) = trait_def.visibility() {
-                         let pub_vis = make_mutable(make::visibility_pub());
-                         editor.replace(vis.syntax(), pub_vis.syntax());
-                     }
-                 }
-             }
+            // pub(crate) trait -> pub trait
+            for trait_def in root.descendants().filter_map(ast::Trait::cast) {
+                if trait_def
+                    .name()
+                    .map_or(false, |n| n.text() == "ShellBuilderBrushBuiltinExt")
+                {
+                    if let Some(vis) = trait_def.visibility() {
+                        let pub_vis = make_mutable(make::visibility_pub());
+                        editor.replace(vis.syntax(), pub_vis.syntax());
+                    }
+                }
+            }
         }
 
         if path_str.ends_with("brush-core/src/error.rs") {
-             // impl<T> From<T> for Error
-             for impl_def in root.descendants().filter_map(ast::Impl::cast) {
-                 if let Some(self_ty) = impl_def.self_ty() {
-                     if self_ty.to_string() == "Error" {
-                         if let Some(trait_) = impl_def.trait_() {
-                             if trait_.to_string().contains("From") {
-                                 let include_item = parse_node::<ast::Item>("include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/brush_error_impls.rs\"));");
-                                 editor.replace(impl_def.syntax(), include_item.syntax());
-                             }
-                         }
-                     }
-                 }
-             }
+            // impl<T> From<T> for Error
+            for impl_def in root.descendants().filter_map(ast::Impl::cast) {
+                if let Some(self_ty) = impl_def.self_ty() {
+                    if self_ty.to_string() == "Error" {
+                        if let Some(trait_) = impl_def.trait_() {
+                            if trait_.to_string().contains("From") {
+                                let include_item = parse_node::<ast::Item>("include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/brush_error_impls.rs\"));");
+                                editor.replace(impl_def.syntax(), include_item.syntax());
+                            }
+                        }
+                    }
+                }
+            }
         }
 
+        if path_str.ends_with("brush-shell/src/entry.rs") {
+            // Visibility
+            for func in root.descendants().filter_map(ast::Fn::cast) {
+                if let Some(name) = func.name() {
+                    if name.text() == "run_async" || name.text() == "try_parse_from" {
+                        if func.visibility().is_none() {
+                            let pub_vis = make_mutable(make::visibility_pub());
+                            // Check for async token to place pub before it
+                            if let Some(async_token) = func.async_token() {
+                                editor.insert(
+                                    Position::before(async_token.clone()),
+                                    make::tokens::single_space(),
+                                );
+                                editor.insert(Position::before(async_token), pub_vis.syntax());
+                            } else if let Some(fn_token) = func.fn_token() {
+                                editor.insert(
+                                    Position::before(fn_token.clone()),
+                                    make::tokens::single_space(),
+                                );
+                                editor.insert(Position::before(fn_token.clone()), pub_vis.syntax());
+                            }
+                        }
+                    }
+                }
+            }
 
+            // Method call replacement: shell.default_builtins(builtin_set) -> crate::stubs_impl::configure_shell(shell, builtin_set)
+            let mut handled_ranges = std::collections::HashSet::new();
+            // First pass: handle the larger expression
+            for call in root.descendants().filter_map(ast::MethodCallExpr::cast) {
+                let call_str = call.to_string();
+                if call_str == "shell.default_builtins(builtin_set).brush_builtins()" {
+                    let new_expr = parse_expr::<ast::Expr>(
+                        "crate::stubs_impl::configure_shell(shell, builtin_set)",
+                    );
+                    editor.replace(call.syntax(), new_expr.syntax());
+
+                    // Mark the inner expression as handled
+                    if let Some(receiver) = call.receiver() {
+                        handled_ranges.insert(receiver.syntax().text_range());
+                    }
+                }
+            }
+
+            // Second pass: handle the smaller expression if not already handled
+            for call in root.descendants().filter_map(ast::MethodCallExpr::cast) {
+                let call_str = call.to_string();
+                if call_str == "shell.default_builtins(builtin_set)" {
+                    if !handled_ranges.contains(&call.syntax().text_range()) {
+                        let new_expr = parse_expr::<ast::Expr>(
+                            "crate::stubs_impl::configure_shell(shell, builtin_set)",
+                        );
+                        editor.replace(call.syntax(), new_expr.syntax());
+                    }
+                }
+            }
+
+            // MinimalInputBackend replacement
+            for path in root.descendants().filter_map(ast::Path::cast) {
+                if path.to_string() == "brush_interactive::MinimalInputBackend"
+                    || path.to_string() == "crate::brush_interactive::MinimalInputBackend"
+                {
+                    if path
+                        .syntax()
+                        .parent()
+                        .map_or(false, |p| ast::PathExpr::can_cast(p.kind()))
+                    {
+                        let new_expr = parse_expr::<ast::Expr>(
+                            "crate::brush_interactive::MinimalInputBackend::new()",
+                        );
+                        if let Some(path_expr) =
+                            ast::PathExpr::cast(path.syntax().parent().unwrap())
+                        {
+                            editor.replace(path_expr.syntax(), new_expr.syntax());
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -786,29 +1246,6 @@ fn normalize_path(path: &Path) -> String {
     } else {
         s
     }
-}
-
-fn deduplicate_imports(content: &str) -> String {
-    use std::collections::HashSet;
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut lines: Vec<&str> = Vec::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("use ") && trimmed.ends_with(";") {
-            if seen.contains(trimmed) {
-                continue;
-            }
-            seen.insert(trimmed.to_string());
-        }
-        lines.push(line);
-    }
-
-    let mut result = lines.join("\n");
-    if !result.ends_with('\n') {
-        result.push('\n');
-    }
-    result
 }
 
 fn copy_sources(mappings: &[(&str, &str)], vendor_dir: &Path) {
@@ -902,4 +1339,3 @@ fn verify_no_stubs(vendor_dir: &Path) {
         );
     }
 }
-

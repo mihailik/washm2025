@@ -1,7 +1,7 @@
 use crate::bridges::eval::{eval_blocking, WasmHostFuture};
 use std::io::{self, Write};
 use serde::Deserialize;
-use super::{InputBackend, ReadResult, InteractivePrompt, ShellError, ShellRef};
+use crate::brush_interactive::{InputBackend, ReadResult, InteractivePrompt, ShellError, ShellRef};
 
 /// Event types parsed from raw input
 #[derive(Debug, Clone, PartialEq)]
