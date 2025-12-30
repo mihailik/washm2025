@@ -53,7 +53,6 @@ fn main() {
 
     // Copy source files to vendor directory
     copy_sources(&mappings, &vendor_dir);
-    
 
     // Section 4: Apply semantic transformations using RA
     engine.transform_all(&vendor_dir, &mappings);
@@ -215,7 +214,7 @@ impl SemanticEngine {
                 Ok(transformed) => {
                     if content != transformed {
                         if let Err(e) = fs::write(path, transformed) {
-                             eprintln!("Failed to write {:?}: {}", path, e);
+                            eprintln!("Failed to write {:?}: {}", path, e);
                         }
                     }
                 }
@@ -239,31 +238,46 @@ impl SemanticEngine {
 
         // String-based pre-processing for macros and hard-to-parse constructs
         if path_str.ends_with("brush-core/src/expansion.rs") {
-             content = content.replace("crate::regex", "crate::brush_core::regex");
+            content = content.replace("crate::regex", "crate::brush_core::regex");
         }
         if path_str.ends_with("brush-core/src/wellknownvars.rs") {
-             content = content.replace("crate::callstack", "crate::brush_core::callstack");
+            content = content.replace("crate::callstack", "crate::brush_core::callstack");
         }
         if path_str.ends_with("brush-core/src/prompt.rs") {
-             content = content.replace("brush_parser::", "crate::brush_parser::");
-             content = content.replace("crate::crate::brush_parser", "crate::brush_parser");
+            content = content.replace("brush_parser::", "crate::brush_parser::");
+            content = content.replace("crate::crate::brush_parser", "crate::brush_parser");
         }
 
         if path_str.ends_with("brush-shell/src/entry.rs") {
-             println!("cargo:warning=Patching entry.rs");
-             content = content.replace("brush_interactive::MinimalInputBackend", "crate::wasm_interactive::MinimalInputBackend");
-             content = content.replace("let mut ui = crate::wasm_interactive::MinimalInputBackend;", "let mut ui = crate::wasm_interactive::MinimalInputBackend::new();");
-             content = content.replace("brush_interactive::WasmInputBackend", "crate::wasm_interactive::WasmInputBackend");
-             content = content.replace("brush_interactive::ReedlineInputBackend", "crate::wasm_interactive::ReedlineInputBackend");
-             content = content.replace("brush_interactive::BasicInputBackend", "crate::wasm_interactive::BasicInputBackend");
+            println!("cargo:warning=Patching entry.rs");
+            content = content.replace(
+                "brush_interactive::MinimalInputBackend",
+                "crate::wasm_interactive::MinimalInputBackend",
+            );
+            content = content.replace(
+                "let mut ui = crate::wasm_interactive::MinimalInputBackend;",
+                "let mut ui = crate::wasm_interactive::MinimalInputBackend::new();",
+            );
+            content = content.replace(
+                "brush_interactive::WasmInputBackend",
+                "crate::wasm_interactive::WasmInputBackend",
+            );
+            content = content.replace(
+                "brush_interactive::ReedlineInputBackend",
+                "crate::wasm_interactive::ReedlineInputBackend",
+            );
+            content = content.replace(
+                "brush_interactive::BasicInputBackend",
+                "crate::wasm_interactive::BasicInputBackend",
+            );
         }
 
         if path_str.ends_with("uucore/src/lib/lib.rs") {
-             println!("cargo:warning=Patching uucore lib.rs");
-             content = content.replace(
-                 "pub fn localized_help_template_with_colors(",
-                 "use crate::translate;\npub fn localized_help_template_with_colors("
-             );
+            println!("cargo:warning=Patching uucore lib.rs");
+            content = content.replace(
+                "pub fn localized_help_template_with_colors(",
+                "use crate::translate;\npub fn localized_help_template_with_colors(",
+            );
         }
 
         if path_str.contains("input_backend.rs") || path_str.contains("term_line_reader.rs") {
@@ -379,8 +393,16 @@ impl SemanticEngine {
 
                     if !rest.is_empty() {
                         let second_seg = &rest[0];
-                        let excluded = ["shims", "bridges", "bootstrap", "wasm_interactive", "translate"];
-                        if !vendored_crates.contains(&second_seg.as_str()) && !excluded.contains(&second_seg.as_str()) {
+                        let excluded = [
+                            "shims",
+                            "bridges",
+                            "bootstrap",
+                            "wasm_interactive",
+                            "translate",
+                        ];
+                        if !vendored_crates.contains(&second_seg.as_str())
+                            && !excluded.contains(&second_seg.as_str())
+                        {
                             // Replace crate::foo with crate::current_module::foo
                             let new_path_text =
                                 format!("crate::{}::{}", current_module, rest.join("::"));
@@ -431,8 +453,6 @@ impl SemanticEngine {
 
         edits
     }
-
-
 
     fn stub_fn(
         &self,
@@ -568,7 +588,10 @@ impl SemanticEngine {
                         .parent_ancestors()
                         .any(|n| ast::MacroCall::can_cast(n.kind()))
                     {
-                        println!("cargo:warning=Rewriting macro path '{}' -> '{}'", old_path, new_path);
+                        println!(
+                            "cargo:warning=Rewriting macro path '{}' -> '{}'",
+                            old_path, new_path
+                        );
                         // Replace first token with first new token
                         let (first_text, first_kind) = &new_tokens_info[0];
                         let first_new_token = parse_token(first_text, *first_kind);
@@ -613,12 +636,7 @@ impl SemanticEngine {
                 "crate::callstack",
                 "crate::brush_core::callstack",
             );
-            self.rewrite_path(
-                editor,
-                root,
-                "callstack",
-                "crate::brush_core::callstack",
-            );
+            self.rewrite_path(editor, root, "callstack", "crate::brush_core::callstack");
             self.rewrite_macro_path(
                 editor,
                 root,
@@ -1075,8 +1093,6 @@ impl SemanticEngine {
                 }
             }
         }
-
-
 
         if path_str.contains("brush-core/src/expansion.rs") {
             // Add use std::future::Future;

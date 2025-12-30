@@ -6,7 +6,8 @@ const BRIDGE_JS: &str = include_str!("process.js");
 
 pub fn ensure_bridge() -> Result<(), String> {
     let js = format!("{}\n//# sourceURL=bridges/process.js\n", BRIDGE_JS);
-    eval_blocking(&js).map(|_| ())
+    crate::bootstrap::eval_fire_and_forget(&js);
+    Ok(())
 }
 
 #[derive(Serialize)]

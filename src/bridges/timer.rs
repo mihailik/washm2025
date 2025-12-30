@@ -7,7 +7,8 @@ const BRIDGE_JS: &str = include_str!("timer.js");
 
 pub fn ensure_bridge() -> Result<(), String> {
     let js = format!("{}\n//# sourceURL=bridges/timer.js\n", BRIDGE_JS);
-    eval_blocking(&js).map(|_| ())
+    crate::bootstrap::eval_fire_and_forget(&js);
+    Ok(())
 }
 
 /// Asynchronously sleep for the given duration by delegating to JS setTimeout.

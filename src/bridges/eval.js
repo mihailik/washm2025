@@ -27,7 +27,6 @@
                 }
               };
               const handleError = (err) => {
-                console.error("VFS: JS Error:", err);
                 state.json = JSON.stringify({ ok: false, error: String(err) });
                 const instance = globalThis.__washm_bootstrap.instance;
                 if (instance && typeof instance.exports._continue === 'function') {

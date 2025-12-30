@@ -31,9 +31,9 @@ pub use uucore::locale;
 
 pub mod bootstrap;
 pub mod bridges;
+pub mod interp_log;
 pub mod platform;
 pub mod wasm_interactive;
-pub mod interp_log;
 
 pub mod shims;
 pub mod stubs_impl;
@@ -60,19 +60,20 @@ mod test_command;
 /// Standard WASI Reactor initialization.
 #[no_mangle]
 pub extern "C" fn washm_init() {
-    // 1. Load protocol (critical for VFS)
+    // 0. Initialize TTY bridge first (so it's the inner layer)
+    let _ = bridges::tty::ensure_bridge();
+
+    // 1. Load protocol (critical for VFS, wraps TTY)
     bootstrap::bootstrap_host_protocol();
 
     // 2. Load eval (critical for other bridges)
     let _ = bridges::eval::ensure_bridge();
 
     // 4. Close bootstrap FD to trigger host eval
-    bootstrap::close_bootstrap();
 
     // 5. Initialize other bridges
     let _ = bridges::host::ensure_bridge();
     let _ = bridges::process::ensure_bridge();
-    let _ = bridges::tty::ensure_bridge();
     let _ = bridges::timer::ensure_bridge();
 
     // Always start the Brush REPL

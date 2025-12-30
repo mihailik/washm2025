@@ -68,7 +68,7 @@ const BRIDGE_JS: &str = include_str!("eval.js");
 
 pub fn ensure_bridge() -> Result<(), String> {
     let js = format!("{}\n//# sourceURL=bridges/eval.js\n", BRIDGE_JS);
-    crate::bootstrap::write_js(&js);
+    crate::bootstrap::eval_fire_and_forget(&js);
     Ok(())
 }
 
@@ -110,7 +110,6 @@ impl Future for WasmHostFuture {
 }
 
 pub fn eval_blocking(js: &str) -> Result<String, String> {
-    // eprintln!("eval_blocking: starting");
     init_maps();
     let cookie = next_cookie();
     let path = Path::new("/dev/host/eval");
@@ -118,19 +117,36 @@ pub fn eval_blocking(js: &str) -> Result<String, String> {
         let _ = fs::create_dir_all(path);
     }
     let req = path.join(format!("{}.js", cookie));
-    // eprintln!("eval_blocking: writing to {:?}", req);
     if let Err(e) = fs::write(&req, js.as_bytes()) {
-        // eprintln!("eval_blocking: write failed: {}", e);
         return Err(e.to_string());
     }
-    // eprintln!("eval_blocking: waiting for result");
 
     let mut results = RESULTS.get().unwrap().lock().unwrap();
     if let Some(res) = results.remove(&cookie) {
-        // eprintln!("eval_blocking: got result");
         Ok(res)
     } else {
-        Err("eval_blocking: result not ready immediately".to_string())
+        // Include a snippet of the eval script to aid debugging. If the script is
+        // longer than 7 lines include the first 4 and last 3 lines.
+        let lines: Vec<&str> = js.lines().collect();
+        let snippet = if lines.len() <= 7 {
+            js.to_string()
+        } else {
+            let mut s = String::new();
+            for l in &lines[0..4] {
+                s.push_str(l);
+                s.push('\n');
+            }
+            s.push_str("...\n");
+            for l in &lines[lines.len().saturating_sub(3)..] {
+                s.push_str(l);
+                s.push('\n');
+            }
+            s
+        };
+        Err(format!(
+            "ERROR error: I/O error: eval_blocking: result not ready immediately\n{}",
+            snippet
+        ))
     }
 }
 

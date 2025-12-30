@@ -22,7 +22,9 @@ pub fn set_platform(is_browser: bool) {
 
 /// Detect the platform - returns cached value or defaults to Node
 pub fn detect_platform() -> Platform {
-    CACHED_PLATFORM.with(|cell| cell.get()).unwrap_or(Platform::Node)
+    CACHED_PLATFORM
+        .with(|cell| cell.get())
+        .unwrap_or(Platform::Node)
 }
 
 /// Check if we're running in a browser environment

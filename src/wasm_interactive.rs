@@ -1,7 +1,7 @@
 use crate::bridges::eval::{eval_blocking, WasmHostFuture};
-use std::io::{self, Write};
+use crate::brush_interactive::{InputBackend, InteractivePrompt, ReadResult, ShellError, ShellRef};
 use serde::Deserialize;
-use crate::brush_interactive::{InputBackend, ReadResult, InteractivePrompt, ShellError, ShellRef};
+use std::io::{self, Write};
 
 /// Event types parsed from raw input
 #[derive(Debug, Clone, PartialEq)]
@@ -192,12 +192,19 @@ pub struct WasmInputBackend {
 }
 
 impl InputBackend for WasmInputBackend {
-    async fn read_line(&mut self, _shell: &ShellRef, prompt: InteractivePrompt) -> Result<ReadResult, ShellError> {
+    async fn read_line(
+        &mut self,
+        _shell: &ShellRef,
+        prompt: InteractivePrompt,
+    ) -> Result<ReadResult, ShellError> {
         match self.read_line_internal(&prompt.prompt).await {
             Ok(s) => Ok(ReadResult::Input(s)),
             Err(e) if e == "EOF" => Ok(ReadResult::Eof),
             Err(e) if e == "Interrupted" => Ok(ReadResult::Interrupted),
-            Err(e) => Err(ShellError::from(std::io::Error::new(std::io::ErrorKind::Other, e))),
+            Err(e) => Err(ShellError::from(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e,
+            ))),
         }
     }
 }
@@ -229,7 +236,7 @@ impl WasmInputBackend {
             struct RawModeResult {
                 ok: bool,
             }
-            
+
             if let Ok(result) = serde_json::from_str::<RawModeResult>(&res_json) {
                 return result.ok;
             }
@@ -242,11 +249,11 @@ impl WasmInputBackend {
     /// Piped mode: read until newline
     async fn read_line_piped(&self) -> Result<String, String> {
         let mut line = String::new();
-        
+
         loop {
             let fut = WasmHostFuture::new("washm_tty.read()");
             let res_json = fut.await.map_err(|e| e.to_string())?;
-            
+
             #[derive(Deserialize)]
             struct HostResult {
                 ok: bool,
@@ -254,13 +261,15 @@ impl WasmInputBackend {
                 error: Option<String>,
             }
 
-            let host_res: HostResult = serde_json::from_str(&res_json)
-                .map_err(|e| format!("JSON error: {}", e))?;
-            
+            let host_res: HostResult =
+                serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
+
             if !host_res.ok {
-                return Err(host_res.error.unwrap_or_else(|| "Unknown host error".to_string()));
+                return Err(host_res
+                    .error
+                    .unwrap_or_else(|| "Unknown host error".to_string()));
             }
-            
+
             match host_res.result {
                 None => {
                     if line.is_empty() {
@@ -289,14 +298,14 @@ impl WasmInputBackend {
         print!("{}{}", prompt, buffer.to_string());
         // 3. Clear to end of line
         print!("\x1b[K");
-        
+
         // 4-5. Move cursor to correct position
         // Move left from end of line if cursor is not at the end
         let chars_from_end = buffer.len().saturating_sub(buffer.cursor);
         if chars_from_end > 0 {
             print!("\x1b[{}D", chars_from_end);
         }
-        
+
         io::stdout().flush().map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -305,7 +314,7 @@ impl WasmInputBackend {
     async fn fetch_events(&mut self) -> Result<Vec<Event>, String> {
         let fut = WasmHostFuture::new("washm_tty.read()");
         let res_json = fut.await.map_err(|e| e.to_string())?;
-        
+
         #[derive(Deserialize)]
         struct HostResult {
             ok: bool,
@@ -313,24 +322,26 @@ impl WasmInputBackend {
             error: Option<String>,
         }
 
-        let host_res: HostResult = serde_json::from_str(&res_json)
-            .map_err(|e| format!("JSON error: {}", e))?;
-        
+        let host_res: HostResult =
+            serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
+
         if !host_res.ok {
-            return Err(host_res.error.unwrap_or_else(|| "Unknown host error".to_string()));
+            return Err(host_res
+                .error
+                .unwrap_or_else(|| "Unknown host error".to_string()));
         }
-        
+
         match host_res.result {
             None => Err("EOF".to_string()),
             Some(s) => {
                 let mut events = Vec::new();
-                
+
                 for c in s.chars() {
                     if let Some(event) = self.parser.parse(c) {
                         events.push(event);
                     }
                 }
-                
+
                 Ok(events)
             }
         }
@@ -339,17 +350,17 @@ impl WasmInputBackend {
     /// Interactive mode: full line editing with history
     async fn read_line_interactive(&mut self, prompt: &str) -> Result<String, String> {
         let mut buffer = LineBuffer::new();
-        
+
         // Reset history navigation state
         self.history_index = None;
         self.draft_line = None;
-        
+
         // Initial render
         self.render(prompt, &buffer)?;
-        
+
         loop {
             let events = self.fetch_events().await?;
-            
+
             for event in events {
                 match event {
                     Event::Char(c) => {
@@ -379,12 +390,12 @@ impl WasmInputBackend {
                         if self.history.is_empty() {
                             continue;
                         }
-                        
+
                         // Save current draft if this is first history navigation
                         if self.history_index.is_none() {
                             self.draft_line = Some(buffer.to_string());
                         }
-                        
+
                         let current_idx = self.history_index.unwrap_or(self.history.len());
                         if current_idx > 0 {
                             let new_idx = current_idx - 1;
@@ -416,12 +427,12 @@ impl WasmInputBackend {
                     Event::Enter => {
                         println!();
                         let line = buffer.to_string();
-                        
+
                         // Add to history if non-empty
                         if !line.trim().is_empty() {
                             self.history.push(line.clone());
                         }
-                        
+
                         return Ok(line);
                     }
                     Event::Ctrl('c') => {
@@ -453,10 +464,10 @@ impl WasmInputBackend {
         if let Err(e) = self.ensure_initialized().await {
             return Err(e);
         }
-        
+
         // Step 1: Mode detection
         let is_interactive = self.try_enable_raw_mode().await;
-        
+
         if is_interactive {
             // Interactive mode with full line editing
             self.read_line_interactive(prompt).await

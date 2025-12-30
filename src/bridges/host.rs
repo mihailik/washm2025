@@ -5,7 +5,8 @@ const BRIDGE_JS: &str = include_str!("host.js");
 
 pub fn ensure_bridge() -> Result<(), String> {
     let js = format!("{}\n//# sourceURL=bridges/host.js\n", BRIDGE_JS);
-    eval_blocking(&js).map(|_| ())
+    crate::bootstrap::eval_fire_and_forget(&js);
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]

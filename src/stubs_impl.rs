@@ -337,7 +337,10 @@ impl GuestChild {
     }
 
     // Create ExitStatus
-    fn create_exit_status(&self, code: i32) -> std::io::Result<crate::shims::exit_status::ExitStatus> {
+    fn create_exit_status(
+        &self,
+        code: i32,
+    ) -> std::io::Result<crate::shims::exit_status::ExitStatus> {
         Ok(crate::shims::exit_status::ExitStatus::from_raw(code))
     }
 }
