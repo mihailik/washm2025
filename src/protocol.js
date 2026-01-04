@@ -1,7 +1,7 @@
 (function() {
   const target = globalThis.__washm_bootstrap.wasiSnapshot;
   const memory = globalThis.__washm_bootstrap.instance.exports.memory;
-  const require = globalThis.__washm_bootstrap.require;
+  const require = globalThis.__washm_bootstrap ? globalThis.__washm_bootstrap.require : null;
 
   const fdToVfs = new Map();
   let nextFakeFd = 500;
@@ -34,7 +34,7 @@
     return null;
   }
 
-  const orig_path_open = target.path_open.actual;
+  const orig_path_open = target.path_open ? target.path_open.actual : null;
   target.path_open.actual = function (dirfd, dirflags, path_ptr, path_len, oflags, fs_rights_base, fs_rights_inheriting, fdflags, fd_out_ptr) {
     let p = readStringFromMemory(path_ptr, path_len);
     p = normalizePath(p);
@@ -53,10 +53,13 @@
         return 0;
       }
     }
-    return orig_path_open(dirfd, dirflags, path_ptr, path_len, oflags, fs_rights_base, fs_rights_inheriting, fdflags, fd_out_ptr);
+    if (orig_path_open) {
+      return orig_path_open(dirfd, dirflags, path_ptr, path_len, oflags, fs_rights_base, fs_rights_inheriting, fdflags, fd_out_ptr);
+    }
+    return 28; // ENOSYS
   };
 
-  const orig_fd_read = target.fd_read.actual;
+  const orig_fd_read = target.fd_read ? target.fd_read.actual : null;
   target.fd_read.actual = function (fd, iovs_ptr, iovs_len, nread_ptr) {
     if (fdToVfs.has(fd)) {
       const entry = fdToVfs.get(fd);
@@ -67,7 +70,7 @@
         content = entry.content;
       }
       
-      const buf = Buffer.from(content);
+      const buf = new TextEncoder().encode(content);
       const slice = buf.slice(entry.pos);
       const dv = new DataView(memory.buffer);
       let total = 0;
@@ -85,10 +88,13 @@
       writeU32(nread_ptr, total);
       return 0;
     }
-    return orig_fd_read(fd, iovs_ptr, iovs_len, nread_ptr);
+    if (orig_fd_read) {
+      return orig_fd_read(fd, iovs_ptr, iovs_len, nread_ptr);
+    }
+    return 28; // ENOSYS
   };
 
-  const orig_fd_write = target.fd_write.actual;
+  const orig_fd_write = target.fd_write ? target.fd_write.actual : null;
   target.fd_write.actual = function (fd, iovs_ptr, iovs_len, nwritten_ptr) {
     if (fdToVfs.has(fd)) {
       const entry = fdToVfs.get(fd);
@@ -106,10 +112,13 @@
       writeU32(nwritten_ptr, total);
       return 0;
     }
-    return orig_fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr);
+    if (orig_fd_write) {
+      return orig_fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr);
+    }
+    return 28; // ENOSYS
   };
 
-  const orig_fd_close = target.fd_close.actual;
+  const orig_fd_close = target.fd_close ? target.fd_close.actual : null;
   target.fd_close.actual = function (fd) {
     if (fdToVfs.has(fd)) {
       const entry = fdToVfs.get(fd);
@@ -118,10 +127,13 @@
       fdToVfs.delete(fd);
       return 0;
     }
-    return orig_fd_close(fd);
+    if (orig_fd_close) {
+      return orig_fd_close(fd);
+    }
+    return 0; // Success
   };
 
-  const orig_path_filestat_get = target.path_filestat_get.actual;
+  const orig_path_filestat_get = target.path_filestat_get ? target.path_filestat_get.actual : null;
   target.path_filestat_get.actual = function (fd, flags, path_ptr, path_len, buf_ptr) {
     let p = readStringFromMemory(path_ptr, path_len);
     p = normalizePath(p);
@@ -134,14 +146,17 @@
         dv.setUint8(buf_ptr + 16, isDir ? 3 : 4);
         let size = 0;
         if (typeof targetVal === 'string') {
-          size = Buffer.from(targetVal).length;
+          size = new TextEncoder().encode(targetVal).length;
         } else if (targetVal && targetVal.read) {
-          size = Buffer.from(targetVal.read()).length;
+          size = new TextEncoder().encode(targetVal.read()).length;
         }
         dv.setBigUint64(buf_ptr + 32, BigInt(size), true);
         return 0;
       }
     }
-    return orig_path_filestat_get(fd, flags, path_ptr, path_len, buf_ptr);
+    if (orig_path_filestat_get) {
+      return orig_path_filestat_get(fd, flags, path_ptr, path_len, buf_ptr);
+    }
+    return 28; // ENOSYS
   };
 })();

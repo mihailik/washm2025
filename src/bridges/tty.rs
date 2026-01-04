@@ -1,4 +1,5 @@
 use crate::bridges::eval::eval_blocking;
+use crate::platform;
 use serde::Deserialize;
 
 const BRIDGE_JS: &str = include_str!("tty.js");
@@ -19,20 +20,31 @@ struct HostResult {
 }
 
 pub fn ensure_bridge() -> Result<(), String> {
-    let js = format!("{}\n//# sourceURL=bridges/tty.js\n", BRIDGE_JS);
-    let res_json = eval_blocking(&js)?;
-    let host_res: HostResult =
-        serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
-    if !host_res.ok {
-        return Err(host_res
-            .error
-            .unwrap_or_else(|| "Unknown bridge init error".to_string()));
+    // Detect platform and delegate to appropriate bridge
+    if platform::is_browser() {
+        crate::bridges::browser_tty::ensure_bridge()
+    } else {
+        // Node.js path
+        let js = format!("{}\n//# sourceURL=bridges/tty.js\n", BRIDGE_JS);
+        let res_json = eval_blocking(&js)?;
+        let host_res: HostResult =
+            serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
+        if !host_res.ok {
+            return Err(host_res
+                .error
+                .unwrap_or_else(|| "Unknown bridge init error".to_string()));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 pub fn enable_raw_mode() -> Result<(), String> {
     ensure_bridge()?;
+    
+    if platform::is_browser() {
+        return crate::bridges::browser_tty::enable_raw_mode();
+    }
+    
     let res_json = eval_blocking("washm_tty.enableRaw()")?;
     let host_res: HostResult =
         serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
@@ -55,6 +67,11 @@ pub fn enable_raw_mode() -> Result<(), String> {
 
 pub fn disable_raw_mode() -> Result<(), String> {
     ensure_bridge()?;
+    
+    if platform::is_browser() {
+        return crate::bridges::browser_tty::disable_raw_mode();
+    }
+    
     let res_json = eval_blocking("washm_tty.disableRaw()")?;
     let host_res: HostResult =
         serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;
@@ -77,6 +94,11 @@ pub fn disable_raw_mode() -> Result<(), String> {
 
 pub fn size() -> Result<(u16, u16), String> {
     ensure_bridge()?;
+    
+    if platform::is_browser() {
+        return crate::bridges::browser_tty::size();
+    }
+    
     let res_json = eval_blocking("washm_tty.size()")?;
     let host_res: HostResult =
         serde_json::from_str(&res_json).map_err(|e| format!("JSON error: {}", e))?;

@@ -1,9 +1,17 @@
 (function() {
-  const require = globalThis.__washm_bootstrap.require;
-  const os = require('os');
+  const require = globalThis.__washm_bootstrap ? globalThis.__washm_bootstrap.require : null;
+  const os = require ? require('os') : null;
+  const process = globalThis.process || null;
+  const fs = require ? require('fs') : null;
+  const cp = require ? require('child_process') : null;
 
   globalThis.mounted = globalThis.mounted || {};
   globalThis.mounted.process = globalThis.mounted.process || {};
+  
+  // In browser, process spawning is not supported
+  if (!cp) {
+    return;
+  }
   
   globalThis.mounted.process['spawn.json'] = {
     _isVirtualFile: true,
@@ -13,23 +21,22 @@
         if (!this._buf) return;
         const req = JSON.parse(this._buf);
         if (!req.program) return;
-        const cp = require('child_process');
         const stdio = [
           req.fds && req.fds['0'] === 'pipe' ? 'pipe' : 'inherit',
           req.fds && req.fds['1'] === 'pipe' ? 'pipe' : 'inherit',
           req.fds && req.fds['2'] === 'pipe' ? 'pipe' : 'inherit'
         ];
         let programToSpawn = req.program || '';
-        if (programToSpawn.includes('/') && !require('fs').existsSync(programToSpawn)) {
+        if (programToSpawn.includes('/') && fs && !fs.existsSync(programToSpawn)) {
           programToSpawn = programToSpawn.split('/').pop();
         }
         const child = cp.spawn(programToSpawn, req.args || [], {
           cwd: (
-            os.platform() === 'win32' && req.cwd ?
+            os && os.platform() === 'win32' && req.cwd ?
               (/^\/[a-zA-Z]:/.test(req.cwd) ? req.cwd.slice(1) : req.cwd).replace(/\//g, '\\') :
               req.cwd
-          ) || process.cwd(),
-          env: req.env ? Object.assign({}, process.env, req.env) : process.env,
+          ) || (process ? process.cwd() : '/'),
+          env: req.env && process ? Object.assign({}, process.env, req.env) : (process ? process.env : {}),
           stdio,
           shell: true
         });

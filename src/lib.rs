@@ -31,6 +31,7 @@ pub use uucore::locale;
 
 pub mod bootstrap;
 pub mod bridges;
+pub mod platform;
 pub mod wasm_interactive;
 pub mod interp_log;
 
@@ -85,6 +86,12 @@ pub extern "C" fn washm_init() {
 
 // Re-export _continue from bridges::eval for the Host
 pub use crate::bridges::eval::_continue;
+
+// Export platform setter for JavaScript bootstrap
+#[no_mangle]
+pub extern "C" fn washm_set_platform(is_browser: i32) {
+    platform::set_platform(is_browser != 0);
+}
 
 #[no_mangle]
 pub extern "C" fn _start() {

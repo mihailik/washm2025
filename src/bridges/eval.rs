@@ -125,14 +125,12 @@ pub fn eval_blocking(js: &str) -> Result<String, String> {
     }
     // eprintln!("eval_blocking: waiting for result");
 
-    loop {
-        let mut results = RESULTS.get().unwrap().lock().unwrap();
-        if let Some(res) = results.remove(&cookie) {
-            // eprintln!("eval_blocking: got result");
-            return Ok(res);
-        }
-        drop(results);
-        std::thread::yield_now();
+    let mut results = RESULTS.get().unwrap().lock().unwrap();
+    if let Some(res) = results.remove(&cookie) {
+        // eprintln!("eval_blocking: got result");
+        Ok(res)
+    } else {
+        Err("eval_blocking: result not ready immediately".to_string())
     }
 }
 

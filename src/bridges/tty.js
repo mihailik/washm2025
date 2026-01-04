@@ -1,6 +1,14 @@
 (function() {
     if (globalThis.washm_tty) return { ok: true };
 
+    const require = globalThis.__washm_bootstrap ? globalThis.__washm_bootstrap.require : null;
+    const process = globalThis.process || null;
+    
+    // Browser doesn't support Node.js TTY
+    if (!require || !process || !process.stdin) {
+        return { ok: true }; // Return success but don't set up washm_tty
+    }
+
     const fs = require('fs');
     let buffer = [];
     let pendingResolve = null;
