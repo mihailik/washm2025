@@ -1,4 +1,5 @@
 // @ts-check
+/// <reference path="../globals.d.ts" />
 
 const evalState = new Map();
 

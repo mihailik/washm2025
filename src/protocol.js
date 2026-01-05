@@ -1,17 +1,18 @@
+// @ts-check
+/// <reference path="./globals.d.ts" />
+
 const target = globalThis.__washm_bootstrap.wasiSnapshot;
-const memory = globalThis.__washm_bootstrap.instance.exports.memory;
-const require = globalThis.__washm_bootstrap ? globalThis.__washm_bootstrap.require : null;
 
 const fdToVfs = new Map();
 let nextFakeFd = 20260105;
 globalThis.mounted = {};
 
 function readStringFromMemory(ptr, len) {
-  return new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
+  return new TextDecoder().decode(new Uint8Array(instance.exports.memory.buffer, ptr, len));
 }
 
 function writeU32(ptr, val) {
-  new DataView(memory.buffer).setUint32(ptr, val, true);
+  new DataView(instance.exports.memory.buffer).setUint32(ptr, val, true);
 }
 
 function normalizePath(p) {
@@ -70,7 +71,7 @@ target.fd_read.actual = function (fd, iovs_ptr, iovs_len, nread_ptr) {
     
     const buf = new TextEncoder().encode(content);
     const slice = buf.slice(entry.pos);
-    const dv = new DataView(memory.buffer);
+    const dv = new DataView(instance.exports.memory.buffer);
     let total = 0;
     let remaining = slice.length;
     for (let i = 0; i < iovs_len && remaining > 0; i++) {
@@ -78,7 +79,7 @@ target.fd_read.actual = function (fd, iovs_ptr, iovs_len, nread_ptr) {
       const bufPtr = dv.getUint32(off, true);
       const bufLen = dv.getUint32(off + 4, true);
       const toWrite = Math.min(bufLen, remaining);
-      new Uint8Array(memory.buffer, bufPtr, toWrite).set(slice.slice(total, total + toWrite));
+      new Uint8Array(instance.exports.memory.buffer, bufPtr, toWrite).set(slice.slice(total, total + toWrite));
       total += toWrite;
       remaining -= toWrite;
     }
@@ -96,13 +97,13 @@ const orig_fd_write = target.fd_write ? target.fd_write.actual : null;
 target.fd_write.actual = function (fd, iovs_ptr, iovs_len, nwritten_ptr) {
   if (fdToVfs.has(fd)) {
     const entry = fdToVfs.get(fd);
-    const dv = new DataView(memory.buffer);
+    const dv = new DataView(instance.exports.memory.buffer);
     let total = 0;
     for (let i = 0; i < iovs_len; i++) {
       const off = iovs_ptr + i * 8;
       const bufPtr = dv.getUint32(off, true);
       const bufLen = dv.getUint32(off + 4, true);
-      const chunk = new TextDecoder().decode(new Uint8Array(memory.buffer, bufPtr, bufLen));
+      const chunk = new TextDecoder().decode(new Uint8Array(instance.exports.memory.buffer, bufPtr, bufLen));
       if (entry.target && entry.target.write) entry.target.write(chunk);
       if (entry.write) entry.write(chunk);
       total += bufLen;
@@ -138,7 +139,7 @@ target.path_filestat_get.actual = function (fd, flags, path_ptr, path_len, buf_p
   if (p.startsWith('dev/host/') || p === 'dev/host') {
     const targetVal = resolveMounted(p);
     if (targetVal || p === 'dev/host/washm/exit_code') {
-      const dv = new DataView(memory.buffer);
+      const dv = new DataView(instance.exports.memory.buffer);
       for (let i = 0; i < 64; i++) dv.setUint8(buf_ptr + i, 0);
       const isDir = (targetVal && !targetVal._isDir && !targetVal._isVirtualFile && typeof targetVal !== 'string');
       dv.setUint8(buf_ptr + 16, isDir ? 3 : 4);
