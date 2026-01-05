@@ -1,9 +1,5 @@
-// Install WASI overrides by patching wasiSnapshot directly (no helper)
-
-const FS_PREFIX = 'washm_fs_';
 const openFiles = new Map();
 let nextFd = 10;
-const DIR_MARKER = '[[DIR]]';
 
 const snapshot = globalThis.__washm_bootstrap.wasiSnapshot;
 
@@ -12,32 +8,55 @@ snapshot.path_open.actual = (dirfd, dirflags, pathPtr, pathLen, oflags, rightsBa
   const path = new TextDecoder().decode(new Uint8Array(memory.buffer, pathPtr, pathLen));
   const normPath = path.startsWith('/') ? path.substring(1) : path;
 
+  // 1. Virtual /dev/host handling
+  if (normPath.startsWith('dev/host/') || normPath === 'dev/host') {
+    const parts = normPath.split('/');
+    let curr = globalThis.mounted;
+    for (let i = 2; i < parts.length; i++) {
+      curr = curr[parts[i]];
+      if (!curr) break;
+    }
+    if (curr || normPath === 'dev/host') {
+      const fd = nextFd++;
+      openFiles.set(fd, { 
+        path: normPath, 
+        pos: 0, 
+        isDir: !(curr?._isVirtualFile || typeof curr === 'string'),
+        vfs: curr 
+      });
+      new DataView(memory.buffer).setUint32(fdPtr, fd, true);
+      return 0;
+    }
+  }
+
+  // 2. Root and current dir
   if (normPath === '.' || normPath === '') {
     const fd = nextFd++;
-    openFiles.set(fd, { path: '.', pos: 0, flags: oflags, isDir: true });
+    openFiles.set(fd, { path: '.', pos: 0, isDir: true });
     new DataView(memory.buffer).setUint32(fdPtr, fd, true);
     return 0;
   }
 
-  let content = sessionStorage.getItem(FS_PREFIX + normPath);
-  if (content === DIR_MARKER) {
+  // 3. sessionStorage handling
+  let content = sessionStorage.getItem('washm_fs_' + normPath);
+  if (content === '[[DIR]]') {
     const fd = nextFd++;
-    openFiles.set(fd, { path: normPath, pos: 0, flags: oflags, isDir: true });
+    openFiles.set(fd, { path: normPath, pos: 0, isDir: true });
     new DataView(memory.buffer).setUint32(fdPtr, fd, true);
     return 0;
   }
 
   if (content === null && (oflags & 1)) { // O_CREAT
     content = '';
-    sessionStorage.setItem(FS_PREFIX + normPath, content);
+    sessionStorage.setItem('washm_fs_' + normPath, content);
   } else if (content !== null && (oflags & 4)) { // O_TRUNC
     content = '';
-    sessionStorage.setItem(FS_PREFIX + normPath, content);
+    sessionStorage.setItem('washm_fs_' + normPath, content);
   }
 
   if (content !== null || (oflags & 1)) {
     const fd = nextFd++;
-    openFiles.set(fd, { path: normPath, pos: 0, flags: oflags, isDir: false });
+    openFiles.set(fd, { path: normPath, pos: 0, isDir: false });
     new DataView(memory.buffer).setUint32(fdPtr, fd, true);
     return 0;
   }
@@ -47,11 +66,18 @@ snapshot.path_open.actual = (dirfd, dirflags, pathPtr, pathLen, oflags, rightsBa
 snapshot.fd_read.actual = (fd, iovsPtr, iovsLen, nreadPtr) => {
   const file = openFiles.get(fd);
   if (!file) return 44;
-  if (file.isDir) return 28;
+  if (file.isDir) return 31; // EISDIR
 
   const memory = globalThis.__washm_bootstrap.instance.exports.memory;
   const view = new DataView(memory.buffer);
-  const bytes = new TextEncoder().encode(sessionStorage.getItem(FS_PREFIX + file.path) || '');
+  
+  let bytes;
+  if (file.vfs) {
+    const content = file.vfs._isVirtualFile ? (file.vfs.read ? file.vfs.read() : "") : (typeof file.vfs === 'string' ? file.vfs : "");
+    bytes = new TextEncoder().encode(content);
+  } else {
+    bytes = new TextEncoder().encode(sessionStorage.getItem('washm_fs_' + file.path) || '');
+  }
 
   let totalRead = 0;
   for (let i = 0; i < iovsLen; i++) {
@@ -71,55 +97,82 @@ snapshot.fd_read.actual = (fd, iovsPtr, iovsLen, nreadPtr) => {
 snapshot.fd_write.actual = (fd, iovsPtr, iovsLen, nwrittenPtr) => {
   const file = openFiles.get(fd);
   if (!file) return 44;
-  if (file.isDir) return 28;
+  if (file.isDir) return 31; // EISDIR
 
   const memory = globalThis.__washm_bootstrap.instance.exports.memory;
   const view = new DataView(memory.buffer);
-  let content = sessionStorage.getItem(FS_PREFIX + file.path) || '';
   let totalWritten = 0;
+  
   for (let i = 0; i < iovsLen; i++) {
     const bufPtr = view.getUint32(iovsPtr + i * 8, true);
     const bufLen = view.getUint32(iovsPtr + i * 8 + 4, true);
-    content += new TextDecoder().decode(new Uint8Array(memory.buffer, bufPtr, bufLen));
+    const chunk = new TextDecoder().decode(new Uint8Array(memory.buffer, bufPtr, bufLen));
+    
+    if (file.vfs) {
+      if (file.vfs.write) file.vfs.write(chunk);
+    } else {
+      let content = sessionStorage.getItem('washm_fs_' + file.path) || '';
+      content += chunk;
+      sessionStorage.setItem('washm_fs_' + file.path, content);
+    }
     totalWritten += bufLen;
   }
-  sessionStorage.setItem(FS_PREFIX + file.path, content);
+  
   view.setUint32(nwrittenPtr, totalWritten, true);
   return 0;
 };
 
-snapshot.fd_close.actual = (fd) => openFiles.delete(fd) ? 0 : 44;
+snapshot.fd_close.actual = (fd) => {
+  const file = openFiles.get(fd);
+  if (file && file.vfs && file.vfs.close) file.vfs.close();
+  return openFiles.delete(fd) ? 0 : 44;
+};
 
 snapshot.path_create_directory.actual = (dirfd, pathPtr, pathLen) => {
   const memory = globalThis.__washm_bootstrap.instance.exports.memory;
   const path = new TextDecoder().decode(new Uint8Array(memory.buffer, pathPtr, pathLen));
   const normPath = path.startsWith('/') ? path.substring(1) : path;
-  if (sessionStorage.getItem(FS_PREFIX + normPath) !== null) return 17; // EEXIST
-  sessionStorage.setItem(FS_PREFIX + normPath, DIR_MARKER);
+  if (sessionStorage.getItem('washm_fs_' + normPath) !== null) return 17; // EEXIST
+  sessionStorage.setItem('washm_fs_' + normPath, '[[DIR]]');
   return 0;
 };
 
 snapshot.path_unlink_file.actual = (dirfd, pathPtr, pathLen) => {
   const memory = globalThis.__washm_bootstrap.instance.exports.memory;
   const path = new TextDecoder().decode(new Uint8Array(memory.buffer, pathPtr, pathLen));
-  sessionStorage.removeItem(FS_PREFIX + (path.startsWith('/') ? path.substring(1) : path));
+  sessionStorage.removeItem('washm_fs_' + (path.startsWith('/') ? path.substring(1) : path));
   return 0;
 };
 
 snapshot.fd_readdir.actual = (fd, bufPtr, bufLen, cookie, bufusedPtr) => {
+  const file = openFiles.get(fd);
+  if (!file || !file.isDir) return 44;
+
   const memory = globalThis.__washm_bootstrap.instance.exports.memory;
   const view = new DataView(memory.buffer);
-  const files = [];
-  for (let i = 0; i < sessionStorage.length; i++) {
-    const key = sessionStorage.key(i);
-    if (key?.startsWith(FS_PREFIX)) files.push(key.substring(FS_PREFIX.length));
-  }
+  const entries = [{ name: '.', type: 3 }, { name: '..', type: 3 }];
 
-  const entries = [
-    { name: '.', type: 3 },
-    { name: '..', type: 3 },
-    ...files.map(f => ({ name: f, type: sessionStorage.getItem(FS_PREFIX + f) === DIR_MARKER ? 3 : 4 }))
-  ];
+  if (file.path.startsWith('dev/host') || file.path === 'dev/host') {
+    let curr = globalThis.mounted || {};
+    if (file.path !== 'dev/host') {
+      const parts = file.path.split('/');
+      for (let i = 2; i < parts.length; i++) curr = curr[parts[i]] || {};
+    }
+    for (const key in curr) {
+      if (key.startsWith('_')) continue;
+      const val = curr[key];
+      const isDir = !(val?._isVirtualFile || typeof val === 'string');
+      entries.push({ name: key, type: isDir ? 3 : 4 });
+    }
+  } else {
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i);
+      if (key?.startsWith('washm_fs_')) {
+        const name = key.substring(9);
+        entries.push({ name, type: sessionStorage.getItem(key) === '[[DIR]]' ? 3 : 4 });
+      }
+    }
+  }
 
   const encoder = new TextEncoder();
   let offset = 0;
@@ -139,18 +192,23 @@ snapshot.fd_readdir.actual = (fd, bufPtr, bufLen, cookie, bufusedPtr) => {
 };
 
 snapshot.fd_filestat_get.actual = (fd, bufPtr) => {
-  const memory = globalThis.__washm_bootstrap.instance.exports.memory;
-  const view = new DataView(memory.buffer);
-  if (fd === 3) {
-    view.setUint8(bufPtr, 3);
-    view.setBigUint64(bufPtr + 8, 0n, true);
-    return 0;
-  }
   const file = openFiles.get(fd);
   if (!file) return 44;
-  const content = sessionStorage.getItem(FS_PREFIX + file.path) || '';
-  view.setUint8(bufPtr, file.isDir ? 3 : 4);
-  view.setBigUint64(bufPtr + 8, file.isDir ? 0n : BigInt(content.length), true);
+  
+  const memory = globalThis.__washm_bootstrap.instance.exports.memory;
+  const view = new DataView(memory.buffer);
+  
+  let size = 0;
+  if (file.vfs) {
+    const content = file.vfs._isVirtualFile ? (file.vfs.read ? file.vfs.read() : "") : (typeof file.vfs === 'string' ? file.vfs : "");
+    size = new TextEncoder().encode(content).length;
+  } else {
+    const content = sessionStorage.getItem('washm_fs_' + file.path) || '';
+    size = content === '[[DIR]]' ? 0 : new TextEncoder().encode(content).length;
+  }
+
+  view.setUint8(bufPtr + 16, file.isDir ? 3 : 4);
+  view.setBigUint64(bufPtr + 32, BigInt(size), true);
   return 0;
 };
 
@@ -159,14 +217,37 @@ snapshot.path_filestat_get.actual = (dirfd, flags, pathPtr, pathLen, bufPtr) => 
   const path = new TextDecoder().decode(new Uint8Array(memory.buffer, pathPtr, pathLen));
   const normPath = path.startsWith('/') ? path.substring(1) : path;
   const view = new DataView(memory.buffer);
+
   if (!normPath || normPath === '.') {
-    view.setUint8(bufPtr, 3);
-    view.setBigUint64(bufPtr + 8, 0n, true);
+    view.setUint8(bufPtr + 16, 3);
+    view.setBigUint64(bufPtr + 32, 0n, true);
     return 0;
   }
-  const content = sessionStorage.getItem(FS_PREFIX + normPath);
+
+  if (normPath.startsWith('dev/host/') || normPath === 'dev/host') {
+    const parts = normPath.split('/');
+    let curr = globalThis.mounted || {};
+    for (let i = 2; i < parts.length; i++) {
+      curr = curr[parts[i]];
+      if (!curr) break;
+    }
+    if (curr || normPath === 'dev/host') {
+      const isDir = !(curr?._isVirtualFile || typeof curr === 'string');
+      let size = 0;
+      if (!isDir) {
+        const content = curr._isVirtualFile ? (curr.read ? curr.read() : "") : (typeof curr === 'string' ? curr : "");
+        size = new TextEncoder().encode(content).length;
+      }
+      view.setUint8(bufPtr + 16, isDir ? 3 : 4);
+      view.setBigUint64(bufPtr + 32, BigInt(size), true);
+      return 0;
+    }
+  }
+
+  const content = sessionStorage.getItem('washm_fs_' + normPath);
   if (content === null) return 44;
-  view.setUint8(bufPtr, content === DIR_MARKER ? 3 : 4);
-  view.setBigUint64(bufPtr + 8, content === DIR_MARKER ? 0n : BigInt(content.length), true);
+  const isDir = content === '[[DIR]]';
+  view.setUint8(bufPtr + 16, isDir ? 3 : 4);
+  view.setBigUint64(bufPtr + 32, isDir ? 0n : BigInt(new TextEncoder().encode(content).length), true);
   return 0;
 };
