@@ -1,3 +1,5 @@
+// @ts-check
+
 const evalState = new Map();
 
 globalThis.mounted.eval = new Proxy({}, {
@@ -17,20 +19,6 @@ globalThis.mounted.eval = new Proxy({}, {
           write: (chunk) => { state.js += chunk; },
           close: () => {
             let jsText = state.js;
-            const handleResult = (result) => {
-              state.json = JSON.stringify({ ok: true, result });
-              const instance = globalThis.__washm_bootstrap.instance;
-              if (instance && typeof instance.exports._continue === 'function') {
-                instance.exports._continue(Number(cookie) || 0);
-              }
-            };
-            const handleError = (err) => {
-              state.json = JSON.stringify({ ok: false, error: String(err) });
-              const instance = globalThis.__washm_bootstrap.instance;
-              if (instance && typeof instance.exports._continue === 'function') {
-                instance.exports._continue(Number(cookie) || 0);
-              }
-            };
             try {
               let result = eval(jsText);
               if (result instanceof Promise) {
@@ -39,6 +27,18 @@ globalThis.mounted.eval = new Proxy({}, {
                 handleResult(result);
               }
             } catch (err) { handleError(err); }
+
+            /** @param {any} result */
+            function handleResult(result) {
+              state.json = JSON.stringify({ ok: true, result });
+              instance.exports._continue(Number(cookie) || 0);
+            }
+
+            /** @param {any} err */
+            function handleError(err) {
+              state.json = JSON.stringify({ ok: false, error: String(err) });
+              instance.exports._continue(Number(cookie) || 0);
+            }
           }
         };
       } else if (ext === 'json') {

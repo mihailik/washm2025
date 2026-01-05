@@ -3,9 +3,8 @@ const memory = globalThis.__washm_bootstrap.instance.exports.memory;
 const require = globalThis.__washm_bootstrap ? globalThis.__washm_bootstrap.require : null;
 
 const fdToVfs = new Map();
-let nextFakeFd = 500;
-
-globalThis.mounted = globalThis.mounted || {};
+let nextFakeFd = 20260105;
+globalThis.mounted = {};
 
 function readStringFromMemory(ptr, len) {
   return new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
