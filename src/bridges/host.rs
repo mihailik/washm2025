@@ -1,4 +1,3 @@
-use crate::bridges::eval::eval_blocking;
 use serde::Deserialize;
 
 const BRIDGE_JS: &str = include_str!("host.js");

@@ -1,5 +1,3 @@
-use crate::bridges::eval::eval_blocking;
-
 pub fn ensure_bridge() -> Result<(), String> {
     let bridge_js = include_str!("browser_fs.js");
     let js_with_source = format!("{}\n//# sourceURL=bridges/browser_fs.js\n", bridge_js);
