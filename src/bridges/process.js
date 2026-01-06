@@ -1,20 +1,13 @@
-(function() {
-  const require = globalThis.__washm_bootstrap ? globalThis.__washm_bootstrap.require : null;
-  const os = require ? require('os') : null;
-  const process = globalThis.process || null;
-  const fs = require ? require('fs') : null;
-  const cp = require ? require('child_process') : null;
+// @ts-check
+/// <reference path="../globals.node.d.ts" />
 
-  globalThis.mounted = globalThis.mounted || {};
-  globalThis.mounted.process = globalThis.mounted.process || {};
-  
-  // In browser, process spawning is not supported
-  if (!cp) {
-    return;
-  }
-  
-  // Replace spawn.json handler with a Proxy on the process container that reacts to Uint8Array assignments
-  const processTarget = globalThis.mounted.process;
+if (isNode) installNodeProcessBridge();
+
+function installNodeProcessBridge() {
+  const os = require('os');
+  const child_process = require('child_process');
+
+  const processTarget = {};
   globalThis.mounted.process = new Proxy(processTarget, {
     set(target, prop, value) {
       if (prop === 'spawn.json' && value instanceof Uint8Array) {
@@ -22,16 +15,18 @@
           const bufText = new TextDecoder().decode(value);
           const req = JSON.parse(bufText);
           if (!req.program) return true;
-          const stdio = [
+          const stdio = /** @type {const} */([
             req.fds && req.fds['0'] === 'pipe' ? 'pipe' : 'inherit',
             req.fds && req.fds['1'] === 'pipe' ? 'pipe' : 'inherit',
             req.fds && req.fds['2'] === 'pipe' ? 'pipe' : 'inherit'
-          ];
+          ]);
+
           let programToSpawn = req.program || '';
-          if (programToSpawn.includes('/') && fs && !fs.existsSync(programToSpawn)) {
+          if (programToSpawn.includes('/') && fs && !fs.existsSync(programToSpawn))
             programToSpawn = programToSpawn.split('/').pop();
-          }
-          const child = cp.spawn(programToSpawn, req.args || [], {
+
+          /** @type {import('child_process').ChildProcess} */
+          const child = child_process.spawn(programToSpawn, req.args || [], {
             cwd: (
               os && os.platform() === 'win32' && req.cwd ?
                 (/^\/[a-zA-Z]:/.test(req.cwd) ? req.cwd.slice(1) : req.cwd).replace(/\//g, '\\') :
@@ -52,7 +47,7 @@
                 return true;
               }
               if (key === 'signal' && val instanceof Uint8Array) {
-                try { child.kill(new TextDecoder().decode(val).trim()); } catch(e){}
+                try { child.kill(Number(new TextDecoder().decode(val).trim())); } catch (e) { }
                 return true;
               }
               t[key] = val;
@@ -86,4 +81,4 @@
     },
     get(target, prop) { return target[prop]; }
   });
-})();
+}

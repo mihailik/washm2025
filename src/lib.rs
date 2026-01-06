@@ -63,13 +63,11 @@ pub extern "C" fn washm_init() {
     // 0. Initialize TTY bridge first (so it's the inner layer)
     let _ = bridges::tty::ensure_bridge();
 
+    // 1.1 Load browser FS bridge (overrides protocol.js VFS in browser)
+    let _ = bridges::fs::ensure_bridge();
+
     // 1. Load protocol (critical for VFS, wraps TTY)
     bootstrap::bootstrap_host_protocol();
-
-    // 1.1 Load browser FS bridge (overrides protocol.js VFS in browser)
-    if platform::is_browser() {
-        // let _ = bridges::browser_fs::ensure_bridge();
-    }
 
     // 2. Load eval (critical for other bridges)
     let _ = bridges::eval::ensure_bridge();

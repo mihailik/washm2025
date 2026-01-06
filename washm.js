@@ -1,6 +1,6 @@
 #!/usr/bin/env -S node --no-warnings
 // @ts-check
-/// <reference path="./src/globals.d.ts" />
+/// <reference path="./src/globals.node.d.ts" />
 
 // Polyglot launcher for WASHM - runs in both Node.js and Browser
 const isNode = typeof process !== 'undefined' && process.versions && process.versions.node;
@@ -11,6 +11,8 @@ var instance;
 
 /** @type {WASI['wasiImport']} */
 var wasiSnapshot = {};
+
+var FD_BOOTRAP = 20251219; // special FD for bootstrap eval collection
 
 if (isNode) {
   // Node.js setup
@@ -74,7 +76,7 @@ if (isNode) {
     // Special handling for bootstrap FD 20251219
     const origFdWrite = wasiSnapshot.fd_write.actual;
     wasiSnapshot.fd_write.actual = (fd, iovs, iovsLen, nwritten) => {
-      if (fd === 20251219) {
+      if (fd === FD_BOOTRAP) {
         const memory = new Uint8Array(instance.exports.memory.buffer);
         const view = new DataView(memory.buffer);
         let total = 0;
@@ -93,7 +95,7 @@ if (isNode) {
 
     const origFdClose = wasiSnapshot.fd_close.actual;
     wasiSnapshot.fd_close.actual = (fd) => {
-      if (fd === 20251219) {
+      if (fd === FD_BOOTRAP) {
         const js = collectEvalJS;
         collectEvalJS = '';
         eval(js);
@@ -121,8 +123,11 @@ if (isNode) {
     // Initialize override hooks
     globalThis.washm_wasi_overrides = {};
 
-    // Minimal WASI shim with delegating stubs
-    const wasiSnapshot = {
+    /**
+     * Minimal WASI shim with delegating stubs
+     * @type {WASI['wasiImport']}
+     */
+    const rawWasiSnapshot = {
       fd_write: function(fd, iovs, iovsLen, nwritten) {
         // Check for override
         if (globalThis.washm_wasi_overrides.fd_write) {
@@ -130,7 +135,7 @@ if (isNode) {
         }
         
         // Bootstrap FD handling
-        if (fd === 20251219) {
+        if (fd === FD_BOOTRAP) {
           const memory = new Uint8Array(instance.exports.memory.buffer);
           const view = new DataView(memory.buffer);
           let total = 0;
@@ -168,7 +173,7 @@ if (isNode) {
       
       fd_close: function(fd) {
         // Bootstrap FD handling
-        if (fd === 20251219) {
+        if (fd === FD_BOOTRAP) {
           const js = collectEvalJS;
           collectEvalJS = '';
           eval(js);
@@ -298,18 +303,17 @@ if (isNode) {
     };
 
     // Wrap each function to allow runtime override
-    const wrappedSnapshot = {};
-    for (const key in wasiSnapshot) {
-      wrappedSnapshot[key] = function() {
-        return wrappedSnapshot[key].actual.apply(this, arguments);
+    for (const key in rawWasiSnapshot) {
+      wasiSnapshot[key] = function() {
+        return wasiSnapshot[key].actual.apply(this, arguments);
       };
-      wrappedSnapshot[key].actual = wasiSnapshot[key];
+      wasiSnapshot[key].actual = rawWasiSnapshot[key];
     }
 
     let collectEvalJS = "";
     let instance;
     const importObj = {
-      wasi_snapshot_preview1: wrappedSnapshot
+      wasi_snapshot_preview1: wasiSnapshot
     };
 
     // Fetch and instantiate WASM
@@ -319,7 +323,7 @@ if (isNode) {
 
     globalThis.__washm_bootstrap = {
       importObj,
-      wasiSnapshot: wrappedSnapshot,
+      wasiSnapshot: wasiSnapshot,
       instance,
       require: null, // Not available in browser
     };

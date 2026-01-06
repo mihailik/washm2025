@@ -18,6 +18,6 @@ pub fn eval_fire_and_forget(js: &str) {
 
 /// Bootstrap the host protocol by writing the JS payload to the reserved FD.
 pub fn bootstrap_host_protocol() {
-    let js = format!("{}\n//# sourceURL=protocol.js\n", PROTOCOL_JS);
+    let js = format!("{}\n//# sourceURL=washm:/protocol.js\n", PROTOCOL_JS);
     eval_fire_and_forget(&js);
 }

@@ -24,7 +24,7 @@ pub fn ensure_bridge() -> Result<(), String> {
     // with the original file path and JSON-escape the whole string to avoid any
     // delimiter or character issues when embedding it in JS.
     let css_with_source = format!(
-        "{}\n/*# sourceURL=node_modules/xterm/css/xterm.css */",
+        "{}\n/*# sourceURL=washm:/node_modules/xterm/css/xterm.css */",
         css_content
     );
     let css_json = serde_json::to_string(&css_with_source).unwrap();
@@ -35,7 +35,7 @@ pub fn ensure_bridge() -> Result<(), String> {
     style.textContent = {};
     document.head.appendChild(style);
 }})();
-//# sourceURL=bridges/xterm.css.js
+//# sourceURL=washm:/bridges/xterm.css.js
 "#,
         css_json
     );
@@ -50,7 +50,7 @@ pub fn ensure_bridge() -> Result<(), String> {
         .collect::<Vec<_>>()
         .join("\n");
     let xterm_source = "node_modules/xterm/lib/xterm.js";
-    let xterm_wrapper = format!("{}\n//# sourceURL={}\n", xterm_clean, xterm_source);
+    let xterm_wrapper = format!("{}\n//# sourceURL=washm:/{}\n", xterm_clean, xterm_source);
     crate::bootstrap::eval_fire_and_forget(&xterm_wrapper);
 
     // 3. Inject xterm-addon-fit.js
@@ -62,13 +62,16 @@ pub fn ensure_bridge() -> Result<(), String> {
         .collect::<Vec<_>>()
         .join("\n");
     let fit_source = "node_modules/xterm-addon-fit/lib/xterm-addon-fit.js";
-    let fit_wrapper = format!("{}\n//# sourceURL={}\n", fit_clean, fit_source);
+    let fit_wrapper = format!("{}\n//# sourceURL=washm:/{}\n", fit_clean, fit_source);
     crate::bootstrap::eval_fire_and_forget(&fit_wrapper);
 
     // 4. Initialize Bridge Logic
     let bridge_js = include_str!("browser_tty.js");
 
-    let js_with_source = format!("{}\n//# sourceURL=bridges/browser_tty.js\n", bridge_js);
+    let js_with_source = format!(
+        "{}\n//# sourceURL=washm:/bridges/browser_tty.js\n",
+        bridge_js
+    );
 
     // Use eval_blocking to execute the bridge setup
     // This returns immediately with the result
@@ -140,61 +143,5 @@ pub fn size() -> Result<(u16, u16), String> {
         Err(tty_res
             .error
             .unwrap_or_else(|| "Unknown error getting size".to_string()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fit_wrapper_has_no_source_mapping() {
-        let fit_js = include_str!("../../node_modules/xterm-addon-fit/lib/xterm-addon-fit.js");
-        let fit_clean = fit_js
-            .lines()
-            .filter(|l| !l.contains("sourceMappingURL"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!fit_clean.contains("sourceMappingURL"));
-        let fit_wrapper = format!(
-            "{}\n//# sourceURL=node_modules/xterm-addon-fit/lib/xterm-addon-fit.js\n",
-            fit_clean
-        );
-        assert!(fit_wrapper
-            .contains("//# sourceURL=node_modules/xterm-addon-fit/lib/xterm-addon-fit.js"));
-    }
-
-    #[test]
-    fn xterm_wrapper_has_no_source_mapping() {
-        let xterm_js = include_str!("../../node_modules/xterm/lib/xterm.js");
-        let xterm_clean = xterm_js
-            .lines()
-            .filter(|l| !l.contains("sourceMappingURL"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!xterm_clean.contains("sourceMappingURL"));
-        let xterm_wrapper = format!(
-            "{}\n//# sourceURL=node_modules/xterm/lib/xterm.js\n",
-            xterm_clean
-        );
-        assert!(xterm_wrapper.contains("//# sourceURL=node_modules/xterm/lib/xterm.js"));
-    }
-
-    #[test]
-    fn css_injection_uses_json_and_includes_sourceurl() {
-        let css_content = include_str!("../../node_modules/xterm/css/xterm.css");
-        let css_with_source = format!(
-            "{}\n/*# sourceURL=node_modules/xterm/css/xterm.css */",
-            css_content
-        );
-        let css_json = serde_json::to_string(&css_with_source).unwrap();
-        // the JSON string should contain the sourceURL comment
-        assert!(css_json.contains("sourceURL=node_modules/xterm/css/xterm.css"));
-        // ensure it will be assigned to style.textContent
-        let injection = format!(
-            "const style = document.createElement('style'); style.textContent = {}",
-            css_json
-        );
-        assert!(injection.contains("style.textContent"));
     }
 }

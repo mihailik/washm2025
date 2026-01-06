@@ -1,4 +1,4 @@
-pub mod browser_fs;
+pub mod fs;
 pub mod browser_tty;
 pub mod eval;
 pub mod host;

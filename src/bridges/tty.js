@@ -1,85 +1,85 @@
-(function() {
-    if (globalThis.washm_tty) return { ok: true };
+// @ts-check
+/// <reference path="../globals.node.d.ts" />
 
-    const require = globalThis.__washm_bootstrap ? globalThis.__washm_bootstrap.require : null;
-    const process = globalThis.process || null;
-    
-    // Browser doesn't support Node.js TTY
-    if (!require || !process || !process.stdin) {
-        return { ok: true }; // Return success but don't set up washm_tty
+initNodeTty();
+
+function initNodeTty() {
+  /** @type {(Buffer | null)[]} */
+  let buffer = [];
+  /** @type {((data: Buffer | null) => void) | undefined} */
+  let pendingResolve;
+  let isRaw = false;
+
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    isRaw = true;
+  }
+
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', handleStdinData);
+  process.stdin.on('end', handleStdinEnd);
+  process.stdin.resume();
+
+  globalThis.washm_tty = {
+    read,
+    enableRaw,
+    disableRaw,
+    size
+  };
+
+  function read() {
+    return new Promise((resolve) => {
+      if (buffer.length > 0) {
+        resolve(buffer.shift());
+      } else {
+        pendingResolve = resolve;
+      }
+    });
+  }
+
+  function enableRaw() {
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+      isRaw = true;
+      return /** @type {const} */({ ok: true });
     }
+    return /** @type {const} */({ ok: false, error: "Not a TTY" });
+  }
 
-    const fs = require('fs');
-    let buffer = [];
-    let pendingResolve = null;
-    let stdin = process.stdin;
-    let isRaw = false;
-
-    try {
-        if (stdin.isTTY) {
-            stdin.setRawMode(true);
-            isRaw = true;
-        }
-        stdin.resume();
-        stdin.setEncoding('utf8');
-        
-        stdin.on('data', (chunk) => {
-            if (pendingResolve) {
-                const resolve = pendingResolve;
-                pendingResolve = null;
-                resolve(chunk);
-            } else {
-                buffer.push(chunk);
-            }
-        });
-        
-        stdin.on('end', () => {
-             if (pendingResolve) {
-                const resolve = pendingResolve;
-                pendingResolve = null;
-                resolve(null); // EOF
-            } else {
-                buffer.push(null);
-            }
-        });
-        
-    } catch (e) {
-        return { ok: false, error: e.message };
+  function disableRaw() {
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(false);
+      isRaw = false;
+      return /** @type {const} */({ ok: true });
     }
+    return /** @type {const} */({ ok: false, error: "Not a TTY" });
+  }
 
-    globalThis.washm_tty = {
-        read: () => {
-            return new Promise((resolve) => {
-                if (buffer.length > 0) {
-                    resolve(buffer.shift());
-                } else {
-                    pendingResolve = resolve;
-                }
-            });
-        },
-        enableRaw: () => {
-            if (stdin.isTTY) {
-                stdin.setRawMode(true);
-                isRaw = true;
-                return { ok: true };
-            }
-            return { ok: false, error: "Not a TTY" };
-        },
-        disableRaw: () => {
-            if (stdin.isTTY) {
-                stdin.setRawMode(false);
-                isRaw = false;
-                return { ok: true };
-            }
-            return { ok: false, error: "Not a TTY" };
-        },
-        size: () => {
-            if (process.stdout.isTTY) {
-                return { ok: true, rows: process.stdout.rows, cols: process.stdout.columns };
-            }
-            return { ok: false, error: "Not a TTY" };
-        }
-    };
+  function size() {
+    if (process.stdout.isTTY) {
+      return /** @type {const} */({ ok: true, rows: process.stdout.rows, cols: process.stdout.columns });
+    }
+    return /** @type {const} */({ ok: false, error: "Not a TTY" });
+  }
 
-    return { ok: true };
-})();
+  /** @param {Buffer} chunk */
+  function handleStdinData(chunk) {
+    if (pendingResolve) {
+      const resolve = pendingResolve;
+      pendingResolve = undefined;
+      resolve(chunk);
+    } else {
+      buffer.push(chunk);
+    }
+  }
+
+  function handleStdinEnd() {
+    if (pendingResolve) {
+      const resolve = pendingResolve;
+      pendingResolve = undefined;
+      resolve(null); // EOF
+    } else {
+      buffer.push(null);
+    }
+  }
+}

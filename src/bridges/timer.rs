@@ -1,12 +1,12 @@
 /// Unified async sleep that yields control to host event loop via JavaScript setTimeout
 /// This ensures single-threaded WASM never blocks on syscalls.
-use crate::bridges::eval::{eval_blocking, WasmHostFuture};
+use crate::bridges::eval::WasmHostFuture;
 use std::time::Duration;
 
 const BRIDGE_JS: &str = include_str!("timer.js");
 
 pub fn ensure_bridge() -> Result<(), String> {
-    let js = format!("{}\n//# sourceURL=bridges/timer.js\n", BRIDGE_JS);
+    let js = format!("{}\n//# sourceURL=washm:/bridges/timer.js\n", BRIDGE_JS);
     crate::bootstrap::eval_fire_and_forget(&js);
     Ok(())
 }

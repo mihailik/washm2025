@@ -1,51 +1,66 @@
-(function() {
-  const require = globalThis.__washm_bootstrap ? globalThis.__washm_bootstrap.require : null;
-  const os = require ? require('os') : null;
-  const process = globalThis.process || null;
+mounted['washm'] = createWashmMount();
 
-  globalThis.mounted = globalThis.mounted || {};
-  
-  // Browser fallback values
-  const hostname = os ? os.hostname() : (typeof window !== 'undefined' ? window.location.hostname : 'localhost');
-  const platform = os ? os.platform() : (typeof navigator !== 'undefined' ? 'browser' : 'unknown');
-  const arch = os ? os.arch() : (typeof navigator !== 'undefined' ? navigator.platform : 'unknown');
-  const cpus = os ? os.cpus().length : (typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 1 : 1);
-  const totalmem = os ? os.totalmem() : 0;
-  const freemem = os ? os.freemem() : 0;
-  const username = os ? os.userInfo().username : 'user';
-  const uid = os ? os.userInfo().uid : 1000;
-  const gid = os ? os.userInfo().gid : 1000;
+function createWashmMount() {
+  const os = isNode ? require('os') : undefined;
+
+  let exitCode = undefined;
   
   const washmObj = {
     startup: JSON.stringify({
-      hostname,
-      platform,
-      arch,
-      cpus,
-      totalmem,
-      freemem,
-      userInfo: { username, uid, gid }
+      hostname: isNode ? os.hostname() : typeof window.location.hostname || 'localhost',
+      platform: isNode ? process.platform : getBrowserPlatform(),
+      arch: isNode ? process.arch : getBrowserArch(),
+      cpus: isNode ? os.cpus().length : navigator.hardwareConcurrency || 1,
+      totalmem: isNode ? os.totalmem() : (navigator.deviceMemory || 4) * 1024 * 1024 * 1024,
+      freemem: isNode ? os.freemem() : (navigator.deviceMemory || 4) * 1024 * 1024 * 1024 / 2,
+      userInfo: {
+        username: isNode ? os.userInfo().username : 'anonymous',
+        uid: isNode ? os.userInfo().uid : 1000,
+        gid: isNode ? os.userInfo().gid : 1000
+      }
     }, null, 2),
-    start_pwd: process ? (
+    start_pwd: isNode ? (
       os.platform() === 'win32' ?
         process.cwd().replace(/^[a-zA-Z]:/, (m) => `/${m[0].toUpperCase()}:`).replace(/\\/g, '/') :
         process.cwd()
-    ) : '/',
-    exit_code: ''
+    ) :
+      '/',
+    get exit_code() {
+      return exitCode;
+    },
+    set exit_code(code) {
+      if (code instanceof Uint8Array)
+        code = Number(new TextDecoder().decode(code).trim());
+
+      if (isNode) process.exit(code);
+      else console.log('Process exit with code:', code);
+      exitCode = code;
+    }
   };
 
-  globalThis.mounted.washm = new Proxy(washmObj, {
-    set(target, prop, value) {
-      if (prop === 'exit_code' && value instanceof Uint8Array) {
-        const code = parseInt(new TextDecoder().decode(value).trim(), 10) || 0;
-        if (process && process.exit) process.exit(code);
-        else console.log('Process exit with code:', code);
-        target.exit_code = value;
-        return true;
-      }
-      target[prop] = value;
-      return true;
-    },
-    get(target, prop) { return target[prop]; }
-  });
-})();
+  return washmObj;
+
+  function getBrowserPlatform() {
+    let platform = navigator.userAgentData?.platform;
+    if (!platform) {
+      const sources = [navigator.platform, navigator.userAgent];
+      if (sources.some(s => /Mac/.test(s))) return 'macos';
+      if (sources.some(s => /Win/.test(s))) return 'windows';
+      if (sources.some(s => /Linux/.test(s))) return 'linux';
+      platform = 'browser';
+    }
+    return platform;
+  }
+
+  function getBrowserArch() {
+    let arch = navigator.userAgentData?.architecture;
+    if (!arch) {
+      const sources = [navigator.platform, navigator.userAgent];
+      if (sources.some(s => /x86_64|Win64|WOW64|amd64|x64/.test(s))) return 'x64';
+      if (sources.some(s => /i386|i686|x86/.test(s))) return 'x86';
+      if (sources.some(s => /arm|aarch64/.test(s))) return 'arm';
+      arch = 'unknown';
+    }
+    return arch;
+  }
+}
