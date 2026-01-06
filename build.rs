@@ -738,14 +738,37 @@ impl SemanticEngine {
             "{ Ok(()) }",
         );
 
-        self.stub_fn(editor, root, "brush-core/src/sys/stubs/process.rs", path, "spawn", "{ Err(std::io::Error::new(std::io::ErrorKind::Unsupported, \"spawn not supported\")) }");
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/process.rs",
+            path,
+            "id",
+            "{ self.inner.id() }",
+        );
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/process.rs",
+            path,
+            "spawn",
+            "{ Ok(Child { inner: crate::stubs_impl::spawn_process(command)? }) }",
+        );
         self.stub_fn(
             editor,
             root,
             "brush-core/src/sys/stubs/process.rs",
             path,
             "wait",
-            "{ Ok(crate::shims::exit_status::ExitStatus::from_raw(0)) }",
+            "{ self.inner.wait().await }",
+        );
+        self.stub_fn(
+            editor,
+            root,
+            "brush-core/src/sys/stubs/process.rs",
+            path,
+            "wait_with_output",
+            "{ self.inner.wait_with_output().await }",
         );
         self.stub_fn(
             editor,
@@ -989,7 +1012,7 @@ impl SemanticEngine {
             }
         }
 
-        // ExitStatus redirect
+        // ExitStatus and Output redirect
         for path in root.descendants().filter_map(ast::Path::cast) {
             if path.to_string() == "std::process::ExitStatus"
                 || path.to_string() == "crate::brush_core::ExitStatus"
@@ -997,6 +1020,14 @@ impl SemanticEngine {
                 let new_path = make_mutable(make::path_from_text(
                     "crate::shims::exit_status::ExitStatus",
                 ));
+                editor.replace(path.syntax(), new_path.syntax());
+            }
+
+            if path.to_string() == "std::process::Output"
+                || path.to_string() == "crate::brush_core::Output"
+            {
+                let new_path =
+                    make_mutable(make::path_from_text("crate::shims::exit_status::Output"));
                 editor.replace(path.syntax(), new_path.syntax());
             }
         }
@@ -1031,21 +1062,30 @@ impl SemanticEngine {
             }
         }
 
-        if path_str.ends_with("brush-core/src/sys/stubs.rs") {
-            let has_use = root
-                .descendants()
-                .filter_map(ast::Use::cast)
-                .any(|u| u.to_string().contains("crate::stubs_impl"));
-            if !has_use {
-                let use_item = parse_node::<ast::Item>("pub use crate::stubs_impl::*;");
-                if let Some(last) = root.last_child() {
-                    editor.insert(
-                        Position::after(last.clone()),
-                        make::tokens::single_newline(),
-                    );
-                    editor.insert(Position::after(last), use_item.syntax());
+        if path_str.ends_with("brush-core/src/sys/stubs/process.rs") {
+            for struct_def in root.descendants().filter_map(ast::Struct::cast) {
+                if struct_def.name().map_or(false, |n| n.text() == "Child") {
+                    if let Some(field_list) = struct_def.field_list() {
+                        if let ast::FieldList::RecordFieldList(record) = field_list {
+                            for field in record.fields() {
+                                if field.name().map_or(false, |n| n.text() == "inner") {
+                                    if let Some(ty) = field.ty() {
+                                        let new_path = make_mutable(make::path_from_text(
+                                            "crate::stubs_impl::GuestChild",
+                                        ));
+                                        let new_ty = make_mutable(make::ty_path(new_path));
+                                        editor.replace(ty.syntax(), new_ty.syntax());
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
+        }
+
+        if path_str.ends_with("brush-core/src/sys/stubs.rs") {
+            // No longer needed
         }
 
         if path_str.ends_with("brush-core/src/shell.rs") {

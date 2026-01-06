@@ -1,7 +1,7 @@
 {
   "name": "washm",
   "description": "WASM shell: Bash inside WASM",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "keywords": [
     "MIT",
     "WASM",
@@ -24,6 +24,7 @@
   },
   "scripts": {
     "test": "cargo build --target wasm32-wasip1 --features wasm-test && node washm.js test",
+    "/build_explanation": "ALWAYS use full `npm run build` to build washm.wasm, so that vital steps are applied properly.",
     "build": "cargo build -p washm --release --target wasm32-wasip1 && echo wasm-strip && wasm-strip target/wasm32-wasip1/release/washm.wasm && echo wasm-opt && wasm-opt --enable-bulk-memory -Oz target/wasm32-wasip1/release/washm.wasm -o ./washm.wasm"
   },
   "devDependencies": {
