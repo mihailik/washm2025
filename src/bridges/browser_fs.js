@@ -14,19 +14,13 @@ snapshot.path_open.actual = (dirfd, dirflags, pathPtr, pathLen, oflags, rightsBa
     let curr = globalThis.mounted;
     for (let i = 2; i < parts.length; i++) {
       curr = curr[parts[i]];
-      if (!curr) break;
+      if (curr === undefined) break;
     }
-    if (curr || normPath === 'dev/host') {
-      const fd = nextFd++;
-      openFiles.set(fd, { 
-        path: normPath, 
-        pos: 0, 
-        isDir: !(curr?._isVirtualFile || typeof curr === 'string'),
-        vfs: curr 
-      });
-      new DataView(memory.buffer).setUint32(fdPtr, fd, true);
-      return 0;
-    }
+    const fd = nextFd++;
+    const isDir = curr && (typeof curr === 'object' && !(curr instanceof Uint8Array));
+    openFiles.set(fd, { path: normPath, pos: 0, isDir: !!isDir, vfs: curr, buffers: [] });
+    new DataView(memory.buffer).setUint32(fdPtr, fd, true);
+    return 0;
   }
 
   // 2. Root and current dir
@@ -72,9 +66,18 @@ snapshot.fd_read.actual = (fd, iovsPtr, iovsLen, nreadPtr) => {
   const view = new DataView(memory.buffer);
   
   let bytes;
-  if (file.vfs) {
-    const content = file.vfs._isVirtualFile ? (file.vfs.read ? file.vfs.read() : "") : (typeof file.vfs === 'string' ? file.vfs : "");
-    bytes = new TextEncoder().encode(content);
+  if (file.vfs !== undefined) {
+    if (file.isDir) return 31; // EISDIR
+    const val = file.vfs;
+    if (val instanceof Uint8Array) {
+      bytes = val;
+    } else if (typeof val === 'string') {
+      bytes = new TextEncoder().encode(val);
+    } else if (val !== null && val !== undefined && typeof val !== 'object') {
+      bytes = new TextEncoder().encode(String(val));
+    } else {
+      bytes = new Uint8Array(0);
+    }
   } else {
     bytes = new TextEncoder().encode(sessionStorage.getItem('washm_fs_' + file.path) || '');
   }
@@ -106,15 +109,11 @@ snapshot.fd_write.actual = (fd, iovsPtr, iovsLen, nwrittenPtr) => {
   for (let i = 0; i < iovsLen; i++) {
     const bufPtr = view.getUint32(iovsPtr + i * 8, true);
     const bufLen = view.getUint32(iovsPtr + i * 8 + 4, true);
-    const chunk = new TextDecoder().decode(new Uint8Array(memory.buffer, bufPtr, bufLen));
-    
-    if (file.vfs) {
-      if (file.vfs.write) file.vfs.write(chunk);
-    } else {
-      let content = sessionStorage.getItem('washm_fs_' + file.path) || '';
-      content += chunk;
-      sessionStorage.setItem('washm_fs_' + file.path, content);
-    }
+    const chunk = new Uint8Array(memory.buffer, bufPtr, bufLen);
+    const copy = new Uint8Array(bufLen);
+    copy.set(chunk);
+    file.buffers = file.buffers || [];
+    file.buffers.push(copy);
     totalWritten += bufLen;
   }
   
@@ -124,8 +123,45 @@ snapshot.fd_write.actual = (fd, iovsPtr, iovsLen, nwrittenPtr) => {
 
 snapshot.fd_close.actual = (fd) => {
   const file = openFiles.get(fd);
-  if (file && file.vfs && file.vfs.close) file.vfs.close();
-  return openFiles.delete(fd) ? 0 : 44;
+  if (!file) return 44;
+  if (file.isDir) return openFiles.delete(fd) ? 0 : 44;
+
+  const buffers = file.buffers || [];
+  if (file.vfs !== undefined) {
+    // persist into globalThis.mounted as Uint8Array
+    const parts = file.path.split('/');
+    let curr = globalThis.mounted;
+    for (let i = 2; i < parts.length - 1; i++) {
+      const p = parts[i];
+      if (!curr[p]) curr[p] = {};
+      if (typeof curr[p] !== 'object') {
+        console.warn('mount path conflict, cannot create directory for', file.path);
+        curr = null; break;
+      }
+      curr = curr[p];
+    }
+    if (curr) {
+      const name = parts[parts.length - 1];
+      const totalLen = buffers.reduce((s, b) => s + b.length, 0);
+      const out = new Uint8Array(totalLen);
+      let off = 0;
+      for (const b of buffers) { out.set(b, off); off += b.length; }
+      curr[name] = out;
+    }
+  } else {
+    if (buffers.length > 0) {
+      const totalLen = buffers.reduce((s, b) => s + b.length, 0);
+      const out = new Uint8Array(totalLen);
+      let off = 0;
+      for (const b of buffers) { out.set(b, off); off += b.length; }
+      let existing = sessionStorage.getItem('washm_fs_' + file.path) || '';
+      existing += new TextDecoder().decode(out);
+      sessionStorage.setItem('washm_fs_' + file.path, existing);
+    }
+  }
+
+  openFiles.delete(fd);
+  return 0;
 };
 
 snapshot.path_create_directory.actual = (dirfd, pathPtr, pathLen) => {
@@ -161,7 +197,7 @@ snapshot.fd_readdir.actual = (fd, bufPtr, bufLen, cookie, bufusedPtr) => {
     for (const key in curr) {
       if (key.startsWith('_')) continue;
       const val = curr[key];
-      const isDir = !(val?._isVirtualFile || typeof val === 'string');
+      const isDir = (typeof val === 'object' && !(val instanceof Uint8Array));
       entries.push({ name: key, type: isDir ? 3 : 4 });
     }
   } else {
@@ -199,9 +235,12 @@ snapshot.fd_filestat_get.actual = (fd, bufPtr) => {
   const view = new DataView(memory.buffer);
   
   let size = 0;
-  if (file.vfs) {
-    const content = file.vfs._isVirtualFile ? (file.vfs.read ? file.vfs.read() : "") : (typeof file.vfs === 'string' ? file.vfs : "");
-    size = new TextEncoder().encode(content).length;
+  if (file.vfs !== undefined) {
+    const val = file.vfs;
+    if (val instanceof Uint8Array) size = val.length;
+    else if (typeof val === 'string') size = new TextEncoder().encode(val).length;
+    else if (val !== null && val !== undefined && typeof val !== 'object') size = new TextEncoder().encode(String(val)).length;
+    else size = 0;
   } else {
     const content = sessionStorage.getItem('washm_fs_' + file.path) || '';
     size = content === '[[DIR]]' ? 0 : new TextEncoder().encode(content).length;
@@ -232,11 +271,12 @@ snapshot.path_filestat_get.actual = (dirfd, flags, pathPtr, pathLen, bufPtr) => 
       if (!curr) break;
     }
     if (curr || normPath === 'dev/host') {
-      const isDir = !(curr?._isVirtualFile || typeof curr === 'string');
+      const isDir = (curr && typeof curr === 'object' && !(curr instanceof Uint8Array));
       let size = 0;
-      if (!isDir) {
-        const content = curr._isVirtualFile ? (curr.read ? curr.read() : "") : (typeof curr === 'string' ? curr : "");
-        size = new TextEncoder().encode(content).length;
+      if (!isDir && curr !== undefined && curr !== null) {
+        if (curr instanceof Uint8Array) size = curr.length;
+        else if (typeof curr === 'string') size = new TextEncoder().encode(curr).length;
+        else size = new TextEncoder().encode(String(curr)).length;
       }
       view.setUint8(bufPtr + 16, isDir ? 3 : 4);
       view.setBigUint64(bufPtr + 32, BigInt(size), true);

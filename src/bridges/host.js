@@ -16,7 +16,7 @@
   const uid = os ? os.userInfo().uid : 1000;
   const gid = os ? os.userInfo().gid : 1000;
   
-  globalThis.mounted.washm = {
+  const washmObj = {
     startup: JSON.stringify({
       hostname,
       platform,
@@ -31,17 +31,21 @@
         process.cwd().replace(/^[a-zA-Z]:/, (m) => `/${m[0].toUpperCase()}:`).replace(/\\/g, '/') :
         process.cwd()
     ) : '/',
-    exit_code: {
-      _isVirtualFile: true,
-      write(chunk) { this._code = (this._code || "") + chunk; },
-      close() {
-        const code = parseInt((this._code || "0").trim(), 10);
-        if (process && process.exit) {
-          process.exit(code);
-        } else {
-          console.log('Process exit with code:', code);
-        }
-      }
-    }
+    exit_code: ''
   };
+
+  globalThis.mounted.washm = new Proxy(washmObj, {
+    set(target, prop, value) {
+      if (prop === 'exit_code' && value instanceof Uint8Array) {
+        const code = parseInt(new TextDecoder().decode(value).trim(), 10) || 0;
+        if (process && process.exit) process.exit(code);
+        else console.log('Process exit with code:', code);
+        target.exit_code = value;
+        return true;
+      }
+      target[prop] = value;
+      return true;
+    },
+    get(target, prop) { return target[prop]; }
+  });
 })();
