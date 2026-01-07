@@ -24,7 +24,7 @@ pub fn ensure_bridge() -> Result<(), String> {
     // with the original file path and JSON-escape the whole string to avoid any
     // delimiter or character issues when embedding it in JS.
     let css_with_source = format!(
-        "{}\n/*# sourceURL=washm://node_modules/xterm/css/xterm.css */",
+        "{}\n/*# sourceURL=washm://src/node_modules/xterm/css/xterm.css */",
         css_content
     );
     let css_json = serde_json::to_string(&css_with_source).unwrap();
@@ -35,7 +35,7 @@ pub fn ensure_bridge() -> Result<(), String> {
     style.textContent = {};
     document.head.appendChild(style);
 }})();
-//# sourceURL=washm://bridges/xterm.css.js
+//# sourceURL=washm://src/bridges/xterm.css.js
 "#,
         css_json
     );
@@ -50,7 +50,7 @@ pub fn ensure_bridge() -> Result<(), String> {
         .collect::<Vec<_>>()
         .join("\n");
     let xterm_source = "node_modules/xterm/lib/xterm.js";
-    let xterm_wrapper = format!("{}\n//# sourceURL=washm://{}\n", xterm_clean, xterm_source);
+    let xterm_wrapper = format!("{}\n//# sourceURL=washm://src/{}\n", xterm_clean, xterm_source);
     crate::bootstrap::eval_fire_and_forget(&xterm_wrapper);
 
     // 3. Inject xterm-addon-fit.js
@@ -62,14 +62,14 @@ pub fn ensure_bridge() -> Result<(), String> {
         .collect::<Vec<_>>()
         .join("\n");
     let fit_source = "node_modules/xterm-addon-fit/lib/xterm-addon-fit.js";
-    let fit_wrapper = format!("{}\n//# sourceURL=washm://{}\n", fit_clean, fit_source);
+    let fit_wrapper = format!("{}\n//# sourceURL=washm://src/{}\n", fit_clean, fit_source);
     crate::bootstrap::eval_fire_and_forget(&fit_wrapper);
 
     // 4. Initialize Bridge Logic
     let bridge_js = include_str!("browser_tty.js");
 
     let js_with_source = format!(
-        "{}\n//# sourceURL=washm://bridges/browser_tty.js\n",
+        "{}\n//# sourceURL=washm://src/bridges/browser_tty.js\n",
         bridge_js
     );
 

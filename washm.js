@@ -14,6 +14,9 @@ var wasiSnapshot = {};
 
 var FD_BOOTRAP = 20251219; // special FD for bootstrap eval collection
 
+/** @type {Record<string, string>} */
+var preopens = { '/': '/' };
+
 if (isNode) {
   // Node.js setup
   const _originalEmitWarning = process.emitWarning;
@@ -27,6 +30,7 @@ if (isNode) {
   };
 
   var fs = require('fs');
+  var os = require('os');
   var { WASI } = require('wasi');
   const argv = process.argv;
   /** @type {WASI} */
@@ -38,26 +42,26 @@ if (isNode) {
   mainNode();
 
   async function mainNode() {
+
     const wasmPath = __dirname + '/washm.wasm';
     const wasmBuffer = fs.readFileSync(wasmPath);
+
+    if (process.platform === 'win32') {
+      const pathModule = require('path');
+      const cwdRoot = pathModule.parse(process.cwd()).root;
+      const homeRoot = pathModule.parse(os.homedir()).root;
+      [cwdRoot, homeRoot].filter(Boolean).forEach(r => {
+        const rootPath = r.endsWith('\\') ? r : r + '\\';
+        const letter = rootPath[0].toUpperCase();
+        preopens[`/${letter}:`] = rootPath;
+      });
+    }
+
 
     wasi = new WASI({
       args: ['washm.js', ...argv.slice(2)],
       env: process.env,
-      preopens: (function() {
-        const preopens = { '/': '/' };
-        if (process.platform !== 'win32') return preopens;
-        const pathModule = require('path');
-        const os = require('os');
-        const cwdRoot = pathModule.parse(process.cwd()).root;
-        const homeRoot = pathModule.parse(os.homedir()).root;
-        [cwdRoot, homeRoot].filter(Boolean).forEach(r => {
-          const rootPath = r.endsWith('\\') ? r : r + '\\';
-          const letter = rootPath[0].toUpperCase();
-          preopens[`/${letter}:/`] = rootPath;
-        });
-        return preopens;
-      })(),
+      preopens,
       version: 'preview1'
     });
 

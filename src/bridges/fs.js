@@ -1,5 +1,5 @@
 // @ts-check
-/// <reference path="../globals.d.ts" />
+/// <reference path="../globals.node.d.ts" />
 
 // Unified FS bridge for Browser and Node
 // - initBrowserFS() : original browser FS (sessionStorage-backed)
@@ -276,7 +276,26 @@ function initNodeFS() {
 
   function nodeWasi_path_open(dirfd, dirflags, pathPtr, pathLen, oflags, rightsBase, rightsInheriting, fdflags, fdPtr) {
     const path = new TextDecoder().decode(new Uint8Array(instance.exports.memory.buffer, pathPtr, pathLen));
-    const fullPath = path.startsWith('/') ? path : pathModule.join(process.cwd(), path);
+
+    const preopenDir = Object.values(preopens)[dirfd - 3];
+
+    let fullPath;
+    if (preopenDir) {
+      fullPath = pathModule.join(preopenDir, path.replace(/^\//, ''));
+    } else if (path.startsWith('/')) {
+      fullPath = path;
+    } else if (dirfd === 0xffffffff || dirfd === -1) {
+      fullPath = pathModule.join(process.cwd(), path);
+    } else {
+      const base = fdPath[dirfd];
+      fullPath = base ? pathModule.join(base, path) : path;
+    }
+
+    // // Convert WASI /C/ style paths to C:/ for Node fs on Windows
+    // if (process.platform === 'win32') {
+    //   fullPath = fullPath.replace(/^\/([a-zA-Z])(\/|$)/, '$1:/').replace(/\/+/g, '/');
+    // }
+
     const openResult = orginal_path_open(dirfd, dirflags, pathPtr, pathLen, oflags, rightsBase, rightsInheriting, fdflags, fdPtr);
 
     if (openResult === 0) {
@@ -351,7 +370,7 @@ function initNodeFS() {
     function write(name, type) {
       const nameBytes = encoder.encode(name);
       const rawSize = 24 + nameBytes.length;
-      const paddedSize = Math.ceil(rawSize / 8) * 8;
+      const paddedSize = rawSize;  // Math.ceil(rawSize / 8) * 8;
 
       if (offset + paddedSize > bufLen) return false;
 

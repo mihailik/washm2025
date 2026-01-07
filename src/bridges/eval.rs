@@ -67,7 +67,7 @@ pub fn next_cookie() -> u32 {
 const BRIDGE_JS: &str = include_str!("eval.js");
 
 pub fn ensure_bridge() -> Result<(), String> {
-    let js = format!("{}\n//# sourceURL=washm://bridges/eval.js\n", BRIDGE_JS);
+    let js = format!("{}\n//# sourceURL=washm://src/bridges/eval.js\n", BRIDGE_JS);
     crate::bootstrap::eval_fire_and_forget(&js);
     Ok(())
 }

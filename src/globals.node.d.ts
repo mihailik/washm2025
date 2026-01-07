@@ -7,4 +7,7 @@ declare var WASI: typeof import('wasi').WASI;
 
 declare var wasi: import('wasi').WASI;
 
+/** @type {Record<string, string>} */
+declare var preopens;
+
 // require
