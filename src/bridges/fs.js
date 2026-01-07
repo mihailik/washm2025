@@ -189,11 +189,41 @@ function initBrowserFS() {
     const view = new DataView(instance.exports.memory.buffer);
     const entries = [{ name: '.', type: 3 }, { name: '..', type: 3 }];
 
+    // List only immediate children of the opened directory (`file.path`).
+    const seen = new Set();
+    const dirPath = file.path === '.' ? '' : file.path;
+    const prefix = dirPath === '' ? '' : dirPath + '/';
+
+    function hasChild(keyPrefix) {
+      for (let j = 0; j < sessionStorage.length; j++) {
+        const k = sessionStorage.key(j);
+        if (k && k.startsWith('washm_fs_' + keyPrefix + '/')) return true;
+      }
+      return false;
+    }
+
     for (let i = 0; i < sessionStorage.length; i++) {
       const key = sessionStorage.key(i);
-      if (key?.startsWith('washm_fs_')) {
-        const name = key.substring(9);
-        entries.push({ name, type: sessionStorage.getItem(key) === '[[DIR]]' ? 3 : 4 });
+      if (!key || !key.startsWith('washm_fs_')) continue;
+      const full = key.substring(9); // stored path like 'a/b/c'
+
+      // Determine immediate segment relative to dirPath.
+      if (dirPath === '') {
+        const segment = full.split('/')[0];
+        if (!segment || seen.has(segment)) continue;
+        seen.add(segment);
+        const entryKey = segment;
+        const isDir = sessionStorage.getItem('washm_fs_' + entryKey) === '[[DIR]]' || hasChild(entryKey);
+        entries.push({ name: segment, type: isDir ? 3 : 4 });
+      } else {
+        if (!full.startsWith(prefix)) continue;
+        const remainder = full.substring(prefix.length);
+        const segment = remainder.split('/')[0];
+        if (!segment || seen.has(segment)) continue;
+        seen.add(segment);
+        const entryKey = dirPath + '/' + segment;
+        const isDir = sessionStorage.getItem('washm_fs_' + entryKey) === '[[DIR]]' || hasChild(entryKey);
+        entries.push({ name: segment, type: isDir ? 3 : 4 });
       }
     }
 
@@ -207,16 +237,31 @@ function initBrowserFS() {
       const entry = entries[i];
       const nameBytes = encoder.encode(entry.name);
       if (offset + 24 + nameBytes.length > bufLen) {
-        view.setUint32(bufusedPtr, bufLen, true);
+        // Write as many bytes of the dirent (header + name) as will fit
+        const total = 24 + nameBytes.length;
+        const entryBytes = new Uint8Array(total);
+        const entryView = new DataView(entryBytes.buffer);
+        entryView.setBigUint64(0, BigInt(i + 1), true);
+        // d_ino unknown => 0
+        entryView.setBigUint64(8, 0n, true);
+        entryView.setUint32(16, nameBytes.length, true);
+        entryBytes[20] = entry.type;
+        entryBytes.set(nameBytes, 24);
+        const remaining = bufLen - offset;
+        if (remaining > 0) {
+          new Uint8Array(instance.exports.memory.buffer).set(entryBytes.subarray(0, remaining), bufPtr + offset);
+          offset += remaining;
+        }
         break;
       }
       // d_next: 64-bit cookie for the NEXT entry (i + 1)
       view.setBigUint64(bufPtr + offset, BigInt(i + 1), true);
-      view.setBigUint64(bufPtr + offset + 8, BigInt(i + 1), true);
+      // d_ino: inode unknown => 0
+      view.setBigUint64(bufPtr + offset + 8, 0n, true);
       view.setUint32(bufPtr + offset + 16, nameBytes.length, true);
       view.setUint8(bufPtr + offset + 20, entry.type);
       new Uint8Array(instance.exports.memory.buffer).set(nameBytes, bufPtr + offset + 24);
-      offset += 24 + nameBytes.length;
+      offset += 24 + nameBytes.length; 
     }
     view.setUint32(bufusedPtr, offset, true);
     return 0;
@@ -326,10 +371,9 @@ function initNodeFS() {
     const encoder = new TextEncoder();
 
     let offset = 0;
-    let entryCookie = cookie;  // Track cookie for d_next independently
 
-    if (cookie === 0n && !write('.', 3)) { view.setUint32(bufusedPtr, offset, true); return 0; }
-    if (cookie === 1n && !write('..', 3)) { view.setUint32(bufusedPtr, offset, true); return 0; }
+    if (cookie === 0n && !writeAndAdvanceCookie('.', 3)) { view.setUint32(bufusedPtr, offset, true); return 0; }
+    if (cookie === 1n && !writeAndAdvanceCookie('..', 3)) { view.setUint32(bufusedPtr, offset, true); return 0; }
 
     let dir;
     try {
@@ -361,7 +405,7 @@ function initNodeFS() {
         else if (entry.isFile()) type = 4;
         else if (entry.isSymbolicLink()) type = 7;
 
-        if (!write(entry.name, type)) break;
+        if (!writeAndAdvanceCookie(entry.name, type)) break;
       }
     } finally {
       dir.closeSync();
@@ -375,24 +419,43 @@ function initNodeFS() {
      * @param {number} type
      * @returns 
      */
-    function write(name, type) {
+    function writeAndAdvanceCookie(name, type) {
       const nameBytes = encoder.encode(name);
       const rawSize = 24 + nameBytes.length;
       const paddedSize = rawSize;  // Math.ceil(rawSize / 8) * 8;
 
-      if (offset + paddedSize > bufLen) return false;
+      if (offset + paddedSize > bufLen) {
+        // Write as many bytes of the dirent (header + name) as will fit
+        const total = paddedSize;
+        const entryBytes = new Uint8Array(total);
+        const entryView = new DataView(entryBytes.buffer);
+        entryView.setBigUint64(0, cookie + 1n, true);
+        // d_ino unknown => 0n
+        entryView.setBigUint64(8, 0n, true);
+        entryView.setUint32(16, nameBytes.length, true);
+        entryBytes[20] = type;
+        entryBytes.set(nameBytes, 24);
+        const remaining = bufLen - offset;
+        if (remaining > 0) {
+          mem.set(entryBytes.subarray(0, remaining), bufPtr + offset);
+          offset += remaining;
+        }
+        // Do not advance cookie for partial write; caller will stop
+        return false;
+      }
 
-      view.setBigUint64(bufPtr + offset, entryCookie + 1n, true);
-      view.setBigUint64(bufPtr + offset + 8, entryCookie + 1n, true);
+      view.setBigUint64(bufPtr + offset, cookie + 1n, true);
+      // d_ino unknown => 0n
+      view.setBigUint64(bufPtr + offset + 8, 0n, true);
       view.setUint32(bufPtr + offset + 16, nameBytes.length, true);
       view.setUint8(bufPtr + offset + 20, type);
 
       mem.set(nameBytes, bufPtr + offset + 24);
 
       offset += paddedSize;
-      entryCookie++;
+      cookie++;
 
-      return true;
+      return true; 
     }
   }
 
