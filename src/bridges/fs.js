@@ -206,10 +206,13 @@ function initBrowserFS() {
     for (let i = startIndex; i < entries.length && offset < bufLen; i++) {
       const entry = entries[i];
       const nameBytes = encoder.encode(entry.name);
-      if (offset + 24 + nameBytes.length > bufLen) break;
+      if (offset + 24 + nameBytes.length > bufLen) {
+        view.setUint32(bufusedPtr, bufLen, true);
+        break;
+      }
       // d_next: 64-bit cookie for the NEXT entry (i + 1)
       view.setBigUint64(bufPtr + offset, BigInt(i + 1), true);
-      view.setBigUint64(bufPtr + offset + 8, 0n, true);
+      view.setBigUint64(bufPtr + offset + 8, BigInt(i + 1), true);
       view.setUint32(bufPtr + offset + 16, nameBytes.length, true);
       view.setUint8(bufPtr + offset + 20, entry.type);
       new Uint8Array(instance.exports.memory.buffer).set(nameBytes, bufPtr + offset + 24);
@@ -323,6 +326,7 @@ function initNodeFS() {
     const encoder = new TextEncoder();
 
     let offset = 0;
+    let entryCookie = cookie;  // Track cookie for d_next independently
 
     if (cookie === 0n && !write('.', 3)) { view.setUint32(bufusedPtr, offset, true); return 0; }
     if (cookie === 1n && !write('..', 3)) { view.setUint32(bufusedPtr, offset, true); return 0; }
@@ -335,6 +339,7 @@ function initNodeFS() {
       return 44;
     }
 
+    let completed = false;
     try {
       const numToSkip = cookie - 2n > 0n ? cookie - 2n : 0n;
       for (let i = 0n; i < numToSkip; i++) {
@@ -346,7 +351,10 @@ function initNodeFS() {
 
       while (true) {
         const entry = dir.readSync();
-        if (!entry) break;
+        if (!entry) {
+          completed = true;
+          break;
+        }
 
         let type = 0;
         if (entry.isDirectory()) type = 3;
@@ -359,7 +367,7 @@ function initNodeFS() {
       dir.closeSync();
     }
 
-    view.setUint32(bufusedPtr, offset, true);
+    view.setUint32(bufusedPtr, completed ? offset : bufLen, true);
     return 0;
 
     /**
@@ -374,15 +382,15 @@ function initNodeFS() {
 
       if (offset + paddedSize > bufLen) return false;
 
-      view.setBigUint64(bufPtr + offset, cookie + 1n, true);
-      view.setBigUint64(bufPtr + offset + 8, 0n, true);
+      view.setBigUint64(bufPtr + offset, entryCookie + 1n, true);
+      view.setBigUint64(bufPtr + offset + 8, entryCookie + 1n, true);
       view.setUint32(bufPtr + offset + 16, nameBytes.length, true);
       view.setUint8(bufPtr + offset + 20, type);
 
       mem.set(nameBytes, bufPtr + offset + 24);
 
       offset += paddedSize;
-      cookie++;
+      entryCookie++;
 
       return true;
     }
