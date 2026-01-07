@@ -25,7 +25,7 @@ pub fn ensure_bridge() -> Result<(), String> {
         crate::bridges::browser_tty::ensure_bridge()
     } else {
         // Node.js path
-        let js = format!("{}\n//# sourceURL=washm:/bridges/tty.js\n", BRIDGE_JS);
+        let js = format!("{}\n//# sourceURL=washm://bridges/tty.js\n", BRIDGE_JS);
         crate::bootstrap::eval_fire_and_forget(&js);
         Ok(())
     }

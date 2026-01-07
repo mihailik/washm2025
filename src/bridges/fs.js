@@ -199,10 +199,15 @@ function initBrowserFS() {
 
     const encoder = new TextEncoder();
     let offset = 0;
-    for (let i = Number(cookie); i < entries.length && offset < bufLen; i++) {
+    // Cookie is 64-bit: upper 32 bits zero, lower 32 bits index
+    // We only care about the lower 32 bits for the index
+    const startIndex = Number(BigInt(cookie) & 0xFFFFFFFFn);
+    
+    for (let i = startIndex; i < entries.length && offset < bufLen; i++) {
       const entry = entries[i];
       const nameBytes = encoder.encode(entry.name);
       if (offset + 24 + nameBytes.length > bufLen) break;
+      // d_next: 64-bit cookie for the NEXT entry (i + 1)
       view.setBigUint64(bufPtr + offset, BigInt(i + 1), true);
       view.setBigUint64(bufPtr + offset + 8, 0n, true);
       view.setUint32(bufPtr + offset + 16, nameBytes.length, true);
@@ -260,162 +265,110 @@ function initBrowserFS() {
 // -- Node implementation (streaming readdir + lazy lstat) ------------------
 function initNodeFS() {
   const pathModule = require('path');
-  const openFiles = new Map();
-  const openDirs = new Map();
-  let nextFd = 20260106;
-  const CHUNK_SIZE = 2048; // fixed, conservative chunk
+  const fs = require('fs');
 
+  const orginal_path_open = wasiSnapshot.path_open.actual;
   wasiSnapshot.path_open.actual = nodeWasi_path_open;
-  wasiSnapshot.fd_read.actual = nodeWasi_fd_read;
-  const orig_fd_write = wasiSnapshot.fd_write.actual;
-  wasiSnapshot.fd_write.actual = nodeWasi_fd_write;
-  const orig_fd_close = wasiSnapshot.fd_close.actual;
-  wasiSnapshot.fd_close.actual = nodeWasi_fd_close;
   wasiSnapshot.fd_readdir.actual = nodeWasi_fd_readdir;
-  wasiSnapshot.fd_filestat_get.actual = nodeWasi_fd_filestat_get;
-  wasiSnapshot.path_filestat_get.actual = nodeWasi_path_filestat_get;
+
+  /** @type {string[]} */
+  const fdPath = [];
 
   function nodeWasi_path_open(dirfd, dirflags, pathPtr, pathLen, oflags, rightsBase, rightsInheriting, fdflags, fdPtr) {
     const path = new TextDecoder().decode(new Uint8Array(instance.exports.memory.buffer, pathPtr, pathLen));
-    const raw = path.startsWith('/') ? path : pathModule.join(process.cwd(), path);
-    let st;
-    try {
-      st = fs.statSync(raw);
-    } catch (e) {
-      if (oflags & 1) {
-        // O_CREAT - create empty file
-        try { fs.writeFileSync(raw, ''); st = fs.statSync(raw); } catch (e2) { return 44; }
-      } else return 44;
+    const fullPath = path.startsWith('/') ? path : pathModule.join(process.cwd(), path);
+    const openResult = orginal_path_open(dirfd, dirflags, pathPtr, pathLen, oflags, rightsBase, rightsInheriting, fdflags, fdPtr);
+
+    if (openResult === 0) {
+      const fd = new DataView(instance.exports.memory.buffer).getUint32(fdPtr, true);
+      fdPath[fd] = fullPath;
     }
 
-    const fd = nextFd++;
-    if (st.isDirectory()) {
-      const dir = fs.opendirSync(raw);
-      openDirs.set(fd, { path: raw, dir, buffer: [], index: 0, emitted: 0, done: false });
-    } else {
-      let content = null;
-      try { content = fs.readFileSync(raw); } catch (e) { content = Buffer.alloc(0); }
-      openFiles.set(fd, { path: raw, pos: 0, buffers: [], content: content });
-    }
-    new DataView(instance.exports.memory.buffer).setUint32(fdPtr, fd, true);
-    return 0;
+    return openResult;
   }
 
-  function nodeWasi_fd_read(fd, iovsPtr, iovsLen, nreadPtr) {
-    const file = openFiles.get(fd);
-    if (!file) return 44;
-    if (file.isDir) return 31; // EISDIR
-
-    const view = new DataView(instance.exports.memory.buffer);
-    const bytes = file.content || Buffer.alloc(0);
-    let totalRead = 0;
-    for (let i = 0; i < iovsLen; i++) {
-      const bufPtr = view.getUint32(iovsPtr + i * 8, true);
-      const bufLen = view.getUint32(iovsPtr + i * 8 + 4, true);
-      const toRead = Math.min(bufLen, bytes.length - file.pos);
-      if (toRead > 0) {
-        new Uint8Array(instance.exports.memory.buffer).set(new Uint8Array(bytes.buffer, bytes.byteOffset + file.pos, toRead), bufPtr);
-        file.pos += toRead;
-        totalRead += toRead;
-      }
-    }
-    view.setUint32(nreadPtr, totalRead, true);
-    return 0;
-  }
-
-  function nodeWasi_fd_write(fd, iovsPtr, iovsLen, nwrittenPtr) {
-    if (fd === FD_BOOTRAP || fd === 1 || fd === 2) {
-      return orig_fd_write(fd, iovsPtr, iovsLen, nwrittenPtr);
-    }
-    const file = openFiles.get(fd);
-    if (!file) return 44;
-    if (file.isDir) return 31;
-    const view = new DataView(instance.exports.memory.buffer);
-    let totalWritten = 0;
-    for (let i = 0; i < iovsLen; i++) {
-      const bufPtr = view.getUint32(iovsPtr + i * 8, true);
-      const bufLen = view.getUint32(iovsPtr + i * 8 + 4, true);
-      const chunk = new Uint8Array(instance.exports.memory.buffer, bufPtr, bufLen);
-      file.buffers.push(Buffer.from(chunk));
-      totalWritten += bufLen;
-    }
-    view.setUint32(nwrittenPtr, totalWritten, true);
-    return 0;
-  }
-
-  function nodeWasi_fd_close(fd) {
-    if (fd === FD_BOOTRAP) return orig_fd_close(fd);
-    const dir = openDirs.get(fd);
-    if (dir) {
-      try { dir.dir.closeSync(); } catch (e) {}
-      openDirs.delete(fd);
-      return 0;
-    }
-    const file = openFiles.get(fd);
-    if (file) {
-      if (file.buffers && file.buffers.length > 0) {
-        const out = Buffer.concat(file.buffers);
-        try { fs.writeFileSync(file.path, out); } catch (e) {}
-      }
-      openFiles.delete(fd);
-      return 0;
-    }
-    return 44;
-  }
-
+  /**
+   * @param {number} fd
+   * @param {number} bufPtr
+   * @param {number} bufLen
+   * @param {bigint} cookie
+   * @param {number} bufusedPtr
+   * @returns {number} 
+   */
   function nodeWasi_fd_readdir(fd, bufPtr, bufLen, cookie, bufusedPtr) {
-    const dirEntry = openDirs.get(fd);
-    if (!dirEntry) return 44;
+    const fullPath = fdPath[fd];
+    if (!fullPath) return 44; // ENOENT
+
+    const mem = new Uint8Array(instance.exports.memory.buffer);
     const view = new DataView(instance.exports.memory.buffer);
     const encoder = new TextEncoder();
+
     let offset = 0;
 
-    // Ensure buffer has entries to emit
-    while (!dirEntry.done && dirEntry.buffer.length < CHUNK_SIZE) {
-      const ent = dirEntry.dir.readSync();
-      if (ent === null) { dirEntry.done = true; break; }
-      dirEntry.buffer.push(ent);
+    if (cookie === 0n && !write('.', 3)) { view.setUint32(bufusedPtr, offset, true); return 0; }
+    if (cookie === 1n && !write('..', 3)) { view.setUint32(bufusedPtr, offset, true); return 0; }
+
+    let dir;
+    try {
+      dir = fs.opendirSync(fullPath);
+    } catch (e) {
+      if (offset > 0) { view.setUint32(bufusedPtr, offset, true); return 0; }
+      return 44;
     }
 
-    let startIndex = Number(cookie);
-    // cookie 0 => start at 0 (we'll consider 0 is first special '.' entry consistent with browser impl)
-    // We will emit '.' and '..' as first two entries
-    let virtualEntries = [{ name: '.', type: 3 }, { name: '..', type: 3 }];
-    for (let i = 0; i < dirEntry.buffer.length; i++) {
-      const ent = dirEntry.buffer[i];
-      virtualEntries.push({ name: ent.name, type: ent.isDirectory() ? 3 : (ent.isFile() ? 4 : 0), idx: i });
-    }
+    try {
+      const numToSkip = cookie - 2n > 0n ? cookie - 2n : 0n;
+      for (let i = 0n; i < numToSkip; i++) {
+        if (!dir.readSync()) {
+          view.setUint32(bufusedPtr, offset, true);
+          return 0;
+        }
+      }
 
-    for (let i = startIndex; i < virtualEntries.length && offset < bufLen; i++) {
-      const entry = virtualEntries[i];
-      const nameBytes = encoder.encode(entry.name);
-      if (offset + 24 + nameBytes.length > bufLen) break;
-      view.setBigUint64(bufPtr + offset, BigInt(i + 1), true); // next cookie
-      view.setBigUint64(bufPtr + offset + 8, 0n, true); // d_ino unused
-      view.setUint32(bufPtr + offset + 16, nameBytes.length, true);
-      view.setUint8(bufPtr + offset + 20, entry.type);
-      new Uint8Array(instance.exports.memory.buffer).set(nameBytes, bufPtr + offset + 24);
-      offset += 24 + nameBytes.length;
+      while (true) {
+        const entry = dir.readSync();
+        if (!entry) break;
+
+        let type = 0;
+        if (entry.isDirectory()) type = 3;
+        else if (entry.isFile()) type = 4;
+        else if (entry.isSymbolicLink()) type = 7;
+
+        if (!write(entry.name, type)) break;
+      }
+    } finally {
+      dir.closeSync();
     }
 
     view.setUint32(bufusedPtr, offset, true);
     return 0;
+
+    /**
+     * @param {string} name
+     * @param {number} type
+     * @returns 
+     */
+    function write(name, type) {
+      const nameBytes = encoder.encode(name);
+      const rawSize = 24 + nameBytes.length;
+      const paddedSize = Math.ceil(rawSize / 8) * 8;
+
+      if (offset + paddedSize > bufLen) return false;
+
+      view.setBigUint64(bufPtr + offset, cookie + 1n, true);
+      view.setBigUint64(bufPtr + offset + 8, 0n, true);
+      view.setUint32(bufPtr + offset + 16, nameBytes.length, true);
+      view.setUint8(bufPtr + offset + 20, type);
+
+      mem.set(nameBytes, bufPtr + offset + 24);
+
+      offset += paddedSize;
+      cookie++;
+
+      return true;
+    }
   }
 
-  function nodeWasi_fd_filestat_get(fd, bufPtr) {
-    const file = openFiles.get(fd);
-    if (!file) return 44;
-    const view = new DataView(instance.exports.memory.buffer);
-    let size = 0;
-    try { const st = fs.statSync(file.path); size = st.isDirectory() ? 0 : st.size; view.setUint8(bufPtr + 16, st.isDirectory() ? 3 : 4); view.setBigUint64(bufPtr + 32, BigInt(size), true); return 0; } catch (e) { return 44; }
-  }
-
-  function nodeWasi_path_filestat_get(dirfd, flags, pathPtr, pathLen, bufPtr) {
-    const path = new TextDecoder().decode(new Uint8Array(instance.exports.memory.buffer, pathPtr, pathLen));
-    const raw = path.startsWith('/') ? path : pathModule.join(process.cwd(), path);
-    const view = new DataView(instance.exports.memory.buffer);
-    try { const st = fs.statSync(raw); view.setUint8(bufPtr + 16, st.isDirectory() ? 3 : 4); view.setBigUint64(bufPtr + 32, BigInt(st.isDirectory() ? 0 : st.size), true); return 0; } catch (e) { return 44; }
-  }
 }
 
 // Entry: choose appropriate init

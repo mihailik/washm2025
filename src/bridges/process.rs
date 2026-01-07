@@ -5,7 +5,7 @@ use std::fs;
 const BRIDGE_JS: &str = include_str!("process.js");
 
 pub fn ensure_bridge() -> Result<(), String> {
-    let js = format!("{}\n//# sourceURL=washm:/bridges/process.js\n", BRIDGE_JS);
+    let js = format!("{}\n//# sourceURL=washm://bridges/process.js\n", BRIDGE_JS);
     crate::bootstrap::eval_fire_and_forget(&js);
     Ok(())
 }
