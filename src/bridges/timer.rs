@@ -6,7 +6,10 @@ use std::time::Duration;
 const BRIDGE_JS: &str = include_str!("timer.js");
 
 pub fn ensure_bridge() -> Result<(), String> {
-    let js = format!("{}\n//# sourceURL=washm://src/bridges/timer.js\n", BRIDGE_JS);
+    let js = format!(
+        "{}\n//# sourceURL=washm://src/bridges/timer.js\n",
+        BRIDGE_JS
+    );
     crate::bootstrap::eval_fire_and_forget(&js);
     Ok(())
 }

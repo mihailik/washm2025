@@ -50,7 +50,10 @@ pub fn ensure_bridge() -> Result<(), String> {
         .collect::<Vec<_>>()
         .join("\n");
     let xterm_source = "node_modules/xterm/lib/xterm.js";
-    let xterm_wrapper = format!("{}\n//# sourceURL=washm://src/{}\n", xterm_clean, xterm_source);
+    let xterm_wrapper = format!(
+        "{}\n//# sourceURL=washm://src/{}\n",
+        xterm_clean, xterm_source
+    );
     crate::bootstrap::eval_fire_and_forget(&xterm_wrapper);
 
     // 3. Inject xterm-addon-fit.js
