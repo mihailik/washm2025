@@ -57,8 +57,6 @@ fn main() {
     // Section 4: Apply semantic transformations using RA
     engine.transform_all(&vendor_dir, &mappings);
 
-    // Create additional required files
-    create_customizations(&vendor_dir, &project_root, &mappings);
 
     // Final validation
     verify_no_stubs(&vendor_dir);
@@ -1047,16 +1045,15 @@ impl SemanticEngine {
                 }
             }
 
-            // Fix include! macro
+            // Replace include! with a re-export to the canonical shim
             for macro_call in root.descendants().filter_map(ast::MacroCall::cast) {
                 if macro_call
                     .path()
                     .map_or(false, |p| p.to_string() == "include")
                 {
                     if macro_call.to_string().contains("embedded_locales.rs") {
-                        let new_call =
-                            parse_stmt::<ast::MacroCall>("include!{\"../../embedded_locales.rs\"}");
-                        editor.replace(macro_call.syntax(), new_call.syntax());
+                        let new_item = parse_node::<ast::Item>("pub use crate::shims::embedded_locales::get_embedded_locale as get_embedded_locale;");
+                        editor.replace(macro_call.syntax(), new_item.syntax());
                     }
                 }
             }
@@ -1168,15 +1165,15 @@ impl SemanticEngine {
                     }
                 }
             }
-            // Add pub mod embedded;
+            // Add pub use re-export for embedded shim
             let has_mod = root
                 .descendants()
-                .filter_map(ast::Module::cast)
-                .any(|m| m.name().map_or(false, |n| n.text() == "embedded"));
+                .filter_map(ast::Use::cast)
+                .any(|u| u.to_string().contains("shims::embedded_brush_shell"));
             if !has_mod {
-                let mod_item = parse_node::<ast::Item>("pub mod embedded;");
+                let use_item = parse_node::<ast::Item>("pub use crate::shims::embedded_brush_shell as embedded;");
                 if let Some(last) = root.last_child() {
-                    editor.insert(Position::after(last), mod_item.syntax());
+                    editor.insert(Position::after(last), use_item.syntax());
                 }
             }
         }
@@ -1330,35 +1327,7 @@ fn copy_sources(mappings: &[(&str, &str)], vendor_dir: &Path) {
     }
 }
 
-fn create_customizations(vendor_dir: &Path, project_root: &Path, mappings: &[(&str, &str)]) {
-    for (_, dest_name) in mappings {
-        let dest_path = vendor_dir.join(dest_name).join("src");
 
-        match *dest_name {
-            "uucore" => {
-                let locales_path = dest_path.join("embedded_locales.rs");
-                fs::write(
-                    locales_path,
-                    r#"
-pub fn get_embedded_locale(_key: &str) -> Option<&'static str> {
-    None
-}
-"#,
-                )
-                .unwrap();
-            }
-            "brush-shell" => {
-                let embedded_path = dest_path.join("embedded.rs");
-                let project_src = project_root.join("src/embedded_brush_shell.rs");
-                let rel = pathdiff::diff_paths(&project_src, &dest_path)
-                    .unwrap_or_else(|| PathBuf::from("../../src/embedded_brush_shell.rs"));
-                let rel_str = rel.to_string_lossy().replace("\\", "/");
-                fs::write(embedded_path, format!("include!(\"{}\");\n", rel_str)).unwrap();
-            }
-            _ => {}
-        }
-    }
-}
 
 fn verify_no_stubs(vendor_dir: &Path) {
     // println!("Verifying no unpatched stubs in {:?}", vendor_dir);
