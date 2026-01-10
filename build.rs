@@ -253,8 +253,8 @@ impl SemanticEngine {
                 "crate::wasm_interactive::MinimalInputBackend",
             );
             content = content.replace(
-                "let mut ui = crate::wasm_interactive::MinimalInputBackend;",
-                "let mut ui = crate::wasm_interactive::MinimalInputBackend::new();",
+                "let mut input_backend = crate::wasm_interactive::MinimalInputBackend;",
+                "let mut input_backend = crate::wasm_interactive::MinimalInputBackend::new();",
             );
             content = content.replace(
                 "brush_interactive::WasmInputBackend",
@@ -275,6 +275,63 @@ impl SemanticEngine {
             content = content.replace(
                 "pub fn localized_help_template_with_colors(",
                 "use crate::translate;\npub fn localized_help_template_with_colors(",
+            );
+        }
+
+        if path_str.ends_with("brush-interactive/src/input_backend.rs") {
+            println!("cargo:warning=Patching input_backend.rs");
+            content = content.replace(
+                "use crate::ShellError;",
+                "use crate::brush_interactive::ShellError;",
+            );
+            content = content.replace(
+                "&crate::ShellRef",
+                "&crate::brush_interactive::ShellRef",
+            );
+            content = content.replace(
+                "    fn read_line(\n        &mut self,",
+                "    async fn read_line(\n        &mut self,",
+            );
+        }
+
+        if path_str.ends_with("brush-shell/src/config.rs") {
+            println!("cargo:warning=Patching config.rs for WASM");
+            // Stub out etcetera
+            content = content.replace(
+                "use etcetera::BaseStrategy;",
+                "// use etcetera::BaseStrategy; // Stubbed for WASM",
+            );
+            // Stub default_config_path to return None
+            content = content.replace(
+                "    let strategy = etcetera::choose_base_strategy().ok()?;\n    Some(\n        strategy\n            .config_dir()\n            .join(CONFIG_SUBDIR_NAME)\n            .join(CONFIG_FILE_NAME),\n    )",
+                "    None // Stubbed for WASM - no filesystem config",
+            );
+            // Stub out toml parsing - replace with serde_json
+            content = content.replace(
+                "    match toml::from_str(&content) {",
+                "    match serde_json::from_str::<Config>(&content) {",
+            );
+            // Fix error mapping
+            content = content.replace(
+                "            error: Some(ConfigLoadError::Parse(e)),",
+                "            error: Some(ConfigLoadError::Parse(e.to_string())),",
+            );
+            content = content.replace(
+                "Parse(#[from] toml::de::Error),",
+                "Parse(String), // toml stubbed for WASM",
+            );
+        }
+
+        if path_str.ends_with("brush-shell/src/args.rs") {
+            println!("cargo:warning=Patching args.rs");
+            content = content.replace(
+                "default_value_t = crate::entry::DEFAULT_ENABLE_HIGHLIGHTING",
+                "default_value_t = crate::brush_shell::entry::DEFAULT_ENABLE_HIGHLIGHTING",
+            );
+            // Fix clap parsing to use String type
+            content = content.replace(
+                "Self::try_parse_from([\"brush\"])",
+                "Self::try_parse_from([\"brush\".to_string()])",
             );
         }
 

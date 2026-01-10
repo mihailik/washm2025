@@ -25,17 +25,16 @@ macro_rules! make_coreutil {
                 for k in current_env {
                     if context
                         .shell
-                        .env
+                        .env()
                         .get(&k)
                         .map_or(true, |(_, v)| !v.is_exported())
                     {
                         std::env::remove_var(k);
                     }
                 }
-                for (k, v) in context.shell.env.iter_exported() {
-                    if v.value().is_set() {
-                        std::env::set_var(k, v.value().to_cow_str(context.shell).as_ref());
-                    }
+                for (k, v) in context.shell.env().iter_exported() {
+                    let val = v.value().to_cow_str(context.shell);
+                    std::env::set_var(k, val.as_ref());
                 }
 
                 let code = crate::coreutils_dispatch::CoreutilsDispatch::run(
