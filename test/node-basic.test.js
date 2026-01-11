@@ -7,9 +7,15 @@ test('node mode: WASM loads and exits', async () => {
   const env = await washEnvironment({ mode: 'node' });
   const washm = await env.washm([]);
 
-  assert.ok(washm, 'Should return washm instance');
-  assert.ok(washm.streams, 'Should have streams');
-  assert.equal(typeof washm.exitCode, 'number', 'Should have exitCode property');
+  assert.deepStrictEqual({
+    hasInstance: !!washm,
+    hasStreams: !!washm.streams,
+    exitCodeType: typeof washm.exitCode
+  }, {
+    hasInstance: true,
+    hasStreams: true,
+    exitCodeType: 'number'
+  });
 });
 
 test('node mode: washm.js is actually evaluated', async () => {
@@ -21,13 +27,17 @@ test('node mode: washm.js is actually evaluated', async () => {
   const stdout = washm.streams.stdout.readAll();
   const stderr = washm.streams.stderr.readAll();
 
-  // At minimum, some output should exist (even if empty strings)
-  assert.equal(typeof stdout, 'string', 'stdout should be captured as string');
-  assert.equal(typeof stderr, 'string', 'stderr should be captured as string');
+  // Single structural assertion for types
+  assert.deepStrictEqual({
+    stdoutType: typeof stdout,
+    stderrType: typeof stderr
+  }, {
+    stdoutType: 'string',
+    stderrType: 'string'
+  });
 
   // The fact that we get here without errors means washm.js was evaluated
   // (otherwise we'd get syntax errors or module not found errors)
-  assert.ok(true, 'washm.js was successfully evaluated');
 });
 
 test('node mode: captures stdout output', async () => {
@@ -36,12 +46,7 @@ test('node mode: captures stdout output', async () => {
 
   // Check if any output was captured
   const output = washm.streams.stdout.readAll();
-  assert.equal(typeof output, 'string', 'Should capture string output');
-
-  // Log what we actually captured
-  console.log('=== CAPTURED STDOUT ===');
-  console.log(output || '(empty)');
-  console.log('=== END STDOUT ===');
+  assert.deepStrictEqual({ outputType: typeof output }, { outputType: 'string' });
 });
 
 test('node mode: check stderr output', async () => {
@@ -49,10 +54,13 @@ test('node mode: check stderr output', async () => {
   const washm = await env.washm([]);
 
   const stderr = washm.streams.stderr.readAll();
-  console.log('=== CAPTURED STDERR ===');
-  console.log(stderr || '(empty)');
-  console.log('=== END STDERR ===');
-  console.log('Exit code:', washm.exitCode);
+  assert.deepStrictEqual({
+    stderrType: typeof stderr,
+    exitCodeType: typeof washm.exitCode
+  }, {
+    stderrType: 'string',
+    exitCodeType: 'number'
+  });
 });
 
 test('node mode: executes echo command', async () => {
@@ -65,10 +73,12 @@ test('node mode: executes echo command', async () => {
   const stdout = env.streams.stdout.readAll();
   const stderr = env.streams.stderr.readAll();
 
-  // echo should print the text with newline
-  assert.equal(stdout, 'hello world\n', 'Should output "hello world" with newline');
-  assert.equal(stderr, '', 'Should have no stderr output');
-  assert.equal(washm.exitCode, 0, 'Should exit with code 0');
+  // single structural assertion for echo command output
+  assert.deepStrictEqual({ stdout, stderr, exitCode: washm.exitCode }, {
+    stdout: 'hello world\n',
+    stderr: '',
+    exitCode: 0
+  });
 });
 
 test('node mode: executes pwd command', async () => {
@@ -81,11 +91,18 @@ test('node mode: executes pwd command', async () => {
   const stdout = env.streams.stdout.readAll();
   const stderr = env.streams.stderr.readAll();
 
-  // pwd should print the current working directory
-  assert.ok(stdout.length > 0, 'Should output a directory path');
-  assert.ok(stdout.endsWith('\n'), 'Should end with newline');
-  assert.equal(stderr, '', 'Should have no stderr output');
-  assert.equal(washm.exitCode, 0, 'Should exit with code 0');
+  // single structural assertion for pwd behavior (non-empty string and ends with newline)
+  assert.deepStrictEqual({
+    stdoutNonEmpty: stdout.length > 0,
+    stdoutEndsWithNewline: stdout.endsWith('\n'),
+    stderrEmpty: stderr === '',
+    exitCodeZero: washm.exitCode === 0
+  }, {
+    stdoutNonEmpty: true,
+    stdoutEndsWithNewline: true,
+    stderrEmpty: true,
+    exitCodeZero: true
+  });
 });
 
 test.skip('node mode: shell prints version with --version', async () => {
