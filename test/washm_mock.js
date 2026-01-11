@@ -277,6 +277,7 @@ class WashmInstance {
   constructor(runtime, streams) {
     this.streams = streams;
     this._runtime = runtime;
+    this._cleaned = false;
   }
 
   get exitCode() {
@@ -285,9 +286,29 @@ class WashmInstance {
 
   async waitForExit() {
     if (this._runtime.waitForExit) {
-      return await this._runtime.waitForExit();
+      const exitCode = await this._runtime.waitForExit();
+      await this.cleanup();
+      return exitCode;
     }
-    return this.exitCode;
+    const exitCode = this.exitCode;
+    await this.cleanup();
+    return exitCode;
+  }
+
+  /**
+   * Cleanup resources after process exit
+   */
+  async cleanup() {
+    if (this._cleaned) return;
+    this._cleaned = true;
+
+    // Call runtime-specific cleanup if available
+    if (this._runtime.cleanup) {
+      this._runtime.cleanup();
+    }
+
+    // Note: We don't clear streams automatically as tests may need to inspect them
+    // Tests can call streams.stdout.clear(), streams.stderr.clear() manually
   }
 }
 
@@ -597,6 +618,15 @@ class MockWASI {
   fd_fdstat_get(fd, stat) {
     return 28; // ENOSYS
   }
+
+  /**
+   * Cleanup - release resources
+   */
+  cleanup() {
+    // Nullify instance reference for garbage collection
+    this.instance = null;
+    // Note: streams are not cleared as tests may need to inspect them
+  }
 }
 
 /**
@@ -767,6 +797,9 @@ async function nodePreloader(opts, streams) {
       // Already exited during eval
       return mockWasi.exitCode !== null ? mockWasi.exitCode : 0;
     },
+    cleanup: () => {
+      mockWasi.cleanup();
+    }
   };
 }
 
@@ -1162,6 +1195,12 @@ async function browserPreloader(opts, streams) {
       // Or better, hook the exit.
       await new Promise(r => setTimeout(r, 100));
       return exitCode;
+    },
+    cleanup: () => {
+      // Clear input queue
+      inputQueue.length = 0;
+      inputNotify = null;
+      // Note: streams are not cleared as tests may need to inspect them
     }
   };
 }
