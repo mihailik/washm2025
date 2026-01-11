@@ -8,6 +8,13 @@
  * The harness provides minimal mocked APIs and evaluates washm.js in a
  * controlled scope, enabling comprehensive testing without modifying
  * production code.
+ * 
+ * Test Control APIs:
+ * - washm.streams.stdin.write('text\n') - Send input to running WASM
+ * - washm.streams.stdout.readAll() - Read captured stdout
+ * - washm.streams.stderr.readAll() - Read captured stderr
+ * - washm.exitCode - Get process exit code
+ * - washm.waitForExit() - Wait for process to complete
  */
 
 // ============================================================================
@@ -431,10 +438,48 @@ class MockWASI {
   }
 
   /**
-   * Read from file descriptor - stub (not implemented in Phase 3)
+   * Read from file descriptor
    */
   fd_read(fd, iovs, iovsLen, nread) {
-    return 28; // ENOSYS - not implemented yet
+    if (!this.instance) return 28;
+
+    // Only handle stdin (FD 0)
+    if (fd !== 0) {
+      return 28; // ENOSYS for other FDs
+    }
+
+    const memory = new Uint8Array(this.instance.exports.memory.buffer);
+    const view = new DataView(memory.buffer);
+
+    // Read from stdin stream
+    const input = this.streams.stdin.read();
+    if (input === null) {
+      // No data available
+      view.setUint32(nread, 0, true);
+      return 0;
+    }
+
+    // Write to buffers
+    const encoder = new TextEncoder();
+    const encoded = encoder.encode(input);
+    let totalWritten = 0;
+    let remaining = encoded.length;
+    let srcOffset = 0;
+
+    for (let i = 0; i < iovsLen && remaining > 0; i++) {
+      const ptr = view.getUint32(iovs + i * 8, true);
+      const len = view.getUint32(iovs + i * 8 + 4, true);
+      const toWrite = Math.min(len, remaining);
+
+      memory.set(encoded.subarray(srcOffset, srcOffset + toWrite), ptr);
+
+      totalWritten += toWrite;
+      srcOffset += toWrite;
+      remaining -= toWrite;
+    }
+
+    view.setUint32(nread, totalWritten, true);
+    return 0;
   }
 
   /**
@@ -556,6 +601,12 @@ class MockWASI {
 
 /**
  * Node preloader - creates minimal Node.js-like environment with MockWASI
+ * 
+ * I/O Interception Strategy (Node Mode):
+ * - WASI fd_write(FD 1) → streams.stdout.write()
+ * - WASI fd_write(FD 2) → streams.stderr.write()
+ * - WASI fd_read(FD 0) → streams.stdin.read()
+ * - Real protocol.js handles /dev/host/ VFS (including eval)
  */
 async function nodePreloader(opts, streams) {
   const fsModule = await import('fs');
@@ -728,6 +779,12 @@ const realGlobal = globalThis;
 /**
  * Browser preloader - creates minimal Browser-like environment
  * Uses direct eval() with local mocked variables to effectively shadow globals.
+ * 
+ * I/O Interception Strategy (Browser Mode):
+ * - Terminal.write() → intercepted and copied to streams.stdout
+ * - Terminal.onData() → provides handler that reads from streams.stdin
+ * - Real fs.js bridge handles filesystem via sessionStorage
+ * - Real protocol.js handles /dev/host/ VFS (including eval)
  */
 async function browserPreloader(opts, streams) {
   const fsModule = await import('fs');
