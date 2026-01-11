@@ -57,6 +57,22 @@ test('streams remain accessible after cleanup for inspection', async () => {
   assert.strictEqual(env.streams.stdout.readAll(), 'preserved\n');
 });
 
+// Regression test: ensure host writes scheduled on next tick are preserved after cleanup
+test('streams remain accessible after cleanup for inspection (delayed host write)', async () => {
+  const env = await washEnvironment({ mode: 'node' });
+  const instance = await env.washm(['true']);
+
+  // Schedule a host-side write on the next tick, simulating async writes
+  setTimeout(() => {
+    env.streams.stdout.write('delayed\n');
+  }, 0);
+
+  await instance.waitForExit();
+
+  // Delayed write should be visible after cleanup
+  assert.strictEqual(env.streams.stdout.readAll(), 'delayed\n');
+});
+
 test('manual cleanup: streams can be cleared explicitly', async () => {
   const env = await washEnvironment({ mode: 'node' });
   const instance = await env.washm(['echo', 'to be cleared']);

@@ -43,7 +43,10 @@ if (isNode) {
 
   async function mainNode() {
 
-    const wasmPath = __dirname + '/washm.wasm';
+    const wasmPath = __dirname + (
+      argv.indexOf('--debug') >= 0 && argv.splice(argv.indexOf('--debug'), 1) ?
+        '/washm.debug.wasm' :
+        '/washm.wasm');
     const wasmBuffer = fs.readFileSync(wasmPath);
 
     if (process.platform === 'win32') {
@@ -126,6 +129,10 @@ if (isNode) {
   async function mainBrowser() {
     // Initialize override hooks
     globalThis.washm_wasi_overrides = {};
+
+    const arg = /debug/i.test(location + '')
+      ? 'washm.debug.wasm'
+      : 'washm.wasm';
 
     /**
      * Minimal WASI shim with delegating stubs
@@ -284,7 +291,6 @@ if (isNode) {
         const memory = instance.exports.memory;
         const view = new DataView(memory.buffer);
         view.setUint32(argc, 1, true);
-        const arg = 'washm.wasm';
         view.setUint32(argvBufSize, arg.length + 1, true);
         return 0;
       },
@@ -292,7 +298,6 @@ if (isNode) {
         const memory = instance.exports.memory;
         const view = new DataView(memory.buffer);
         const encoder = new TextEncoder();
-        const arg = 'washm.wasm';
         const encoded = encoder.encode(arg + '\0');
         new Uint8Array(memory.buffer).set(encoded, argvBuf);
         view.setUint32(argv, argvBuf, true);
@@ -321,7 +326,7 @@ if (isNode) {
     };
 
     // Fetch and instantiate WASM
-    const response = await fetch('./washm.wasm');
+    const response = await fetch('./' + arg);
     const result = await WebAssembly.instantiateStreaming(response, importObj);
     instance = result.instance;
 

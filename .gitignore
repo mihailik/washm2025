@@ -2,5 +2,5 @@
 /target
 /node_modules
 washm.wasm
-/washm.wasm
+washm.debug.wasm
 /.playwright-mcp/

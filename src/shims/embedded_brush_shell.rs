@@ -34,7 +34,7 @@ pub fn run_custom(
             return;
         }
     };
-    
+
     // Register extra builtins in global registry
     unsafe {
         let mut builtin_map = HashMap::new();

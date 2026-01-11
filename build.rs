@@ -57,7 +57,6 @@ fn main() {
     // Section 4: Apply semantic transformations using RA
     engine.transform_all(&vendor_dir, &mappings);
 
-
     // Final validation
     verify_no_stubs(&vendor_dir);
 }
@@ -284,10 +283,7 @@ impl SemanticEngine {
                 "use crate::ShellError;",
                 "use crate::brush_interactive::ShellError;",
             );
-            content = content.replace(
-                "&crate::ShellRef",
-                "&crate::brush_interactive::ShellRef",
-            );
+            content = content.replace("&crate::ShellRef", "&crate::brush_interactive::ShellRef");
             content = content.replace(
                 "    fn read_line(\n        &mut self,",
                 "    async fn read_line(\n        &mut self,",
@@ -1228,7 +1224,9 @@ impl SemanticEngine {
                 .filter_map(ast::Use::cast)
                 .any(|u| u.to_string().contains("shims::embedded_brush_shell"));
             if !has_mod {
-                let use_item = parse_node::<ast::Item>("pub use crate::shims::embedded_brush_shell as embedded;");
+                let use_item = parse_node::<ast::Item>(
+                    "pub use crate::shims::embedded_brush_shell as embedded;",
+                );
                 if let Some(last) = root.last_child() {
                     editor.insert(Position::after(last), use_item.syntax());
                 }
@@ -1383,8 +1381,6 @@ fn copy_sources(mappings: &[(&str, &str)], vendor_dir: &Path) {
         }
     }
 }
-
-
 
 fn verify_no_stubs(vendor_dir: &Path) {
     // println!("Verifying no unpatched stubs in {:?}", vendor_dir);

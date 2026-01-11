@@ -267,8 +267,12 @@ ra_ap_ide_ssr = "0.0.310"
 opt-level = "z"
 codegen-units = 1
 panic = "unwind"
-debug = 2
+debug = false
+strip = true
 
 [profile.dev]
 panic = "unwind"
+debug = false
 
+[profile.dev.package.washm]
+debug = 1

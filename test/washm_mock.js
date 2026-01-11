@@ -287,10 +287,14 @@ class WashmInstance {
   async waitForExit() {
     if (this._runtime.waitForExit) {
       const exitCode = await this._runtime.waitForExit();
+      // Give pending host-side writes a chance to run on the next tick
+      await new Promise(r => setTimeout(r, 0));
       await this.cleanup();
       return exitCode;
     }
     const exitCode = this.exitCode;
+    // Give pending host-side writes a chance to run on the next tick
+    await new Promise(r => setTimeout(r, 0));
     await this.cleanup();
     return exitCode;
   }
@@ -927,6 +931,14 @@ async function browserPreloader(opts, streams) {
     title: ''
   };
 
+  const location = {
+    href: 'http://localhost/',
+    hostname: 'localhost',
+    pathname: '/',
+    protocol: 'http:',
+    toString: () => 'http://localhost/'
+  };
+
   const navigator = {
     userAgent: 'Mozilla/5.0 (Test Environment) MockBrowser/1.0',
     hardwareConcurrency: opts.cpus || 4,
@@ -1211,14 +1223,15 @@ async function browserPreloader(opts, streams) {
 
 /**
  * Creates a unified test environment for washm
- * @param {Object} opts - Configuration options
- * @param {string} opts.mode - 'node' or 'browser' (default: 'node')
- * @param {string} opts.cwd - Initial working directory (default: '/')
- * @param {Object} opts.env - Environment variables
- * @param {string} opts.platform - process.platform (node mode)
- * @param {string} opts.arch - process.arch (node mode)
- * @param {number} opts.cpus - navigator.hardwareConcurrency (browser mode)
- * @param {number} opts.memory - navigator.deviceMemory (browser mode)
+ * @param {{
+ *  mode?: 'node' | 'browser',
+ *  cwd?: string,
+ *  env?: Object,
+ *  platform?: string,
+ *  arch?: string,
+ *  cpus?: number,
+ *  memory?: number
+ * }} opts - Configuration options
  */
 export async function washEnvironment(opts = {}) {
   const mode = opts.mode || 'node';
@@ -1233,6 +1246,7 @@ export async function washEnvironment(opts = {}) {
   return {
     mode,
     streams,
+    /** @param {string[]} [args] - Arguments to pass to washm */
     washm: async function (args = []) {
       let runtime;
       if (mode === 'node') {
