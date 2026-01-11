@@ -1,5 +1,6 @@
 {
   "name": "washm",
+  "type": "module",
   "description": "WASM shell: Bash inside WASM",
   "version": "0.3.1",
   "keywords": [
@@ -23,7 +24,7 @@
     "url": "git+https://github.com/mavity/washm"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1a",
+    "test": "node --test test/*.test.js",
     "/build_explanation": "ALWAYS use full `npm run build` to build washm.wasm, so that vital steps are applied properly.",
     "build": "cargo build -p washm --release --target wasm32-wasip1 && echo wasm-strip && wasm-strip target/wasm32-wasip1/release/washm.wasm && echo wasm-opt && wasm-opt --enable-bulk-memory -Oz target/wasm32-wasip1/release/washm.wasm -o ./washm.wasm"
   },
