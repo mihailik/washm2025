@@ -260,6 +260,31 @@ function createMockRequire(mockFs, mockOs, mockTty, mockChildProcess, mockWasi) 
 }
 
 // ============================================================================
+// WashmInstance Wrapper
+// ============================================================================
+
+/**
+ * Unified wrapper for both Node and Browser mode instances
+ */
+class WashmInstance {
+  constructor(runtime, streams) {
+    this.streams = streams;
+    this._runtime = runtime;
+  }
+
+  get exitCode() {
+    return this._runtime.exitCode;
+  }
+
+  async waitForExit() {
+    if (this._runtime.waitForExit) {
+      return await this._runtime.waitForExit();
+    }
+    return this.exitCode;
+  }
+}
+
+// ============================================================================
 // Node Preloader
 // ============================================================================
 
@@ -1088,6 +1113,17 @@ async function browserPreloader(opts, streams) {
 // Unified API
 // ============================================================================
 
+/**
+ * Creates a unified test environment for washm
+ * @param {Object} opts - Configuration options
+ * @param {string} opts.mode - 'node' or 'browser' (default: 'node')
+ * @param {string} opts.cwd - Initial working directory (default: '/')
+ * @param {Object} opts.env - Environment variables
+ * @param {string} opts.platform - process.platform (node mode)
+ * @param {string} opts.arch - process.arch (node mode)
+ * @param {number} opts.cpus - navigator.hardwareConcurrency (browser mode)
+ * @param {number} opts.memory - navigator.deviceMemory (browser mode)
+ */
 export async function washEnvironment(opts = {}) {
   const mode = opts.mode || 'node';
 
@@ -1102,11 +1138,15 @@ export async function washEnvironment(opts = {}) {
     mode,
     streams,
     washm: async function (args = []) {
+      let runtime;
       if (mode === 'node') {
-        return await nodePreloader({ ...opts, args }, streams);
+        runtime = await nodePreloader({ ...opts, args }, streams);
+      } else if (mode === 'browser') {
+        runtime = await browserPreloader({ ...opts, args }, streams);
       } else {
-        return await browserPreloader({ ...opts, args }, streams);
+        throw new Error(`Unknown mode: ${mode}. Use 'node' or 'browser'`);
       }
+      return new WashmInstance(runtime, streams);
     }
   };
 }
