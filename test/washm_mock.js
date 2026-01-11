@@ -483,14 +483,14 @@ class MockWASI {
  * Node preloader - creates minimal Node.js-like environment with MockWASI
  */
 async function nodePreloader(opts, streams) {
-  const fs = await import('fs');
-  const path = await import('path');
-  const url = await import('url');
+  const fsModule = await import('fs');
+  const pathModule = await import('path');
+  const urlModule = await import('url');
 
   // Read washm.js file
-  const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
-  const washmJsPath = path.join(__dirname, '..', 'washm.js');
-  let washmJs = fs.readFileSync(washmJsPath, 'utf-8');
+  const __dirname_real = pathModule.dirname(urlModule.fileURLToPath(import.meta.url));
+  const washmJsPath = pathModule.join(__dirname_real, '..', 'washm.js');
+  let washmJs = fsModule.readFileSync(washmJsPath, 'utf-8');
 
   // Strip shebang if present
   if (washmJs.startsWith('#!')) {
@@ -498,8 +498,8 @@ async function nodePreloader(opts, streams) {
   }
 
   // Read WASM file
-  const wasmPath = path.join(__dirname, '..', 'washm.wasm');
-  const wasmBuffer = fs.readFileSync(wasmPath);
+  const wasmPath = pathModule.join(__dirname_real, '..', 'washm.wasm');
+  const wasmBuffer = fsModule.readFileSync(wasmPath);
 
   // Create mock WASI with command line arguments
   const mockWasi = new MockWASI(streams, opts.args || []);
@@ -597,48 +597,29 @@ async function nodePreloader(opts, streams) {
     return content;
   };
 
-  // Create sandboxed global context
-  const sandbox = {
-    // Globals
-    globalThis: null, // Will be set to sandbox itself
-    console,
-    WebAssembly,
-    Uint8Array,
-    DataView,
-    TextDecoder,
-    TextEncoder,
-    Error,
-    Math,
-    Date,
-    Promise,
+  // ============================================================================
+  // Execute via direct eval with mocked scope
+  // ============================================================================
 
-    // Node.js detection
-    process: createMockProcess(opts, streams),
-    require: createMockRequire(
-      mockFs,
-      createMockOsModule(opts),
-      createMockTtyModule(),
-      createMockChildProcessModule(),
-      { WASI: MockWASIClass }
-    ),
+  // Declare variables expected by washm.js in this scope
+  const process = createMockProcess(opts, streams);
+  const require = createMockRequire(
+    mockFs,
+    createMockOsModule(opts),
+    createMockTtyModule(),
+    createMockChildProcessModule(),
+    { WASI: MockWASIClass }
+  );
+  // __dirname is used in washm.js for finding washm.wasm
+  const __dirname = pathModule.dirname(wasmPath);
 
-    // WASM-specific globals (will be set during eval)
-    instance: null,
-    wasiSnapshot: null,
-    mounted: {}, // For protocol.js VFS
-    __dirname: path.dirname(wasmPath),
-  };
+  // mounted is not used in node path of washm.js but might be used by protocol.js if we were testing that
+  const mounted = {};
 
-  sandbox.globalThis = sandbox;
-
-  // Evaluate washm.js in sandboxed context
+  // Evaluate washm.js in this scope
+  // Variables above (process, require, __dirname) will be used by the script
   try {
-    const washmFn = new Function(
-      ...Object.keys(sandbox),
-      washmJs
-    );
-
-    await washmFn(...Object.values(sandbox));
+    eval(washmJs);
   } catch (err) {
     if (err.message && err.message.startsWith('proc_exit(')) {
       // Expected exit - extract code
