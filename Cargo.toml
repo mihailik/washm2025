@@ -15,3 +15,17 @@ authors = ["Oleg Mihailik <mihailik@gmail.com>"]
 license = "MIT"
 repository = "https://github.com/mavity/washm"
 homepage = "https://github.com/mavity/washm"
+
+[profile.release]
+opt-level = "z"
+codegen-units = 1
+panic = "unwind"
+debug = false
+strip = true
+
+[profile.dev]
+panic = "unwind"
+debug = false
+
+[profile.dev.package.washm]
+debug = 1

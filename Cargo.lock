@@ -3450,7 +3450,41 @@ dependencies = [
 ]
 
 [[package]]
-name = "wash-shell"
+name = "washm"
+version = "0.4.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "bitflags 2.10.0",
+ "bumpalo",
+ "clap 4.5.54",
+ "criterion",
+ "env_logger",
+ "log",
+ "once_cell",
+ "proptest",
+ "similar",
+ "tempfile",
+ "washm-testgen-macros",
+ "wasmprinter 0.217.1",
+ "wast 217.0.1",
+ "wat",
+]
+
+[[package]]
+name = "washm-opt"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "bumpalo",
+ "clap 4.5.54",
+ "washm",
+ "wasmprinter 0.2.80",
+ "wast 220.0.1",
+]
+
+[[package]]
+name = "washm-shell"
 version = "0.4.0"
 dependencies = [
  "anyhow",
@@ -3513,40 +3547,6 @@ dependencies = [
  "walkdir",
  "wild",
  "z85",
-]
-
-[[package]]
-name = "washm"
-version = "0.4.0"
-dependencies = [
- "ahash",
- "anyhow",
- "bitflags 2.10.0",
- "bumpalo",
- "clap 4.5.54",
- "criterion",
- "env_logger",
- "log",
- "once_cell",
- "proptest",
- "similar",
- "tempfile",
- "washm-testgen-macros",
- "wasmprinter 0.217.1",
- "wast 217.0.1",
- "wat",
-]
-
-[[package]]
-name = "washm-opt"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "bumpalo",
- "clap 4.5.54",
- "washm",
- "wasmprinter 0.2.80",
- "wast 220.0.1",
 ]
 
 [[package]]
