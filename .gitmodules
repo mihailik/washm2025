@@ -1,6 +1,6 @@
 [submodule "coreutils-fork"]
-	path = coreutils-fork
+	path = washm-shell/coreutils-fork
 	url = https://github.com/mavity/coreutils-fork
 [submodule "brush-fork"]
-	path = brush-fork
+	path = washm-shell/brush-fork
 	url = https://github.com/mavity/brush-fork
