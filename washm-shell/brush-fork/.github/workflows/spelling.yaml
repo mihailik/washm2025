@@ -1,0 +1,29 @@
+name: Spelling
+on: [pull_request]
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  CLICOLOR: 1
+  CLICOLOR_FORCE: 1
+
+permissions:
+  contents: read
+
+# Only allow one run of the workflow per branch / PR at a time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spelling:
+    name: spell-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout brush
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+
+      - name: Spell check repo
+        uses: crate-ci/typos@2d0ce569feab1f8752f1dde43cc2f2aa53236e06 # v1.40.0

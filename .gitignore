@@ -1,6 +1,5 @@
 .DS_Store
-/target
-/node_modules
-washm.wasm
-washm.debug.wasm
-/.playwright-mcp/
+/*/target
+/*/node_modules
+/*/.playwright-mcp/
+/external

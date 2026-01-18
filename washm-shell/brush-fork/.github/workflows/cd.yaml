@@ -1,0 +1,197 @@
+#
+# Based on https://github.com/release-plz/release-plz/blob/a5043c478d46d051c00e4fbc85036ac22510f07e/.github/workflows/cd.yml
+#
+
+name: CD # Continuous Deployment
+run-name: CD${{ github.event_name == 'release' && ' (release)' || ' (dry run)' }}
+
+on:
+  release:
+    types: [published]
+
+  # Manual triggers don't actually publish but dry-run the builds.
+  workflow_dispatch: null
+
+  # Run on PR in dry-run mode to make sure this workflow is still generally
+  # working.
+  pull_request:
+    branches: ["main"]
+
+  # Run on pushes into `main` as a way to have "nightly"-ish binaries.
+  push:
+    branches: ["main"]
+
+# Only allow one run of the workflow per branch / PR at a time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+  CARGO_NET_RETRY: 10
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -D warnings
+  RUSTUP_MAX_RETRIES: 10
+
+defaults:
+  run:
+    shell: bash
+
+permissions: {}
+
+jobs:
+  upload-docs:
+    name: "Generate and upload documentation"
+
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'release' && github.repository_owner == 'reubeno' && startsWith(github.event.release.tag_name, 'brush-shell-v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Install Rust toolchain"
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: "Enable cargo cache"
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+
+      - name: "Generate documentation distribution"
+        run: cargo xtask gen docs dist --out brush-docs.tar.gz
+
+      - name: "Upload documentation to release"
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload ${GITHUB_RELEASE_TAG} \
+            brush-docs.tar.gz \
+            brush-docs.tar.gz.sha256 \
+            brush-docs.tar.gz.sha512
+
+      - name: "Generate artifact attestation"
+        if: github.event_name == 'release'
+        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
+        with:
+          subject-path: "brush-docs.tar.gz*"
+
+      - name: "Upload documentation artifact (dry-run)"
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: brush-docs
+          path: |
+            brush-docs.tar.gz
+            brush-docs.tar.gz.sha256
+            brush-docs.tar.gz.sha512
+
+  upload-assets:
+    name: ${{ matrix.target }}
+
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'release' && github.repository_owner == 'reubeno' && startsWith(github.event.release.tag_name, 'brush-shell-v'))
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Run all jobs to completion regardless of errors.
+      # This is useful because sometimes we fail to compile for a certain target.
+      fail-fast: false
+      matrix:
+        include:
+          # NOTE: We don't provide Windows binaries yet.
+          # - target: aarch64-pc-windows-msvc
+          #   os: windows-2022
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          # - target: x86_64-pc-windows-msvc
+          #   os: windows-2022
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-22.04
+          - target: aarch64-apple-darwin
+            os: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Install Rust toolchain"
+        uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
+
+      - name: "Setup cross-compiling toolchain"
+        if: startsWith(matrix.os, 'ubuntu') && !contains(matrix.target, '-musl')
+        uses: taiki-e/setup-cross-toolchain-action@84e58a47fc2bcd3821a2aa8c153595bbffb0e10f # v1.32.1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: "Install musl cross tools"
+        if: contains(matrix.target, '-musl')
+        uses: taiki-e/install-action@b9c5db3aef04caffaf95a1d03931de10fb2a140f # v2.65.1
+        with:
+          tool: cross
+
+      - name: "Workaround: clean cache"
+        run: cargo clean
+
+      - name: "Install cargo-about"
+        uses: taiki-e/install-action@b9c5db3aef04caffaf95a1d03931de10fb2a140f # v2.65.1
+        with:
+          tool: cargo-about
+
+      - name: "Generate license notices"
+        run: cd brush-shell && cargo about generate -o ../THIRD_PARTY_LICENSES.html about.hbs
+
+      - name: "Update build flags"
+        if: endsWith(matrix.target, 'windows-msvc')
+        run: echo "RUSTFLAGS=${RUSTFLAGS} -C target-feature=+crt-static" >> "${GITHUB_ENV}"
+
+      - name: "Build and upload binaries to release"
+        uses: taiki-e/upload-rust-binary-action@3962470d6e7f1993108411bc3f75a135ec67fc8c # v1.27.0
+        id: upload-release
+        with:
+          dry-run: ${{ github.event_name != 'release' }}
+          bin: brush
+          locked: true
+          target: ${{ matrix.target }}
+          tar: unix
+          zip: windows
+          checksum: sha256,sha512
+          token: ${{ secrets.GITHUB_TOKEN }}
+          include: "LICENSE,THIRD_PARTY_LICENSES.html"
+
+      - name: "Generate artifact attestation"
+        if: github.event_name == 'release'
+        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
+        with:
+          subject-path: "${{ steps.upload-release.outputs.archive }}.*"
+
+      - name: "Upload artifacts (dry-run)"
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: brush-${{ matrix.target }}
+          path: "${{ steps.upload-release.outputs.archive }}.*"

@@ -1,0 +1,162 @@
+name: "Here docs/strings"
+cases:
+  - name: "Basic here doc"
+    stdin: |
+      cat <<END-MARKER
+      Something here...
+      ...and here.
+      END-MARKER
+      echo "This is after"
+
+  - name: "Basic here doc in a script"
+    test_files:
+      - path: "script.sh"
+        contents: |
+          cat <<END-MARKER
+          Something here...
+          ...and here.
+          END-MARKER
+          echo "This is after"
+    args: ["./script.sh"]
+
+  - name: "Here doc in a function"
+    stdin: |
+      function myfunc() {
+        if true
+        then
+          cat << END-MARKER
+      Something here...
+      END-MARKER
+        fi
+      }
+
+      myfunc
+
+  - name: "Here doc with expansions"
+    stdin: |
+      cat <<END-MARKER
+      Something here...
+      ...and here.
+      $(echo "This is after")
+      END-MARKER
+
+  - name: "Here doc with expansions but quoted tag"
+    stdin: |
+      cat <<"END-MARKER"
+      Something here...
+      ...and here.
+      $(echo "This is after")
+      END-MARKER
+
+  - name: "Here doc with tab removal"
+    stdin: |
+      cat <<-END-MARKER
+      	Something here...
+      	...and here.
+      	END-MARKER
+
+  - name: "Basic here string"
+    stdin: |
+      shopt -ou posix
+      cat <<<"Something here."
+      wc -l <<<"Something"
+
+  - name: "Empty here doc"
+    stdin: |
+      wc -l <<EOF
+      EOF
+
+  - name: "Basic here doc"
+    stdin: "wc -l <<EOF\nSomething\nEOF"
+
+  - name: "Here doc with other tokens after tag"
+    stdin: |
+      wc -l <<EOF | wc -l
+      A B C
+      1 2 3
+      EOF
+
+  - name: "Multiple here docs"
+    stdin: |
+      cat <<EOF1 <<EOF2
+      A B C
+      EOF1
+      1 2 3
+      EOF2
+
+  - name: "Here doc in a command substitution"
+    stdin: |
+      test1=$(cat <<EOF
+      1
+      2 3
+      4 5 6
+      EOF
+      )
+
+      echo "${test1}"
+
+  - name: "Here doc in a double-quoted command substitution"
+    stdin: |
+      test1="$(cat <<EOF
+      something
+      EOF
+      )"
+
+      echo "${test1}"
+
+  - name: "Here doc in a double-quoted command substitution with spaces"
+    stdin: |
+      test1="$(cat << EOF
+      something
+      EOF
+      )"
+
+      echo "${test1}"
+
+  - name: "Here doc in a command substitution with quotes"
+    known_failure: true # Issue #421
+    stdin: |
+      test1=$(cat <<EOF
+      something "quoted"
+      EOF
+      )
+
+      echo "${test1}"
+
+  - name: "Here doc in a command substitution with parentheses"
+    known_failure: true # Issue #419
+    stdin: |
+      test1=$(cat <<EOF
+      (something)
+      EOF
+      )
+
+      echo "${test1}"
+
+  - name: "Here doc with parentheses"
+    stdin: |
+      cat <<EOF
+      (something)
+      EOF
+
+  - name: "Multiple here docs in a command substitution"
+    stdin: |
+      test1=$(cat <<EOF1 <<EOF2
+      A B C
+      EOF1
+      D E F
+      EOF2
+      )
+
+      echo "${test1}"
+
+  - name: "Complex here docs in a command substitution"
+    stdin: |
+      test1=$(cat <<EOF1 <<EOF2 | wc -l
+      A B C
+      EOF1
+      D E F
+      EOF2
+      )
+
+      echo "${test1}"

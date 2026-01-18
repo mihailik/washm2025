@@ -1,0 +1,186 @@
+name: "Builtins: getopts"
+cases:
+  - name: "Basic getopts"
+    stdin: |
+      func() {
+        echo "Beginning of args"
+        while getopts "ab:" option "$@"; do
+          case ${option} in
+            a) echo "Option a; OPTARG=${OPTARG}";;
+            b) echo "Option b; OPTARG=${OPTARG}";;
+            *) echo "Unknown option: ${option}";;
+          esac
+          echo "OPTIND is now ${OPTIND}"
+          echo "OPTERR is now ${OPTERR}"
+        echo "----------------"
+        done
+        echo "Result: $?"
+        echo "option: ${option}"
+        echo "End of args"
+      }
+
+      func -a -b my_b_arg
+      echo "OPTARG: ${OPTARG}"
+      echo "OPTIND: ${OPTIND}"
+
+  - name: "getopts: no args"
+    stdin: |
+      getopts "a:b:" myvar
+      echo "Result: $?"
+      echo "myvar: ${myvar}"
+      echo "OPTARG: ${OPTARG}"
+      echo "OPTIND: ${OPTIND}"
+      echo "OPTERR: ${OPTERR}"
+
+  - name: "getopts: toplevel positional parameters"
+    stdin: |
+      set -- -a value    
+      getopts "a:b:" myvar
+      echo "Result: $?"
+      echo "myvar: ${myvar}"
+      echo "OPTARG: ${OPTARG}"
+      echo "OPTIND: ${OPTIND}"
+      echo "OPTERR: ${OPTERR}"
+
+  - name: "getopts: function positional parameters"
+    stdin: |
+      my_function() {
+        getopts "a:b:" myvar
+        echo "Result: $?"
+        echo "myvar: ${myvar}"
+        echo "OPTARG: ${OPTARG}"
+        echo "OPTIND: ${OPTIND}"
+        echo "OPTERR: ${OPTERR}"
+      }
+
+      my_function -b value
+
+  - name: "getopts: function script parameters"
+    test_files:
+      - path: script.sh
+        contents: |
+          getopts "a:b:" myvar
+          echo "Result: $?"
+          echo "myvar: ${myvar}"
+          echo "OPTARG: ${OPTARG}"
+          echo "OPTIND: ${OPTIND}"
+          echo "OPTERR: ${OPTERR}"
+    stdin: |
+      source ./script.sh -a value
+
+  - name: "getopts: no options given"
+    stdin: |
+      while getopts "a:b:" myvar notoption; do
+        echo "Result: $?"
+        echo "myvar: ${myvar}"
+        echo "OPTARG: ${OPTARG}"
+        echo "OPTIND: ${OPTIND}"
+        echo "OPTERR: ${OPTERR}"
+        echo "----------------"
+      done
+      echo "Done; result: $?"
+      echo "myvar: ${myvar}"
+      echo "OPTARG: ${OPTARG}"
+      echo "OPTIND: ${OPTIND}"
+      echo "OPTERR: ${OPTERR}"
+
+  - name: "getopts: options and non-options"
+    stdin: |
+      while getopts "ab:" myvar -a -b value notoption; do
+        echo "Result: $?"
+        echo "myvar: ${myvar}"
+        echo "OPTARG: ${OPTARG}"
+        echo "OPTIND: ${OPTIND}"
+        echo "OPTERR: ${OPTERR}"
+        echo "----------------"
+      done
+      echo "Done; result: $?"
+      echo "myvar: ${myvar}"
+      echo "OPTARG: ${OPTARG}"
+      echo "OPTIND: ${OPTIND}"
+      echo "OPTERR: ${OPTERR}"
+
+  - name: "getopts: --"
+    stdin: |
+      while getopts "ab:" myvar -a -b value -- -c notoption; do
+        echo "Result: $?"
+        echo "myvar: ${myvar}"
+        echo "OPTARG: ${OPTARG}"
+        echo "OPTIND: ${OPTIND}"
+        echo "OPTERR: ${OPTERR}"
+        echo "----------------"
+      done
+      echo "Done; result: $?"
+      echo "myvar: ${myvar}"
+      echo "OPTARG: ${OPTARG}"
+      echo "OPTIND: ${OPTIND}"
+      echo "OPTERR: ${OPTERR}"
+
+  - name: "getopts: -- as first arg"
+    stdin: |
+      while getopts "ab:" myvar -- -a; do
+        echo "Result: $?"
+        echo "myvar: ${myvar}"
+        echo "OPTARG: ${OPTARG}"
+        echo "OPTIND: ${OPTIND}"
+        echo "OPTERR: ${OPTERR}"
+        echo "----------------"
+      done
+      echo "Done; result: $?"
+      echo "myvar: ${myvar}"
+      echo "OPTARG: ${OPTARG}"
+      echo "OPTIND: ${OPTIND}"
+      echo "OPTERR: ${OPTERR}"
+
+  - name: "getopts: invalid option when optstr starts with colon"
+    stdin: |
+      getopts ":a:" myvar -b value
+      echo "Result: $?"
+      echo "myvar: ${myvar}"
+      echo "OPTARG: ${OPTARG}"
+      echo "OPTIND: ${OPTIND}"
+      echo "OPTERR: ${OPTERR}"
+
+  - name: "getopts: invalid option when optstr does not start with colon"
+    ignore_stderr: true
+    stdin: |
+      getopts "a:" myvar -b value
+      echo "Result: $?"
+      echo "myvar: ${myvar}"
+      echo "OPTARG: ${OPTARG}"
+      echo "OPTIND: ${OPTIND}"
+      echo "OPTERR: ${OPTERR}"
+
+  - name: "getopts: multiple options in one token"
+    stdin: |
+      while getopts "a:bcdefg" myvar -fedcba something -g; do
+        echo "Result: $?"
+        echo "myvar: ${myvar}"
+        echo "OPTARG: ${OPTARG}"
+        echo "OPTIND: ${OPTIND}"
+        echo "OPTERR: ${OPTERR}"
+        echo "----------------"
+      done
+      echo "Done; result: $?"
+      echo "myvar: ${myvar}"
+      echo "OPTARG: ${OPTARG}"
+      echo "OPTIND: ${OPTIND}"
+      echo "OPTERR: ${OPTERR}"
+
+  - name: "getopts: short option and value in single arg"
+    stdin: |
+      getopts "p:" myvar -p-
+      echo "Result: $?"
+      echo "myvar: ${myvar}"
+      echo "OPTARG: ${OPTARG}"
+      echo "OPTIND: ${OPTIND}"
+      echo "OPTERR: ${OPTERR}"
+
+      while getopts "abep:" myvar -abpsomething-else; do
+        echo "Result: $?"
+        echo "myvar: ${myvar}"
+        echo "OPTARG: ${OPTARG}"
+        echo "OPTIND: ${OPTIND}"
+        echo "OPTERR: ${OPTERR}"
+        echo "-----------------"
+      done

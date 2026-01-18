@@ -1,0 +1,61 @@
+name: "Builtins: trap"
+cases:
+  - name: "trap registration"
+    stdin: |
+      trap "echo 1" SIGINT
+      trap "echo 2" SIGINT
+      trap -p INT
+
+      trap "echo 3" int
+      trap -p INT
+
+      trap "echo 4" 2
+      trap -p INT
+
+  - name: "trap unregistering"
+    stdin: |
+      echo "[Case 1]"
+      trap "echo 1" SIGINT
+      trap SIGINT
+      trap -p INT
+
+      echo "[Case 2]"
+      trap "echo 2" SIGINT
+      trap - SIGINT
+      trap -p INT
+
+  - name: "trap EXIT"
+    stdin: |
+      trap 'echo "[exit]"' EXIT
+      trap -p EXIT
+
+  - name: "trap EXIT: status code handling"
+    stdin: |
+      trap 'echo "[exit]: \$?: $?"' EXIT
+      trap -p EXIT
+      false
+
+  - name: "trap DEBUG"
+    stdin: |
+      trap 'echo [command: ${BASH_COMMAND}]' DEBUG
+      trap -p DEBUG
+
+      echo First
+      echo Second
+      false
+
+  - name: "trap ERR"
+    stdin: |
+      trap "echo [err]" ERR
+      trap -p ERR
+
+  - name: "return in EXIT trap within function"
+    known_failure: true # TODO(traps): return in trap handler behavior differs
+    stdin: |
+      myfunc() {
+        trap 'return 0' EXIT
+        false
+        echo "should not print in func"
+      }
+      myfunc
+      echo "after func"
