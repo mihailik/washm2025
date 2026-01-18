@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+
+members = [
+  "washm-engine",
+  "washm-engine/testgen-macros",
+  "washm-opt",
+  "washm-shell",
+]
+
+[workspace.package]
+version = "0.4.0"
+edition = "2021"
+authors = ["Oleg Mihailik <mihailik@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/mavity/washm"
+homepage = "https://github.com/mavity/washm"

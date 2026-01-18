@@ -1,0 +1,17 @@
+[package]
+name = "washm-opt"
+description = "CLI optimization tool for WebAssembly"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+washm = { path = "../washm-engine" }
+bumpalo = "3.16.0"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+wast = "220.0.0"
+wasmprinter = "0.2"
+
+[[bin]]
+name = "washm-opt"
+path = "src/wasm_opt.rs"

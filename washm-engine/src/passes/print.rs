@@ -1,0 +1,18 @@
+use crate::ir::module::Module;
+use crate::passes::Pass;
+
+/// Prints the module in WAT format to stdout.
+pub struct Print;
+
+impl Pass for Print {
+    fn name(&self) -> &str {
+        "Print"
+    }
+
+    fn run<'a>(&mut self, module: &mut Module<'a>) {
+        match module.to_wat() {
+            Ok(wat) => println!("{}", wat),
+            Err(e) => eprintln!("Error printing module: {}", e),
+        }
+    }
+}
