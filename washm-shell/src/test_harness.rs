@@ -42,27 +42,31 @@ pub struct AsyncTest {
     pub test_fn: fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>,
 }
 
+use std::cell::RefCell;
+
 // Global test registry
-static mut TESTS: Vec<Test> = Vec::new();
-static mut ASYNC_TESTS: Vec<AsyncTest> = Vec::new();
+thread_local! {
+    static TESTS: RefCell<Vec<Test>> = RefCell::new(Vec::new());
+    static ASYNC_TESTS: RefCell<Vec<AsyncTest>> = RefCell::new(Vec::new());
+}
 
 pub fn register_test(name: &'static str, test_fn: fn()) {
-    unsafe {
-        TESTS.push(Test {
+    TESTS.with(|tests| {
+        tests.borrow_mut().push(Test {
             name,
             test_fn,
             is_async: false,
         });
-    }
+    })
 }
 
 pub fn register_async_test(
     name: &'static str,
     test_fn: fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>,
 ) {
-    unsafe {
-        ASYNC_TESTS.push(AsyncTest { name, test_fn });
-    }
+    ASYNC_TESTS.with(|tests| {
+        tests.borrow_mut().push(AsyncTest { name, test_fn });
+    })
 }
 
 fn run_single_test(test: &Test) -> TestResult {
@@ -159,9 +163,9 @@ pub fn run_all_tests() -> TestResults {
     // Check if we should run only a single test
     let single_test = std::env::var("__RUST_TEST_INVOKE").ok();
 
-    unsafe {
-        // Run sync tests
-        for test in &TESTS {
+    // Run sync tests
+    TESTS.with(|tests| {
+        for test in tests.borrow().iter() {
             if let Some(ref filter) = single_test {
                 if test.name != filter {
                     continue;
@@ -176,9 +180,11 @@ pub fn run_all_tests() -> TestResults {
             }
             results.push(result);
         }
+    });
 
-        // Run async tests
-        for test in &ASYNC_TESTS {
+    // Run async tests
+    ASYNC_TESTS.with(|tests| {
+        for test in tests.borrow().iter() {
             if let Some(ref filter) = single_test {
                 if test.name != filter {
                     continue;
@@ -194,7 +200,7 @@ pub fn run_all_tests() -> TestResults {
             results.push(result);
             println!("Pushed result. Count: {}", results.len());
         }
-    }
+    });
 
     println!("Finished running tests. Results count: {}", results.len());
 

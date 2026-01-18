@@ -72,8 +72,10 @@ pub fn clone_open_file(
 }
 
 // --- Extra Builtins Helpers ---
-pub static mut EXTRA_BUILTINS: Option<HashMap<String, crate::brush_core::builtins::Registration>> =
-    None;
+thread_local! {
+    pub static EXTRA_BUILTINS: std::cell::RefCell<Option<HashMap<String, crate::brush_core::builtins::Registration>>> =
+        std::cell::RefCell::new(None);
+}
 
 pub fn configure_shell<S: ShellBuilderState>(
     builder: ShellBuilder<S>,
@@ -81,9 +83,10 @@ pub fn configure_shell<S: ShellBuilderState>(
 ) -> ShellBuilder<S> {
     let mut builder = builder.default_builtins(builtins).brush_builtins();
 
-    if let Some(Some(extras)) = unsafe { std::ptr::addr_of!(EXTRA_BUILTINS).as_ref() } {
+    let extras = EXTRA_BUILTINS.with(|extras| extras.borrow().clone());
+    if let Some(extras) = extras {
         for (name, reg) in extras {
-            builder = builder.builtin(name.clone(), reg.clone());
+            builder = builder.builtin(name, reg);
         }
     }
     builder
@@ -289,7 +292,7 @@ impl GuestChild {
         // Poll for status with backoff (same logic as wait() but inline)
         let mut poll_interval = Duration::from_millis(10);
         let max_interval = Duration::from_millis(100);
-        let mut exit_code;
+        let exit_code;
 
         loop {
             match std::fs::File::open(&status_path) {

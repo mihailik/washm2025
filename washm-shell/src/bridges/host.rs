@@ -32,41 +32,34 @@ fn load_startup_from_fs() -> Option<StartupJson> {
         .and_then(|s| parse_startup_str(&s))
 }
 
-fn ensure_cache() -> &'static StartupJson {
-    static mut CACHE: Option<StartupJson> = None;
-    unsafe {
-        if CACHE.is_none() {
-            CACHE = load_startup_from_fs().or_else(|| Some(StartupJson::default()));
-            // Process bridge is installed automatically via protocol.js bootstrap
-        }
-        CACHE.as_ref().unwrap()
-    }
+thread_local! {
+    static CACHE: StartupJson = load_startup_from_fs().unwrap_or_default();
 }
 
 pub(crate) fn startup_username() -> String {
-    let v = ensure_cache();
-    v.user_info
-        .as_ref()
-        .and_then(|ui| ui.username.clone())
-        .unwrap_or_else(|| "user".to_string())
+    CACHE.with(|v| {
+        v.user_info
+            .as_ref()
+            .and_then(|ui| ui.username.clone())
+            .unwrap_or_default()
+    })
 }
 
 pub(crate) fn startup_hostname() -> String {
-    let v = ensure_cache();
-    v.hostname
-        .clone()
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .unwrap_or_else(|| "localhost".to_string())
+    CACHE.with(|v| {
+        v.hostname
+            .clone()
+            .or_else(|| std::env::var("HOSTNAME").ok())
+            .unwrap_or_else(|| "localhost".to_string())
+    })
 }
 
 pub(crate) fn startup_uid() -> u32 {
-    let v = ensure_cache();
-    v.user_info.as_ref().and_then(|ui| ui.uid).unwrap_or(1000)
+    CACHE.with(|v| v.user_info.as_ref().and_then(|ui| ui.uid).unwrap_or(1000))
 }
 
 pub(crate) fn startup_gid() -> u32 {
-    let v = ensure_cache();
-    v.user_info.as_ref().and_then(|ui| ui.gid).unwrap_or(1000)
+    CACHE.with(|v| v.user_info.as_ref().and_then(|ui| ui.gid).unwrap_or(1000))
 }
 
 pub fn startup_pwd() -> String {

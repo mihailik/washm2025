@@ -191,7 +191,7 @@ anyhow = "1.0"
 cfg-if = "1.0"
 once_cell = "1.21"
 
-[target.'cfg(target_os = "wasi")'.dependencies]
+[target.'cfg(any(target_os = "wasi", target_os = "wasip1"))'.dependencies]
 # Proc-macros must be a real crate
 uucore_procs = { version = "0.4.0", path = "coreutils-fork/src/uucore_procs" }
 

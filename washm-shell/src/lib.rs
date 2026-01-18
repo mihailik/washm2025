@@ -62,13 +62,13 @@ mod coreutils_builtins;
 #[cfg(target_arch = "wasm32")]
 mod coreutils_dispatch;
 
-#[cfg(all(target_os = "wasi", feature = "wasm-test"))]
+#[cfg(all(target_arch = "wasm32", feature = "wasm-test"))]
 pub mod test_harness;
 
-#[cfg(all(target_os = "wasi", feature = "wasm-test"))]
+#[cfg(all(target_arch = "wasm32", feature = "wasm-test"))]
 pub mod example_tests;
 
-#[cfg(all(target_os = "wasi", feature = "wasm-test"))]
+#[cfg(all(target_arch = "wasm32", feature = "wasm-test"))]
 mod test_command;
 
 // Guest REPL and command handling are implemented internally. Host-driven axy_submit removed.

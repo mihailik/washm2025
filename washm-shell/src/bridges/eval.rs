@@ -6,34 +6,27 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 
+use std::cell::{Cell, RefCell};
+
 static COOKIE_COUNTER: AtomicU32 = AtomicU32::new(1);
-static CONTINUATIONS: OnceLock<Mutex<HashMap<u32, Waker>>> = OnceLock::new();
-static RESULTS: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
-static LEAKED_ALLOCS: OnceLock<Mutex<Vec<Box<[u8]>>>> = OnceLock::new();
 
 // Executor logic
 use tokio::runtime::Runtime;
 use tokio::task::LocalSet;
 
-static RT: OnceLock<Runtime> = OnceLock::new();
-
-use std::cell::Cell;
-
 thread_local! {
-    static LOCAL_SET: LocalSet = LocalSet::new();
-    static IS_RUNNING: Cell<bool> = Cell::new(false);
-}
+    static CONTINUATIONS: RefCell<HashMap<u32, Waker>> = RefCell::new(HashMap::new());
+    static RESULTS: RefCell<HashMap<u32, String>> = RefCell::new(HashMap::new());
+    static LEAKED_ALLOCS: RefCell<Vec<Box<[u8]>>> = RefCell::new(Vec::new());
 
-pub fn get_runtime() -> &'static Runtime {
-    RT.get_or_init(|| {
-        tokio::runtime::Builder::new_current_thread()
+    static RT: Runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap()
-    })
+            .unwrap();
+    static LOCAL_SET: LocalSet = LocalSet::new();
+    static IS_RUNNING: Cell<bool> = Cell::new(false);
 }
 
 pub fn spawn<F>(future: F)
@@ -44,20 +37,19 @@ where
 }
 
 pub fn tick() {
-    let rt = get_runtime();
     IS_RUNNING.with(|flag| flag.set(true));
-    LOCAL_SET.with(|ls| {
-        rt.block_on(ls.run_until(async {
-            tokio::task::yield_now().await;
-        }));
+    RT.with(|rt| {
+        LOCAL_SET.with(|ls| {
+            rt.block_on(ls.run_until(async {
+                tokio::task::yield_now().await;
+            }));
+        });
     });
     IS_RUNNING.with(|flag| flag.set(false));
 }
 
 fn init_maps() {
-    CONTINUATIONS.get_or_init(|| Mutex::new(HashMap::new()));
-    RESULTS.get_or_init(|| Mutex::new(HashMap::new()));
-    LEAKED_ALLOCS.get_or_init(|| Mutex::new(Vec::new()));
+    // No-op - thread_local handles initialization
 }
 
 pub fn next_cookie() -> u32 {
@@ -99,12 +91,10 @@ impl Future for WasmHostFuture {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let cookie = self.cookie;
-        let results = RESULTS.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Some(res) = results.lock().unwrap().remove(&cookie) {
+        if let Some(res) = RESULTS.with(|m| m.borrow_mut().remove(&cookie)) {
             return Poll::Ready(Ok(res));
         }
-        let conts = CONTINUATIONS.get_or_init(|| Mutex::new(HashMap::new()));
-        conts.lock().unwrap().insert(cookie, cx.waker().clone());
+        CONTINUATIONS.with(|m| m.borrow_mut().insert(cookie, cx.waker().clone()));
         Poll::Pending
     }
 }
@@ -121,8 +111,7 @@ pub fn eval_blocking(js: &str) -> Result<String, String> {
         return Err(e.to_string());
     }
 
-    let mut results = RESULTS.get().unwrap().lock().unwrap();
-    if let Some(res) = results.remove(&cookie) {
+    if let Some(res) = RESULTS.with(|m| m.borrow_mut().remove(&cookie)) {
         Ok(res)
     } else {
         // Include a snippet of the eval script to aid debugging. If the script is
@@ -161,17 +150,13 @@ pub extern "C" fn _continue(cookie: u32) {
 
     if let Ok(result_json) = std::fs::read_to_string(&result_file) {
         // eprintln!("_continue: read {} bytes from {:?}", result_json.len(), result_file);
-        let results = RESULTS.get_or_init(|| Mutex::new(HashMap::new()));
-        results.lock().unwrap().insert(cookie, result_json);
+        RESULTS.with(|m| m.borrow_mut().insert(cookie, result_json));
 
         // Clean up the result file
         let _ = std::fs::remove_file(&result_file);
 
         // Wake the corresponding future
-        if let Some(waker) = CONTINUATIONS
-            .get()
-            .and_then(|m| m.lock().unwrap().remove(&cookie))
-        {
+        if let Some(waker) = CONTINUATIONS.with(|m| m.borrow_mut().remove(&cookie)) {
             waker.wake();
         }
 

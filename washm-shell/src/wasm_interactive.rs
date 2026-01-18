@@ -1,4 +1,4 @@
-use crate::bridges::eval::{eval_blocking, WasmHostFuture};
+use crate::bridges::eval::WasmHostFuture;
 use crate::brush_interactive::{InputBackend, InteractivePrompt, ReadResult, ShellError, ShellRef};
 use serde::Deserialize;
 use std::io::{self, Write};
