@@ -56,8 +56,6 @@ mod async_test;
 #[cfg(target_arch = "wasm32")]
 pub mod brush_run;
 #[cfg(target_arch = "wasm32")]
-mod command;
-#[cfg(target_arch = "wasm32")]
 mod coreutils_builtins;
 #[cfg(target_arch = "wasm32")]
 mod coreutils_dispatch;
