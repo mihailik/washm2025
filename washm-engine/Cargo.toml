@@ -14,6 +14,7 @@ categories = ["wasm", "compilers", "development-tools"]
 [lib]
 name = "washm"
 path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 once_cell = "1.19"
@@ -25,7 +26,10 @@ wasmprinter = "0.217"
 ahash = "0.8"
 log = "0.4"
 anyhow = "1.0"
-clap = { version = "4.5", features = ["derive"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
 
 [dev-dependencies]
 env_logger = "0.10"
