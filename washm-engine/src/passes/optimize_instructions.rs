@@ -2,9 +2,9 @@ use crate::analysis::patterns::{MatchEnv, Pattern, PatternMatcher, PatternOp, Pa
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
 use crate::ir::module::Module;
 use crate::ir::ops::{BinaryOp, UnaryOp};
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
 use crate::ir::{Literal, Type};
+use crate::passes::Pass;
 use std::ops::Neg;
 
 /// OptimizeInstructions pass: Algebraic simplifications and strength reduction

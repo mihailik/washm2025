@@ -1,8 +1,8 @@
 use crate::analysis::effects::EffectAnalyzer;
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::ir::{Literal, Type};
+use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
 
 /// Removes redundant code such as nops, unused expressions, and simplifies blocks/ifs.

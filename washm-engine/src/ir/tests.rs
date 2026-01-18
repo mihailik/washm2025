@@ -541,9 +541,9 @@ mod tests {
 
     #[test]
     fn test_exports_roundtrip() {
+        use crate::ir::module::{Export, ExportKind, Global, MemoryLimits};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{Export, ExportKind, Global, MemoryLimits};
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -633,9 +633,9 @@ mod tests {
 
     #[test]
     fn test_imports_roundtrip() {
+        use crate::ir::module::{Import, ImportKind, MemoryLimits};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{Import, ImportKind, MemoryLimits};
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -778,9 +778,9 @@ mod tests {
 
     #[test]
     fn test_data_section_roundtrip() {
+        use crate::ir::module::DataSegment;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::DataSegment;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -1026,9 +1026,9 @@ mod tests {
 
     #[test]
     fn test_table_and_element_roundtrip() {
+        use crate::ir::module::ElementSegment;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::ElementSegment;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -1497,9 +1497,9 @@ mod tests {
 
     #[test]
     fn test_type_section_with_imports() {
+        use crate::ir::module::{Import, ImportKind};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{Import, ImportKind};
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -2067,9 +2067,9 @@ mod tests {
 
     #[test]
     fn test_function_section_with_imports() {
+        use crate::ir::module::{Import, ImportKind};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{Import, ImportKind};
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -2486,9 +2486,9 @@ mod tests {
 
     #[test]
     fn test_code_section_binary_ops() {
+        use crate::ir::ops::BinaryOp;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::ops::BinaryOp;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -2538,9 +2538,9 @@ mod tests {
 
     #[test]
     fn test_code_section_nested_expressions() {
+        use crate::ir::ops::BinaryOp;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::ops::BinaryOp;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -2746,9 +2746,9 @@ mod tests {
 
     #[test]
     fn test_code_section_multiple_functions_with_bodies() {
+        use crate::ir::ops::BinaryOp;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::ops::BinaryOp;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -2832,9 +2832,9 @@ mod tests {
 
     #[test]
     fn test_code_section_global_operations() {
+        use crate::ir::module::Global;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::Global;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -3193,9 +3193,9 @@ mod tests {
 
     #[test]
     fn test_roundtrip_all_sections_together() {
+        use crate::ir::module::{Global, Import};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{Global, Import};
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -3271,9 +3271,9 @@ mod tests {
 
     #[test]
     fn test_import_function() {
+        use crate::ir::module::{Import, ImportKind};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{Import, ImportKind};
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -3297,9 +3297,9 @@ mod tests {
 
     #[test]
     fn test_import_memory() {
+        use crate::ir::module::{Import, ImportKind, MemoryLimits};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{Import, ImportKind, MemoryLimits};
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -3324,9 +3324,9 @@ mod tests {
 
     #[test]
     fn test_import_global() {
+        use crate::ir::module::{Import, ImportKind};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{Import, ImportKind};
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -3348,9 +3348,9 @@ mod tests {
 
     #[test]
     fn test_multiple_imports_mixed() {
+        use crate::ir::module::{Import, ImportKind, MemoryLimits};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{Import, ImportKind, MemoryLimits};
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -3397,9 +3397,9 @@ mod tests {
 
     #[test]
     fn test_import_many_functions() {
+        use crate::ir::module::{Import, ImportKind};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{Import, ImportKind};
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -3425,9 +3425,9 @@ mod tests {
 
     #[test]
     fn test_export_function() {
+        use crate::ir::module::ExportKind;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::ExportKind;
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -3456,9 +3456,9 @@ mod tests {
 
     #[test]
     fn test_export_multiple_functions() {
+        use crate::ir::module::ExportKind;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::ExportKind;
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -3486,9 +3486,9 @@ mod tests {
 
     #[test]
     fn test_export_memory() {
+        use crate::ir::module::ExportKind;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::ExportKind;
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -3508,9 +3508,9 @@ mod tests {
 
     #[test]
     fn test_export_global() {
+        use crate::ir::module::{ExportKind, Global};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{ExportKind, Global};
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -3539,9 +3539,9 @@ mod tests {
 
     #[test]
     fn test_export_table() {
+        use crate::ir::module::{ExportKind, TableLimits};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{ExportKind, TableLimits};
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -3636,9 +3636,9 @@ mod tests {
 
     #[test]
     fn test_global_immutable_i32() {
+        use crate::ir::module::Global;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::Global;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -3666,9 +3666,9 @@ mod tests {
 
     #[test]
     fn test_global_mutable_i64() {
+        use crate::ir::module::Global;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::Global;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -3696,9 +3696,9 @@ mod tests {
 
     #[test]
     fn test_global_all_types() {
+        use crate::ir::module::Global;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::Global;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -3752,9 +3752,9 @@ mod tests {
 
     #[test]
     fn test_global_many() {
+        use crate::ir::module::Global;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::Global;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -3784,9 +3784,9 @@ mod tests {
 
     #[test]
     fn test_element_basic() {
+        use crate::ir::module::{ElementSegment, TableLimits};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{ElementSegment, TableLimits};
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -3836,9 +3836,9 @@ mod tests {
 
     #[test]
     fn test_element_multiple_segments() {
+        use crate::ir::module::{ElementSegment, TableLimits};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{ElementSegment, TableLimits};
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -3882,9 +3882,9 @@ mod tests {
 
     #[test]
     fn test_element_many_functions() {
+        use crate::ir::module::{ElementSegment, TableLimits};
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::{ElementSegment, TableLimits};
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -3929,9 +3929,9 @@ mod tests {
 
     #[test]
     fn test_data_basic() {
+        use crate::ir::module::DataSegment;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::DataSegment;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -3959,9 +3959,9 @@ mod tests {
 
     #[test]
     fn test_data_multiple_segments() {
+        use crate::ir::module::DataSegment;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::DataSegment;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -4005,9 +4005,9 @@ mod tests {
 
     #[test]
     fn test_data_large() {
+        use crate::ir::module::DataSegment;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::DataSegment;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -4037,9 +4037,9 @@ mod tests {
 
     #[test]
     fn test_data_empty() {
+        use crate::ir::module::DataSegment;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::DataSegment;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
@@ -4153,9 +4153,9 @@ mod tests {
 
     #[test]
     fn test_table_basic() {
+        use crate::ir::module::TableLimits;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::TableLimits;
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -4180,9 +4180,9 @@ mod tests {
 
     #[test]
     fn test_table_no_maximum() {
+        use crate::ir::module::TableLimits;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::TableLimits;
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -4207,9 +4207,9 @@ mod tests {
 
     #[test]
     fn test_table_large_limits() {
+        use crate::ir::module::TableLimits;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::TableLimits;
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
@@ -5112,9 +5112,9 @@ mod tests {
 
     #[test]
     fn test_global_operations_complex() {
+        use crate::ir::module::Global;
         use crate::wasm::binary_reader::BinaryReader;
         use crate::wasm::binary_writer::BinaryWriter;
-        use crate::ir::module::Global;
 
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);

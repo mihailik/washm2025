@@ -1,9 +1,9 @@
 use crate::analysis::usage::UsageTracker;
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::{ExportKind, ImportKind, Module};
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
+use crate::passes::Pass;
 use std::collections::HashMap;
 
 pub struct RemoveUnusedModuleElements;

@@ -1,6 +1,6 @@
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
+use crate::passes::Pass;
 
 /// Removes all debug information (names, locations).
 pub struct StripDebug;

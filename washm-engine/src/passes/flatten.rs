@@ -1,8 +1,8 @@
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
 use crate::ir::module::{Function, Module};
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
+use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
 use std::collections::HashMap;
 

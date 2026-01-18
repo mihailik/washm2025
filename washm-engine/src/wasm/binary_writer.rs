@@ -927,13 +927,14 @@ impl BinaryWriter {
 
                 // Look up signature in type map
                 let sig_key = if signature_type.is_signature() {
-                    let sig = crate::ir::type_store::lookup_signature(*signature_type)
-                        .ok_or_else(|| {
+                    let sig = crate::ir::type_store::lookup_signature(*signature_type).ok_or_else(
+                        || {
                             WriteError::UnsupportedFeature(format!(
                                 "Signature {:?} not found in TypeStore",
                                 signature_type
                             ))
-                        })?;
+                        },
+                    )?;
                     (
                         Self::expand_type(sig.params),
                         Self::expand_type(sig.results),
@@ -1417,11 +1418,11 @@ impl BinaryWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wasm::binary_reader::BinaryReader;
     use crate::ir::expression::{Expression, ExpressionKind, IrBuilder};
     use crate::ir::module::ExportKind;
     use crate::ir::ops::BinaryOp;
     use crate::ir::Literal;
+    use crate::wasm::binary_reader::BinaryReader;
     use bumpalo::collections::Vec as BumpVec;
     use bumpalo::Bump;
 
@@ -1584,8 +1585,8 @@ mod tests {
 
     #[test]
     fn test_control_flow_roundtrip() {
-        use crate::wasm::binary_reader::BinaryReader;
         use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
         use bumpalo::collections::Vec as BumpVec;
 
         let bump = Bump::new();
@@ -1684,8 +1685,8 @@ mod tests {
 
     #[test]
     fn test_memory_operations_roundtrip() {
-        use crate::wasm::binary_reader::BinaryReader;
         use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
         use bumpalo::collections::Vec as BumpVec;
 
         let bump = Bump::new();
@@ -1743,8 +1744,8 @@ mod tests {
 
     #[test]
     fn test_load_variants() {
-        use crate::wasm::binary_reader::BinaryReader;
         use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
         use bumpalo::collections::Vec as BumpVec;
 
         let bump = Bump::new();
@@ -1798,8 +1799,8 @@ mod tests {
 
     #[test]
     fn test_store_variants() {
-        use crate::wasm::binary_reader::BinaryReader;
         use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
         use bumpalo::collections::Vec as BumpVec;
 
         let bump = Bump::new();
@@ -1848,8 +1849,8 @@ mod tests {
 
     #[test]
     fn test_memory_with_control_flow() {
-        use crate::wasm::binary_reader::BinaryReader;
         use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
         use bumpalo::collections::Vec as BumpVec;
 
         let bump = Bump::new();
@@ -1902,8 +1903,8 @@ mod tests {
 
     #[test]
     fn test_memory_offsets_and_alignment() {
-        use crate::wasm::binary_reader::BinaryReader;
         use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
         use bumpalo::collections::Vec as BumpVec;
 
         let bump = Bump::new();

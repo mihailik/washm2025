@@ -267,7 +267,10 @@ impl<'a> Module<'a> {
         self.annotations.insert(expr, annotation);
     }
 
-    pub fn get_annotations(&self, expr: ExprRef<'a>) -> Option<crate::ir::annotation::Annotations<'a>> {
+    pub fn get_annotations(
+        &self,
+        expr: ExprRef<'a>,
+    ) -> Option<crate::ir::annotation::Annotations<'a>> {
         self.annotations.get(expr)
     }
 

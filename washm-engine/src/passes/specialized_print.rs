@@ -1,7 +1,7 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::{ExportKind, Module};
-use crate::passes::Pass;
 use crate::ir::visitor::ReadOnlyVisitor;
+use crate::passes::Pass;
 use std::collections::HashSet;
 
 /// Prints the call graph of the module.

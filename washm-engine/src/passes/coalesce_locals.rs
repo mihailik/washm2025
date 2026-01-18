@@ -2,9 +2,9 @@ use crate::analysis::dataflow::cfg::CFGBuilder;
 use crate::analysis::dataflow::liveness::InterferenceGraph;
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::{Function, Module};
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
+use crate::passes::Pass;
 
 pub struct CoalesceLocals;
 
@@ -804,8 +804,7 @@ impl CoalesceLocals {
                 | ExpressionKind::DataDrop { .. }
                 | ExpressionKind::ElemDrop { .. }
                 | ExpressionKind::Rethrow { .. }
-                | ExpressionKind::Pop { .. }
-                | ExpressionKind::LocalGet { .. } => {}
+                | ExpressionKind::Pop { .. } => {}
             }
         }
     }

@@ -1,8 +1,8 @@
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
 use crate::ir::{Literal, Type};
+use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
 use std::collections::HashMap;
 
@@ -68,7 +68,10 @@ impl Hash for HashableLiteral {
 }
 
 impl ConstHoisting {
-    fn process_function<'a>(func: &mut crate::ir::module::Function<'a>, allocator: &'a bumpalo::Bump) {
+    fn process_function<'a>(
+        func: &mut crate::ir::module::Function<'a>,
+        allocator: &'a bumpalo::Bump,
+    ) {
         // We need separate scopes because of conflicting borrows of `body` (via `func`) and `lit_to_local`?
         // Actually the issue is rewriter stores reference to stack-local `lit_to_local`
         // but `rewriter` type `ConstRewriter<'a>` forces `lit_to_local` to have lifetime `'a` (allocator lifetime).

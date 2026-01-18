@@ -1,7 +1,7 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::ir::{Literal, Type};
+use crate::passes::Pass;
 use std::collections::HashSet;
 
 /// Removes redundant branches and labels.

@@ -2,8 +2,8 @@ use crate::analysis::patterns::{MatchEnv, Pattern, PatternMatcher};
 use crate::ir::expression::ExprRef;
 use crate::ir::module::Module;
 use crate::ir::ops::UnaryOp;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
+use crate::passes::Pass;
 
 /// OptimizeCasts pass: Removes redundant casts
 pub struct OptimizeCasts {

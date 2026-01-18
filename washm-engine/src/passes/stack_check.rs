@@ -1,8 +1,8 @@
 use crate::ir::expression::{ExpressionKind, IrBuilder};
 use crate::ir::module::{ImportKind, Module};
 use crate::ir::ops::BinaryOp;
-use crate::passes::Pass;
 use crate::ir::Type;
+use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
 
 pub struct StackCheck;

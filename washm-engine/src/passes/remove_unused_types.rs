@@ -1,8 +1,8 @@
 use crate::analysis::stats::ModuleStats;
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::{ImportKind, Module};
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
+use crate::passes::Pass;
 use std::collections::HashMap;
 
 /// Removes types that are never used in the module.
@@ -95,11 +95,7 @@ fn updater_visit_init<'a, 'b>(
 }
 
 impl RemoveUnusedTypes {
-    fn remap_type(
-        &self,
-        ty: crate::ir::Type,
-        remap: &HashMap<u32, u32>,
-    ) -> crate::ir::Type {
+    fn remap_type(&self, ty: crate::ir::Type, remap: &HashMap<u32, u32>) -> crate::ir::Type {
         if let Some(id) = ty.signature_id() {
             if let Some(&new_id) = remap.get(&id) {
                 return crate::ir::Type::from_signature_id(new_id);

@@ -1,11 +1,11 @@
 use crate::analysis::cfg::ControlFlowGraph;
 use crate::analysis::dominators::DominanceTree;
-use crate::analysis::ssa::{DefA, SSABuilder};
 use crate::analysis::effects::EffectAnalyzer;
+use crate::analysis::ssa::{DefA, SSABuilder};
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
+use crate::passes::Pass;
 use std::collections::{HashMap, HashSet};
 
 /// Data Flow Optimizations

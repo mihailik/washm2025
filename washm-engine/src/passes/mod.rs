@@ -66,8 +66,8 @@ pub mod type_ssa;
 pub mod untee;
 pub mod vacuum;
 
-use crate::ir::module::Module;
 use crate::analysis::validation::Validator;
+use crate::ir::module::Module;
 use std::collections::HashMap;
 
 pub trait Pass {
@@ -866,4 +866,3 @@ mod tests {
         assert_eq!(oz.shrink_level, 2);
     }
 }
-

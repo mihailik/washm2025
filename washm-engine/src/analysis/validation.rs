@@ -123,11 +123,10 @@ impl<'a, 'm> Validator<'a, 'm> {
                     }
                 }
                 ExportKind::Table => {
-                    let has_table =
-                        self.module.table.is_some()
-                            || self.module.imports.iter().any(|imp| {
-                                matches!(imp.kind, crate::ir::module::ImportKind::Table(..))
-                            });
+                    let has_table = self.module.table.is_some()
+                        || self.module.imports.iter().any(|imp| {
+                            matches!(imp.kind, crate::ir::module::ImportKind::Table(..))
+                        });
 
                     if !has_table {
                         self.fail("Exported table but no table exists");

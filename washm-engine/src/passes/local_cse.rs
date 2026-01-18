@@ -1,8 +1,8 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
+use crate::passes::Pass;
 use std::collections::HashMap;
 
 /// Local Common Subexpression Elimination (CSE)

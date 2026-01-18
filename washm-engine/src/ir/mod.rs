@@ -4,12 +4,12 @@ pub use r#type::*;
 mod literal;
 pub use literal::*;
 
-pub mod module;
+pub mod annotation;
 pub mod expression;
+pub mod module;
 pub mod ops;
 pub mod visitor;
 pub mod wasm_features;
-pub mod annotation;
 
 pub mod type_store;
 

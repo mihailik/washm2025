@@ -17,6 +17,10 @@ use ra_ap_syntax::syntax_editor::{Position, SyntaxEditor};
 use ra_ap_syntax::{ast, AstNode, Edition, SourceFile, SyntaxKind, SyntaxNode, TextRange};
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default() != "wasm32" {
+        return;
+    }
+
     // Section 2: Deadlock Avoidance - CARGO_TARGET_DIR would be set here if we used ProjectWorkspace
     // Since we use SourceFile::parse() directly, we don't need to set it
 

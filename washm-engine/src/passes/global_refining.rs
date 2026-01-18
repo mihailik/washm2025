@@ -1,8 +1,8 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
+use crate::passes::Pass;
 use std::collections::HashMap;
 
 /// Global Refining pass: Refines global types to more specific subtypes

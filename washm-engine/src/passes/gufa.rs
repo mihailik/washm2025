@@ -1,8 +1,8 @@
 use crate::analysis::call_graph::CallGraph;
 use crate::analysis::global_analysis::GlobalAnalysis;
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::passes::remove_unused_module_elements::RemoveUnusedModuleElements;
+use crate::passes::Pass;
 use std::collections::HashSet;
 
 /// GUFA (Global Unified Flow Analysis)

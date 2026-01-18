@@ -1,9 +1,9 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::Module;
 use crate::ir::ops::{BinaryOp, RefAsOp, RefCastOp, UnaryOp};
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
 use crate::ir::Literal;
+use crate::passes::Pass;
 
 pub struct SimplifyIdentity;
 

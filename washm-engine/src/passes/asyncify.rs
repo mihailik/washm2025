@@ -1,10 +1,10 @@
 use crate::analysis::call_graph::CallGraph;
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
 use crate::ir::module::{Function, Global, ImportKind, Module};
-use crate::passes::Pass;
-use crate::passes::flatten::Flatten;
 use crate::ir::visitor::ReadOnlyVisitor;
 use crate::ir::{Literal, Type};
+use crate::passes::flatten::Flatten;
+use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
 use std::collections::{HashMap, HashSet};
 

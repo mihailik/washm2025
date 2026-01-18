@@ -1,8 +1,8 @@
 use crate::analysis::stats::ModuleStats;
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::{ExportKind, ImportKind, Module};
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
+use crate::passes::Pass;
 use std::collections::HashMap;
 
 /// Reorders globals based on access frequency.

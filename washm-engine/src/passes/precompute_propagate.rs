@@ -1,9 +1,9 @@
 use crate::analysis::evaluator::Evaluator;
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
 use crate::ir::Literal;
+use crate::passes::Pass;
 use std::collections::HashMap;
 
 /// PrecomputePropagate pass: Evaluates expressions and propagates constants through locals

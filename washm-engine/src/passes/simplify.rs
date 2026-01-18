@@ -1,9 +1,9 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::Module;
 use crate::ir::ops::BinaryOp;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
 use crate::ir::{Literal, Type};
+use crate::passes::Pass;
 
 /// Simplification pass - implements algebraic simplifications and constant folding
 ///

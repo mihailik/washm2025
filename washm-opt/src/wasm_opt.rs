@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Context};
-use washm::wasm::binary_reader::BinaryReader;
-use washm::wasm::binary_writer::BinaryWriter;
-use washm::ir::module::Module;
-use washm::passes::{OptimizationOptions, PassRunner, PASS_REGISTRY};
-use washm::analysis::validation::Validator;
-use washm::wasm::tools::{add_feature_flags, apply_feature_flags, read_input, write_output};
 use clap::{Arg, ArgAction, Command};
 use std::path::PathBuf;
+use washm::analysis::validation::Validator;
+use washm::ir::module::Module;
+use washm::passes::{OptimizationOptions, PassRunner, PASS_REGISTRY};
+use washm::wasm::binary_reader::BinaryReader;
+use washm::wasm::binary_writer::BinaryWriter;
+use washm::wasm::tools::{add_feature_flags, apply_feature_flags, read_input, write_output};
 
 fn main() -> anyhow::Result<()> {
     let cmd = Command::new("wasm-opt")

@@ -3513,6 +3513,7 @@ dependencies = [
  "indexmap 2.13.0",
  "itertools 0.14.0",
  "libc",
+ "log",
  "nix",
  "normalize-path",
  "once_cell",

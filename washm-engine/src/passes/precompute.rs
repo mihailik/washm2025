@@ -1,8 +1,8 @@
 use crate::analysis::evaluator::Evaluator;
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
+use crate::passes::Pass;
 
 /// Precompute pass: Evaluates constant expressions at compile time
 pub struct Precompute;

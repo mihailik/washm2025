@@ -1,8 +1,8 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::{ExportKind, Function, Global, Module};
 use crate::ir::ops::{BinaryOp, UnaryOp};
-use crate::passes::Pass;
 use crate::ir::{Literal, Type};
+use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
 
 pub struct LegalizeJSInterface;

@@ -1,7 +1,7 @@
 use crate::ir::expression::ExprRef;
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
+use crate::passes::Pass;
 
 pub struct DaeOptimizing;
 

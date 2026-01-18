@@ -1,7 +1,7 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
+use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
 
 /// Merge Blocks pass: Combines consecutive blocks that can be merged

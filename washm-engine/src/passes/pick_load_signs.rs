@@ -1,9 +1,9 @@
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
 use crate::ir::module::Module;
 use crate::ir::ops::BinaryOp;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
 use crate::ir::Literal;
+use crate::passes::Pass;
 
 /// Pick Load Signs pass: Optimizes load signs based on usage
 ///

@@ -1,7 +1,7 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
+use crate::passes::Pass;
 use std::collections::HashMap;
 
 /// Reorders locals within each function to group them by type (for better compression).

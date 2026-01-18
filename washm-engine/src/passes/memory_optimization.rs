@@ -1,9 +1,9 @@
 use crate::analysis::effects::{Effect, EffectAnalyzer};
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::Module;
-use crate::passes::Pass;
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
+use crate::passes::Pass;
 
 /// Memory and local optimization pass.
 ///

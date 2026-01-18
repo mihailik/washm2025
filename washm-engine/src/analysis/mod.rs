@@ -1,7 +1,9 @@
 pub mod call_graph;
 pub mod cfg;
 pub mod cost;
+pub mod dataflow;
 pub mod dominators;
+pub mod effects;
 pub mod evaluator;
 pub mod global_analysis;
 pub mod hasher;
@@ -10,5 +12,3 @@ pub mod ssa;
 pub mod stats;
 pub mod usage;
 pub mod validation;
-pub mod dataflow;
-pub mod effects;

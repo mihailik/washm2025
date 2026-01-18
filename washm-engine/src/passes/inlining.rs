@@ -2,9 +2,9 @@ use crate::analysis::call_graph::CallGraph;
 use crate::analysis::cost::{CostEstimator, TrivialInstruction};
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
 use crate::ir::module::{ExportKind, Module};
-use crate::passes::{InliningOptions, OptimizationOptions, Pass};
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
+use crate::passes::{InliningOptions, OptimizationOptions, Pass};
 use bumpalo::collections::Vec as BumpVec;
 use std::collections::{HashMap, HashSet};
 
