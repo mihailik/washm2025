@@ -1,7 +1,13 @@
 [package]
 name = "washm-testgen-macros"
+description = "Test generation macros for the WASHM project"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
 
 [lib]
 proc-macro = true
