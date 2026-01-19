@@ -20,9 +20,10 @@ crate-type = ["cdylib", "rlib"]
 once_cell = "1.19"
 bitflags = "2.4"
 bumpalo = { version = "3.19.1", features = ["collections"] }
-wat = "1.217"
-wast = "217"
-wasmprinter = "0.217"
+wat = "1.244.0"
+wast = "244"
+wasmprinter = "0.244.0"
+wasmparser = "0.244.0"
 ahash = "0.8"
 log = "0.4"
 anyhow = "1.0"
@@ -36,7 +37,7 @@ env_logger = "0.10"
 washm-testgen-macros = { path = "testgen-macros", version = "0.4.0" }
 tempfile = "3.8"
 similar = { version = "2.2", features = ["inline"] }
-proptest = "1.0"
+proptest = { version = "1.9.0", default-features = false, features = ["std", "alloc"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.4", default-features = false }

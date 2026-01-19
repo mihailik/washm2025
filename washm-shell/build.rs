@@ -240,6 +240,10 @@ impl SemanticEngine {
         // String-based pre-processing for macros and hard-to-parse constructs
         if path_str.ends_with("brush-core/src/expansion.rs") {
             content = content.replace("crate::regex", "crate::brush_core::regex");
+            content = content.replace(
+                "use std::borrow::Cow;",
+                "use std::borrow::Cow;\nuse std::future::Future;",
+            );
         }
         if path_str.ends_with("brush-core/src/wellknownvars.rs") {
             content = content.replace("crate::callstack", "crate::brush_core::callstack");
@@ -382,6 +386,7 @@ impl SemanticEngine {
         let root = parse.tree().syntax().clone();
         let mut editor = SyntaxEditor::new(root.clone());
 
+        self.apply_test_stripping(&mut editor, &root);
         self.apply_path_rewrites(&mut editor, &root, path);
         self.apply_macro_fixes(&mut editor, &root, path);
         self.apply_stub_replacements(&mut editor, &root, path);
@@ -669,6 +674,59 @@ impl SemanticEngine {
                 }
             }
             i += 1;
+        }
+    }
+
+    fn apply_test_stripping(&self, editor: &mut SyntaxEditor, root: &SyntaxNode) {
+        let mut to_delete = Vec::new();
+
+        // 1. Find nodes marked with specifically #[cfg(test)] or #[test]
+        for attr in root.descendants().filter_map(ast::Attr::cast) {
+            if let Some(meta) = attr.meta() {
+                let text = meta.to_string();
+                if text == "cfg(test)" || text == "test" {
+                    if let Some(item) = attr.syntax().parent().and_then(ast::Item::cast) {
+                        to_delete.push(item.syntax().clone());
+                    }
+                }
+            }
+        }
+
+        // 2. Find imports or items that mention problematic crates
+        for node in root.descendants() {
+            if let Some(item) = ast::Item::cast(node.clone()) {
+                let text = item.to_string();
+                let problematic_crates = ["pretty_assertions", "insta", "proptest", "tempfile"];
+
+                let is_problematic = problematic_crates.iter().any(|&c| {
+                    text.contains(&format!("extern crate {}", c))
+                        || text.contains(&format!("use {}", c))
+                        || text.contains(&format!("{}::", c))
+                });
+
+                if is_problematic {
+                    to_delete.push(item.syntax().clone());
+                }
+            }
+        }
+
+        // Only delete top-most nodes to avoid intersecting ranges
+        let mut final_to_delete = Vec::new();
+        for node in &to_delete {
+            let is_nested = to_delete
+                .iter()
+                .any(|other| other != node && other.text_range().contains_range(node.text_range()));
+            if !is_nested {
+                final_to_delete.push(node.clone());
+            }
+        }
+
+        // Deduplicate
+        final_to_delete.sort_by_key(|n| n.text_range().start());
+        final_to_delete.dedup_by(|a, b| a.text_range() == b.text_range());
+
+        for node in final_to_delete {
+            editor.delete(node);
         }
     }
 

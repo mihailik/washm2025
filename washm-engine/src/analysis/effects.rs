@@ -13,9 +13,9 @@
 //! ## Usage
 //!
 //! ```rust
-//! use binaryen_ir::effects::{Effect, EffectAnalyzer};
-//! use binaryen_ir::expression::{IrBuilder, ExprRef};
-//! use crate::ir::{Literal, Type};
+//! use washm::analysis::effects::{Effect, EffectAnalyzer};
+//! use washm::ir::expression::{IrBuilder, ExprRef};
+//! use washm::ir::{Literal, Type};
 //! use bumpalo::Bump;
 //!
 //! let bump = Bump::new();

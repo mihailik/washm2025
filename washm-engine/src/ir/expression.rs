@@ -1294,6 +1294,178 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
+    pub fn ref_null(&self, type_: Type) -> ExprRef<'a> {
+        Expression::new(self.bump, ExpressionKind::RefNull { type_ }, type_)
+    }
+
+    pub fn ref_is_null(&self, value: ExprRef<'a>) -> ExprRef<'a> {
+        Expression::new(self.bump, ExpressionKind::RefIsNull { value }, Type::I32)
+    }
+
+    pub fn ref_func(&self, func: &'a str) -> ExprRef<'a> {
+        Expression::new(self.bump, ExpressionKind::RefFunc { func }, Type::FUNCREF)
+    }
+
+    pub fn ref_eq(&self, left: ExprRef<'a>, right: ExprRef<'a>) -> ExprRef<'a> {
+        Expression::new(self.bump, ExpressionKind::RefEq { left, right }, Type::I32)
+    }
+
+    pub fn i31_new(&self, value: ExprRef<'a>) -> ExprRef<'a> {
+        Expression::new(self.bump, ExpressionKind::I31New { value }, Type::I31REF)
+    }
+
+    pub fn i31_get(&self, i31: ExprRef<'a>, signed: bool) -> ExprRef<'a> {
+        Expression::new(self.bump, ExpressionKind::I31Get { i31, signed }, Type::I32)
+    }
+
+    pub fn struct_new(&self, type_: Type, operands: BumpVec<'a, ExprRef<'a>>) -> ExprRef<'a> {
+        Expression::new(
+            self.bump,
+            ExpressionKind::StructNew { type_, operands },
+            type_,
+        )
+    }
+
+    pub fn struct_get(
+        &self,
+        type_: Type,
+        ptr: ExprRef<'a>,
+        index: u32,
+        signed: bool,
+        field_type: Type,
+    ) -> ExprRef<'a> {
+        Expression::new(
+            self.bump,
+            ExpressionKind::StructGet {
+                type_,
+                ptr,
+                index,
+                signed,
+            },
+            field_type,
+        )
+    }
+
+    pub fn struct_set(
+        &self,
+        type_: Type,
+        ptr: ExprRef<'a>,
+        index: u32,
+        value: ExprRef<'a>,
+    ) -> ExprRef<'a> {
+        Expression::new(
+            self.bump,
+            ExpressionKind::StructSet {
+                type_,
+                ptr,
+                index,
+                value,
+            },
+            Type::NONE,
+        )
+    }
+
+    pub fn array_new(
+        &self,
+        type_: Type,
+        size: ExprRef<'a>,
+        init: Option<ExprRef<'a>>,
+    ) -> ExprRef<'a> {
+        Expression::new(
+            self.bump,
+            ExpressionKind::ArrayNew { type_, size, init },
+            type_,
+        )
+    }
+
+    pub fn array_get(
+        &self,
+        type_: Type,
+        ptr: ExprRef<'a>,
+        index: ExprRef<'a>,
+        signed: bool,
+        field_type: Type,
+    ) -> ExprRef<'a> {
+        Expression::new(
+            self.bump,
+            ExpressionKind::ArrayGet {
+                type_,
+                ptr,
+                index,
+                signed,
+            },
+            field_type,
+        )
+    }
+
+    pub fn array_set(
+        &self,
+        type_: Type,
+        ptr: ExprRef<'a>,
+        index: ExprRef<'a>,
+        value: ExprRef<'a>,
+    ) -> ExprRef<'a> {
+        Expression::new(
+            self.bump,
+            ExpressionKind::ArraySet {
+                type_,
+                ptr,
+                index,
+                value,
+            },
+            Type::NONE,
+        )
+    }
+
+    pub fn array_len(&self, ptr: ExprRef<'a>) -> ExprRef<'a> {
+        Expression::new(self.bump, ExpressionKind::ArrayLen { ptr }, Type::I32)
+    }
+
+    pub fn ref_test(
+        &self,
+        op: crate::ir::ops::RefTestOp,
+        value: ExprRef<'a>,
+        type_: Type,
+    ) -> ExprRef<'a> {
+        Expression::new(
+            self.bump,
+            ExpressionKind::RefTest { op, value, type_ },
+            Type::I32,
+        )
+    }
+
+    pub fn ref_cast(
+        &self,
+        op: crate::ir::ops::RefCastOp,
+        value: ExprRef<'a>,
+        type_: Type,
+    ) -> ExprRef<'a> {
+        Expression::new(
+            self.bump,
+            ExpressionKind::RefCast { op, value, type_ },
+            type_,
+        )
+    }
+
+    pub fn br_on(
+        &self,
+        name: &'a str,
+        op: crate::ir::ops::BrOnOp,
+        value: ExprRef<'a>,
+        type_: Type,
+    ) -> ExprRef<'a> {
+        Expression::new(
+            self.bump,
+            ExpressionKind::BrOn {
+                name,
+                op,
+                value,
+                type_,
+            },
+            type_,
+        )
+    }
+
     /// Deep clone an expression tree
     pub fn deep_clone(&self, expr: ExprRef<'a>) -> ExprRef<'a> {
         let kind = match &expr.kind {
