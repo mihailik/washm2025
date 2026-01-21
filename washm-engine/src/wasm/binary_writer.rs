@@ -1,11 +1,48 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{Function, Import, ImportKind, Module, TableLimits};
+use crate::ir::module::{Function, ImportKind, Module};
 use crate::ir::ops::{AtomicOp, BinaryOp, UnaryOp};
 use crate::ir::{Literal, Type};
+use std::borrow::Cow;
 use std::io;
+use wasm_encoder::{
+    AbstractHeapType, CodeSection, ConstExpr, DataSection, ElementSection, Encode, ExportKind,
+    ExportSection, Function as EncoderFunction, FunctionSection, GlobalSection, HeapType,
+    ImportSection, Instruction, MemArg, MemorySection, MemoryType, Module as EncoderModule,
+    RefType, StartSection, TableSection, TableType, TypeSection, ValType,
+};
+
+trait InstructionEncoder {
+    fn instruction(&mut self, instr: &Instruction<'_>) -> &mut Self;
+}
+
+impl InstructionEncoder for EncoderFunction {
+    fn instruction(&mut self, instr: &Instruction<'_>) -> &mut Self {
+        self.instruction(instr)
+    }
+}
+
+struct ConstExprEncoder {
+    bytes: Vec<u8>,
+}
+
+impl ConstExprEncoder {
+    fn new() -> Self {
+        Self { bytes: Vec::new() }
+    }
+
+    fn finish(self) -> ConstExpr {
+        ConstExpr::raw(self.bytes)
+    }
+}
+
+impl InstructionEncoder for ConstExprEncoder {
+    fn instruction(&mut self, instr: &Instruction<'_>) -> &mut Self {
+        instr.encode(&mut self.bytes);
+        self
+    }
+}
 
 pub struct BinaryWriter {
-    buffer: Vec<u8>,
     _label_stack: Vec<Option<String>>, // Stack of label names for depth calculation
 }
 
@@ -34,8 +71,75 @@ impl Default for BinaryWriter {
 impl BinaryWriter {
     pub fn new() -> Self {
         Self {
-            buffer: Vec::new(),
             _label_stack: Vec::new(),
+        }
+    }
+
+    fn to_val_type(ty: Type) -> ValType {
+        if ty == Type::I32 {
+            ValType::I32
+        } else if ty == Type::I64 {
+            ValType::I64
+        } else if ty == Type::F32 {
+            ValType::F32
+        } else if ty == Type::F64 {
+            ValType::F64
+        } else if ty == Type::V128 {
+            ValType::V128
+        } else if ty == Type::FUNCREF {
+            ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Abstract {
+                    shared: false,
+                    ty: AbstractHeapType::Func,
+                },
+            })
+        } else if ty == Type::EXTERNREF {
+            ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Abstract {
+                    shared: false,
+                    ty: AbstractHeapType::Extern,
+                },
+            })
+        } else {
+            // Default to I32 for unknown types for now
+            ValType::I32
+        }
+    }
+
+    fn to_ref_type(ty: Type) -> RefType {
+        if ty == Type::EXTERNREF {
+            RefType {
+                nullable: true,
+                heap_type: HeapType::Abstract {
+                    shared: false,
+                    ty: AbstractHeapType::Extern,
+                },
+            }
+        } else {
+            RefType {
+                nullable: true,
+                heap_type: HeapType::Abstract {
+                    shared: false,
+                    ty: AbstractHeapType::Func,
+                },
+            }
+        }
+    }
+
+    fn to_block_type(ty: Type) -> wasm_encoder::BlockType {
+        if ty == Type::NONE {
+            wasm_encoder::BlockType::Empty
+        } else {
+            let expanded = Self::expand_type(ty);
+            if expanded.len() == 1 {
+                wasm_encoder::BlockType::Result(Self::to_val_type(expanded[0]))
+            } else {
+                // TODO: For multi-value returns, we need a type index.
+                // This requires looking up or adding a type in the TypeSection.
+                wasm_encoder::BlockType::Empty
+            }
         }
     }
 
@@ -55,11 +159,7 @@ impl BinaryWriter {
     }
 
     pub fn write_module(&mut self, module: &Module) -> Result<Vec<u8>> {
-        // Magic number: 0x00 0x61 0x73 0x6D (\0asm)
-        self.write_u32(0x6D736100)?;
-
-        // Version: 1
-        self.write_u32(1)?;
+        let mut encoder = EncoderModule::new();
 
         // Use types from module if available, otherwise infer from functions/imports
         let mut type_map: Vec<(Vec<Type>, Vec<Type>)> = Vec::new();
@@ -83,22 +183,18 @@ impl BinaryWriter {
             }
         }
 
-        let mut func_type_indices: Vec<usize> = Vec::new();
-
+        let mut func_type_indices: Vec<u32> = Vec::new();
         for func in &module.functions {
-            // Use explicit type_idx if available, otherwise infer from signature
             let idx = if let Some(type_idx) = func.type_idx {
-                type_idx as usize
+                type_idx as u32
             } else {
-                // Infer type index from function signature
                 let params_vec = Self::expand_type(func.params);
                 let results_vec = Self::expand_type(func.results);
-
                 let sig = (params_vec, results_vec);
                 if let Some(pos) = type_map.iter().position(|t| *t == sig) {
-                    pos
+                    pos as u32
                 } else {
-                    let idx = type_map.len();
+                    let idx = type_map.len() as u32;
                     type_map.push(sig);
                     idx
                 }
@@ -106,685 +202,481 @@ impl BinaryWriter {
             func_type_indices.push(idx);
         }
 
-        // Write Type section
+        // 1. Type Section
         if !type_map.is_empty() {
-            self.write_type_section(&type_map)?;
+            let mut types = TypeSection::new();
+            for (params, results) in &type_map {
+                let p: Vec<ValType> = params.iter().map(|&t| Self::to_val_type(t)).collect();
+                let r: Vec<ValType> = results.iter().map(|&t| Self::to_val_type(t)).collect();
+                types.ty().function(p, r);
+            }
+            encoder.section(&types);
         }
 
-        // Write Import section
+        // 2. Import Section
         if !module.imports.is_empty() {
-            self.write_import_section(&module.imports, &type_map)?;
+            let mut imports = ImportSection::new();
+            for import in &module.imports {
+                let kind = match &import.kind {
+                    ImportKind::Function(params, results) => {
+                        let sig = (Self::expand_type(*params), Self::expand_type(*results));
+                        let idx = type_map.iter().position(|t| *t == sig).ok_or_else(|| {
+                            WriteError::UnsupportedFeature("Type not found".to_string())
+                        })?;
+                        wasm_encoder::EntityType::Function(idx as u32)
+                    }
+                    ImportKind::Table(elem_type, min, max) => {
+                        wasm_encoder::EntityType::Table(TableType {
+                            element_type: Self::to_ref_type(*elem_type),
+                            minimum: *min as u64,
+                            maximum: max.map(|m| m as u64),
+                            table64: false,
+                            shared: false,
+                        })
+                    }
+                    ImportKind::Memory(limits) => wasm_encoder::EntityType::Memory(MemoryType {
+                        minimum: limits.initial as u64,
+                        maximum: limits.maximum.map(|m| m as u64),
+                        memory64: false,
+                        shared: false,
+                        page_size_log2: None,
+                    }),
+                    ImportKind::Global(val_type, mutable) => {
+                        wasm_encoder::EntityType::Global(wasm_encoder::GlobalType {
+                            val_type: Self::to_val_type(*val_type),
+                            mutable: *mutable,
+                            shared: false,
+                        })
+                    }
+                };
+                imports.import(&import.module, &import.name, kind);
+            }
+            encoder.section(&imports);
         }
 
-        // Write Function section
-        if !module.functions.is_empty() {
-            self.write_function_section(&func_type_indices)?;
+        // 3. Function Section
+        if !func_type_indices.is_empty() {
+            let mut functions = FunctionSection::new();
+            for &idx in &func_type_indices {
+                functions.function(idx);
+            }
+            encoder.section(&functions);
         }
 
-        // Write Table section
-        if let Some(ref table) = module.table {
-            self.write_table_section(table)?;
+        // 4. Table Section
+        if let Some(table) = &module.table {
+            let mut tables = TableSection::new();
+            tables.table(TableType {
+                element_type: Self::to_ref_type(table.element_type),
+                minimum: table.initial as u64,
+                maximum: table.maximum.map(|m| m as u64),
+                table64: false,
+                shared: false,
+            });
+            encoder.section(&tables);
         }
 
-        // Write Memory section
-        if let Some(ref memory) = module.memory {
-            self.write_memory_section(memory)?;
+        // 5. Memory Section
+        if let Some(mem) = &module.memory {
+            let mut memories = MemorySection::new();
+            memories.memory(MemoryType {
+                minimum: mem.initial as u64,
+                maximum: mem.maximum.map(|m| m as u64),
+                memory64: false,
+                shared: false,
+                page_size_log2: None,
+            });
+            encoder.section(&memories);
         }
 
-        // Write Global section
+        // 6. Global Section
         if !module.globals.is_empty() {
-            self.write_global_section(&module.globals, &type_map)?;
-        }
-
-        // Write Export section
-        if !module.exports.is_empty() {
-            self.write_export_section(&module.exports)?;
-        }
-
-        // Write Start section
-        if let Some(start_idx) = module.start {
-            self.write_start_section(start_idx)?;
-        }
-
-        // Write Element section
-        if !module.elements.is_empty() {
-            self.write_element_section(&module.elements, &type_map)?;
-        }
-
-        // Write Code section
-        if !module.functions.is_empty() {
-            self.write_code_section(&module.functions, &type_map)?;
-        }
-
-        // Write Data section
-        if !module.data.is_empty() {
-            self.write_data_section(&module.data, &type_map)?;
-        }
-
-        Ok(self.buffer.clone())
-    }
-
-    fn write_type_section(&mut self, types: &[(Vec<Type>, Vec<Type>)]) -> Result<()> {
-        let mut section_buf = Vec::new();
-
-        // Count
-        Self::write_leb128_u32(&mut section_buf, types.len() as u32)?;
-
-        for (params, results) in types {
-            // func type
-            section_buf.push(0x60);
-
-            // params
-            Self::write_leb128_u32(&mut section_buf, params.len() as u32)?;
-            for param_type in params {
-                Self::write_value_type(&mut section_buf, *param_type)?;
-            }
-
-            // results
-            Self::write_leb128_u32(&mut section_buf, results.len() as u32)?;
-            for result_type in results {
-                Self::write_value_type(&mut section_buf, *result_type)?;
-            }
-        }
-
-        // Section id (1 = Type)
-        self.buffer.push(0x01);
-        // Section size
-        Self::write_leb128_u32(&mut self.buffer, section_buf.len() as u32)?;
-        // Section content
-        self.buffer.extend_from_slice(&section_buf);
-
-        Ok(())
-    }
-
-    fn write_import_section(
-        &mut self,
-        imports: &[Import],
-        type_map: &[(Vec<Type>, Vec<Type>)],
-    ) -> Result<()> {
-        if imports.is_empty() {
-            return Ok(());
-        }
-
-        let mut section_buf = Vec::new();
-
-        // Count
-        Self::write_leb128_u32(&mut section_buf, imports.len() as u32)?;
-
-        for import in imports {
-            // Module
-            Self::write_leb128_u32(&mut section_buf, import.module.len() as u32)?;
-            section_buf.extend_from_slice(import.module.as_bytes());
-
-            // Name
-            Self::write_leb128_u32(&mut section_buf, import.name.len() as u32)?;
-            section_buf.extend_from_slice(import.name.as_bytes());
-
-            match &import.kind {
-                crate::ir::module::ImportKind::Function(params, results) => {
-                    section_buf.push(0x00); // Kind: Function
-
-                    let params_vec = Self::expand_type(*params);
-                    let results_vec = Self::expand_type(*results);
-                    let sig = (params_vec, results_vec);
-
-                    let idx = type_map.iter().position(|t| *t == sig).ok_or_else(|| {
-                        WriteError::UnsupportedFeature("Type not found in type map".to_string())
-                    })?;
-                    Self::write_leb128_u32(&mut section_buf, idx as u32)?;
-                }
-                crate::ir::module::ImportKind::Table(elem_type, min, max) => {
-                    section_buf.push(0x01); // Kind: Table
-                    Self::write_value_type(&mut section_buf, *elem_type)?;
-                    if let Some(m) = max {
-                        section_buf.push(0x01);
-                        Self::write_leb128_u32(&mut section_buf, *min)?;
-                        Self::write_leb128_u32(&mut section_buf, *m)?;
-                    } else {
-                        section_buf.push(0x00);
-                        Self::write_leb128_u32(&mut section_buf, *min)?;
-                    }
-                }
-                crate::ir::module::ImportKind::Memory(limits) => {
-                    section_buf.push(0x02); // Kind: Memory
-                    if let Some(m) = limits.maximum {
-                        section_buf.push(0x01);
-                        Self::write_leb128_u32(&mut section_buf, limits.initial)?;
-                        Self::write_leb128_u32(&mut section_buf, m)?;
-                    } else {
-                        section_buf.push(0x00);
-                        Self::write_leb128_u32(&mut section_buf, limits.initial)?;
-                    }
-                }
-                crate::ir::module::ImportKind::Global(val_type, mutable) => {
-                    section_buf.push(0x03); // Kind: Global
-                    Self::write_value_type(&mut section_buf, *val_type)?;
-                    section_buf.push(if *mutable { 1 } else { 0 });
-                }
-            }
-        }
-
-        // Section id (2 = Import)
-        self.buffer.push(0x02);
-        // Section size
-        Self::write_leb128_u32(&mut self.buffer, section_buf.len() as u32)?;
-        // Section content
-        self.buffer.extend_from_slice(&section_buf);
-
-        Ok(())
-    }
-
-    fn write_function_section(&mut self, type_indices: &[usize]) -> Result<()> {
-        let mut section_buf = Vec::new();
-
-        // Count
-        Self::write_leb128_u32(&mut section_buf, type_indices.len() as u32)?;
-
-        for &idx in type_indices {
-            Self::write_leb128_u32(&mut section_buf, idx as u32)?;
-        }
-
-        // Section id (3 = Function)
-        self.buffer.push(0x03);
-        // Section size
-        Self::write_leb128_u32(&mut self.buffer, section_buf.len() as u32)?;
-        // Section content
-        self.buffer.extend_from_slice(&section_buf);
-
-        Ok(())
-    }
-
-    fn write_memory_section(&mut self, memory: &crate::ir::module::MemoryLimits) -> Result<()> {
-        let mut section_buf = Vec::new();
-
-        // Count (always 1 for now - WASM 1.0 supports only one memory)
-        Self::write_leb128_u32(&mut section_buf, 1)?;
-
-        // Limits flag: 0x00 = min only, 0x01 = min and max
-        if let Some(max) = memory.maximum {
-            section_buf.push(0x01);
-            Self::write_leb128_u32(&mut section_buf, memory.initial)?;
-            Self::write_leb128_u32(&mut section_buf, max)?;
-        } else {
-            section_buf.push(0x00);
-            Self::write_leb128_u32(&mut section_buf, memory.initial)?;
-        }
-
-        // Section id (5 = Memory)
-        self.buffer.push(0x05);
-        // Section size
-        Self::write_leb128_u32(&mut self.buffer, section_buf.len() as u32)?;
-        // Section content
-        self.buffer.extend_from_slice(&section_buf);
-
-        Ok(())
-    }
-
-    fn write_global_section(
-        &mut self,
-        globals: &[crate::ir::module::Global],
-        type_map: &[(Vec<Type>, Vec<Type>)],
-    ) -> Result<()> {
-        let mut section_buf = Vec::new();
-
-        // Count
-        Self::write_leb128_u32(&mut section_buf, globals.len() as u32)?;
-
-        for global in globals {
-            // Global Type
-            Self::write_value_type(&mut section_buf, global.type_)?;
-
-            // Mutability
-            section_buf.push(if global.mutable { 0x01 } else { 0x00 });
-
-            // Init expression
-            // Global init expression must be constant and simple (no labels, no function calls)
-            let mut label_stack = Vec::new(); // should stay empty
-            let dummy_map = std::collections::HashMap::new();
-            Self::write_expression(
-                &mut section_buf,
-                global.init,
-                &mut label_stack,
-                &dummy_map,
-                type_map,
-            )?;
-
-            // End opcode for expression
-            section_buf.push(0x0B);
-        }
-
-        // Section id (6 = Global)
-        self.buffer.push(0x06);
-        // Section size
-        Self::write_leb128_u32(&mut self.buffer, section_buf.len() as u32)?;
-        // Section content
-        self.buffer.extend_from_slice(&section_buf);
-
-        Ok(())
-    }
-
-    fn write_export_section(&mut self, exports: &[crate::ir::module::Export]) -> Result<()> {
-        if exports.is_empty() {
-            return Ok(());
-        }
-
-        let mut section_buf = Vec::new();
-
-        // Count
-        Self::write_leb128_u32(&mut section_buf, exports.len() as u32)?;
-
-        for export in exports {
-            // Name
-            Self::write_leb128_u32(&mut section_buf, export.name.len() as u32)?;
-            section_buf.extend_from_slice(export.name.as_bytes());
-
-            // Kind
-            section_buf.push(export.kind as u8);
-
-            // Index
-            Self::write_leb128_u32(&mut section_buf, export.index)?;
-        }
-
-        // Section id (7 = Export)
-        self.buffer.push(0x07);
-        // Section size
-        Self::write_leb128_u32(&mut self.buffer, section_buf.len() as u32)?;
-        // Section content
-        self.buffer.extend_from_slice(&section_buf);
-
-        Ok(())
-    }
-
-    fn write_start_section(&mut self, start_idx: u32) -> Result<()> {
-        let mut section_buf = Vec::new();
-
-        // Function index
-        Self::write_leb128_u32(&mut section_buf, start_idx)?;
-
-        // Section id (8 = Start)
-        self.buffer.push(0x08);
-        // Section size
-        Self::write_leb128_u32(&mut self.buffer, section_buf.len() as u32)?;
-        // Section content
-        self.buffer.extend_from_slice(&section_buf);
-
-        Ok(())
-    }
-
-    fn write_code_section(
-        &mut self,
-        functions: &[Function],
-        type_map: &[(Vec<Type>, Vec<Type>)],
-    ) -> Result<()> {
-        let mut section_buf = Vec::new();
-
-        // Build function name to index map
-        let mut func_map = std::collections::HashMap::new();
-        for (i, func) in functions.iter().enumerate() {
-            func_map.insert(func.name.as_str(), i as u32);
-        }
-
-        // Count
-        Self::write_leb128_u32(&mut section_buf, functions.len() as u32)?;
-
-        for func in functions {
-            let mut body_buf = Vec::new();
-
-            // Locals
-            Self::write_leb128_u32(&mut body_buf, func.vars.len() as u32)?;
-            for var_type in &func.vars {
-                Self::write_leb128_u32(&mut body_buf, 1)?; // count
-                Self::write_value_type(&mut body_buf, *var_type)?;
-            }
-
-            // Expression
-            if let Some(body) = &func.body {
-                let mut label_stack = Vec::new();
-                Self::write_expression(
-                    &mut body_buf,
-                    *body,
-                    &mut label_stack,
-                    &func_map,
-                    type_map,
+            let mut globals = GlobalSection::new();
+            for global in &module.globals {
+                let mut init_expr_encoder = ConstExprEncoder::new();
+                Self::write_instructions(
+                    &mut init_expr_encoder,
+                    global.init,
+                    &mut vec![],
+                    &std::collections::HashMap::new(),
+                    &type_map,
                 )?;
+                let init_expr = init_expr_encoder.finish();
+                globals.global(
+                    wasm_encoder::GlobalType {
+                        val_type: Self::to_val_type(global.type_),
+                        mutable: global.mutable,
+                        shared: false,
+                    },
+                    &init_expr,
+                );
             }
-
-            // end
-            body_buf.push(0x0B);
-
-            // Body size + body
-            Self::write_leb128_u32(&mut section_buf, body_buf.len() as u32)?;
-            section_buf.extend_from_slice(&body_buf);
+            encoder.section(&globals);
         }
 
-        // Section id (10 = Code)
-        self.buffer.push(0x0A);
-        // Section size
-        Self::write_leb128_u32(&mut self.buffer, section_buf.len() as u32)?;
-        // Section content
-        self.buffer.extend_from_slice(&section_buf);
+        // 7. Export Section
+        if !module.exports.is_empty() {
+            let mut exports = ExportSection::new();
+            for export in &module.exports {
+                let kind = match export.kind {
+                    crate::ir::module::ExportKind::Function => ExportKind::Func,
+                    crate::ir::module::ExportKind::Table => ExportKind::Table,
+                    crate::ir::module::ExportKind::Memory => ExportKind::Memory,
+                    crate::ir::module::ExportKind::Global => ExportKind::Global,
+                };
+                exports.export(&export.name, kind, export.index);
+            }
+            encoder.section(&exports);
+        }
 
-        Ok(())
+        // 8. Start Section
+        if let Some(start_idx) = module.start {
+            encoder.section(&StartSection {
+                function_index: start_idx,
+            });
+        }
+
+        // 9. Element Section
+        if !module.elements.is_empty() {
+            let mut elements = ElementSection::new();
+            for segment in &module.elements {
+                let mut offset_expr_encoder = ConstExprEncoder::new();
+                Self::write_instructions(
+                    &mut offset_expr_encoder,
+                    segment.offset,
+                    &mut vec![],
+                    &std::collections::HashMap::new(),
+                    &type_map,
+                )?;
+                let offset_expr = offset_expr_encoder.finish();
+                elements.active(
+                    Some(segment.table_index),
+                    &offset_expr,
+                    wasm_encoder::Elements::Functions(Cow::Borrowed(&segment.func_indices)),
+                );
+            }
+            encoder.section(&elements);
+        }
+
+        // 10. Code Section
+        if !module.functions.is_empty() {
+            let mut code = CodeSection::new();
+            let func_map: std::collections::HashMap<&str, u32> = module
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (f.name.as_str(), i as u32))
+                .collect();
+
+            for func in &module.functions {
+                let mut locals = Vec::new();
+                for &t in &func.vars {
+                    locals.push((1, Self::to_val_type(t)));
+                }
+                let mut func_encoder = EncoderFunction::new(locals);
+
+                if let Some(body) = func.body {
+                    let mut label_stack = vec![None];
+                    Self::write_instructions(
+                        &mut func_encoder,
+                        body,
+                        &mut label_stack,
+                        &func_map,
+                        &type_map,
+                    )?;
+                }
+                func_encoder.instruction(&Instruction::End);
+                code.function(&func_encoder);
+            }
+            encoder.section(&code);
+        }
+
+        // 11. Data Section
+        if !module.data.is_empty() {
+            let mut data = DataSection::new();
+            for segment in &module.data {
+                let mut offset_expr_encoder = ConstExprEncoder::new();
+                Self::write_instructions(
+                    &mut offset_expr_encoder,
+                    segment.offset,
+                    &mut vec![],
+                    &std::collections::HashMap::new(),
+                    &type_map,
+                )?;
+                let offset_expr = offset_expr_encoder.finish();
+                data.active(
+                    segment.memory_index,
+                    &offset_expr,
+                    segment.data.iter().copied(),
+                );
+            }
+            encoder.section(&data);
+        }
+
+        Ok(encoder.finish())
     }
 
-    fn write_expression(
-        buf: &mut Vec<u8>,
-        expr: ExprRef,
+    fn write_instructions<E: InstructionEncoder>(
+        encoder: &mut E,
+        expr_ref: ExprRef,
         label_stack: &mut Vec<Option<String>>,
         func_map: &std::collections::HashMap<&str, u32>,
         type_map: &[(Vec<Type>, Vec<Type>)],
     ) -> Result<()> {
+        let expr = &*expr_ref;
         match &expr.kind {
-            ExpressionKind::Const(lit) => {
-                match lit {
-                    Literal::I32(val) => {
-                        buf.push(0x41); // i32.const
-                        Self::write_leb128_i32(buf, *val)?;
-                    }
-                    Literal::I64(val) => {
-                        buf.push(0x42); // i64.const
-                        Self::write_leb128_i64(buf, *val)?;
-                    }
-                    Literal::F32(val) => {
-                        buf.push(0x43); // f32.const
-                        buf.extend_from_slice(&val.to_le_bytes());
-                    }
-                    Literal::F64(val) => {
-                        buf.push(0x44); // f64.const
-                        buf.extend_from_slice(&val.to_le_bytes());
-                    }
-                    Literal::V128(val) => {
-                        buf.push(0xFD); // v128.const
-                        Self::write_leb128_u32(buf, 0x0C)?; // v128.const opcode extension
-                        buf.extend_from_slice(val);
-                    }
+            ExpressionKind::Const(lit) => match lit {
+                Literal::I32(v) => {
+                    encoder.instruction(&Instruction::I32Const(*v));
                 }
-            }
+                Literal::I64(v) => {
+                    encoder.instruction(&Instruction::I64Const(*v));
+                }
+                Literal::F32(v) => {
+                    encoder.instruction(&Instruction::F32Const((*v).into()));
+                }
+                Literal::F64(v) => {
+                    encoder.instruction(&Instruction::F64Const((*v).into()));
+                }
+                Literal::V128(v) => {
+                    let mut bytes = [0u8; 16];
+                    bytes.copy_from_slice(v);
+                    encoder.instruction(&Instruction::V128Const(i128::from_le_bytes(bytes)));
+                }
+            },
             ExpressionKind::LocalGet { index } => {
-                buf.push(0x20); // local.get
-                Self::write_leb128_u32(buf, *index)?;
+                encoder.instruction(&Instruction::LocalGet(*index));
             }
             ExpressionKind::LocalSet { index, value } => {
-                Self::write_expression(buf, *value, label_stack, func_map, type_map)?;
-                buf.push(0x21); // local.set
-                Self::write_leb128_u32(buf, *index)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::LocalSet(*index));
             }
             ExpressionKind::LocalTee { index, value } => {
-                Self::write_expression(buf, *value, label_stack, func_map, type_map)?;
-                buf.push(0x22); // local.tee
-                Self::write_leb128_u32(buf, *index)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::LocalTee(*index));
             }
             ExpressionKind::GlobalGet { index } => {
-                buf.push(0x23); // global.get
-                Self::write_leb128_u32(buf, *index)?;
+                encoder.instruction(&Instruction::GlobalGet(*index));
             }
             ExpressionKind::GlobalSet { index, value } => {
-                Self::write_expression(buf, *value, label_stack, func_map, type_map)?;
-                buf.push(0x24); // global.set
-                Self::write_leb128_u32(buf, *index)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::GlobalSet(*index));
             }
             ExpressionKind::Binary { op, left, right } => {
-                Self::write_expression(buf, *left, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *right, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *left, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *right, label_stack, func_map, type_map)?;
 
-                let opcode = match op {
-                    // i32 operations
-                    BinaryOp::AddInt32 => 0x6A,
-                    BinaryOp::SubInt32 => 0x6B,
-                    BinaryOp::MulInt32 => 0x6C,
-                    BinaryOp::DivSInt32 => 0x6D,
-                    BinaryOp::DivUInt32 => 0x6E,
-                    BinaryOp::RemSInt32 => 0x6F,
-                    BinaryOp::RemUInt32 => 0x70,
-                    BinaryOp::AndInt32 => 0x71,
-                    BinaryOp::OrInt32 => 0x72,
-                    BinaryOp::XorInt32 => 0x73,
-                    BinaryOp::ShlInt32 => 0x74,
-                    BinaryOp::ShrSInt32 => 0x75,
-                    BinaryOp::ShrUInt32 => 0x76,
-                    BinaryOp::RotLInt32 => 0x77,
-                    BinaryOp::RotRInt32 => 0x78,
-                    BinaryOp::EqInt32 => 0x46,
-                    BinaryOp::NeInt32 => 0x47,
-                    BinaryOp::LtSInt32 => 0x48,
-                    BinaryOp::LtUInt32 => 0x49,
-                    BinaryOp::GtSInt32 => 0x4A,
-                    BinaryOp::GtUInt32 => 0x4B,
-                    BinaryOp::LeSInt32 => 0x4C,
-                    BinaryOp::LeUInt32 => 0x4D,
-                    BinaryOp::GeSInt32 => 0x4E,
-                    BinaryOp::GeUInt32 => 0x4F,
-                    // i64 operations
-                    BinaryOp::AddInt64 => 0x7C,
-                    BinaryOp::SubInt64 => 0x7D,
-                    BinaryOp::MulInt64 => 0x7E,
-                    BinaryOp::DivSInt64 => 0x7F,
-                    BinaryOp::DivUInt64 => 0x80,
-                    BinaryOp::RemSInt64 => 0x81,
-                    BinaryOp::RemUInt64 => 0x82,
-                    BinaryOp::AndInt64 => 0x83,
-                    BinaryOp::OrInt64 => 0x84,
-                    BinaryOp::XorInt64 => 0x85,
-                    BinaryOp::ShlInt64 => 0x86,
-                    BinaryOp::ShrSInt64 => 0x87,
-                    BinaryOp::ShrUInt64 => 0x88,
-                    BinaryOp::RotLInt64 => 0x89,
-                    BinaryOp::RotRInt64 => 0x8A,
-                    BinaryOp::EqInt64 => 0x51,
-                    BinaryOp::NeInt64 => 0x52,
-                    BinaryOp::LtSInt64 => 0x53,
-                    BinaryOp::LtUInt64 => 0x54,
-                    BinaryOp::GtSInt64 => 0x55,
-                    BinaryOp::GtUInt64 => 0x56,
-                    BinaryOp::LeSInt64 => 0x57,
-                    BinaryOp::LeUInt64 => 0x58,
-                    BinaryOp::GeSInt64 => 0x59,
-                    BinaryOp::GeUInt64 => 0x5A,
-                    // f32 operations
-                    BinaryOp::AddFloat32 => 0x92,
-                    BinaryOp::SubFloat32 => 0x93,
-                    BinaryOp::MulFloat32 => 0x94,
-                    BinaryOp::DivFloat32 => 0x95,
-                    BinaryOp::MinFloat32 => 0x96,
-                    BinaryOp::MaxFloat32 => 0x97,
-                    BinaryOp::CopySignFloat32 => 0x98,
-                    BinaryOp::EqFloat32 => 0x5B,
-                    BinaryOp::NeFloat32 => 0x5C,
-                    BinaryOp::LtFloat32 => 0x5D,
-                    BinaryOp::GtFloat32 => 0x5E,
-                    BinaryOp::LeFloat32 => 0x5F,
-                    BinaryOp::GeFloat32 => 0x60,
-                    // f64 operations
-                    BinaryOp::AddFloat64 => 0xA0,
-                    BinaryOp::SubFloat64 => 0xA1,
-                    BinaryOp::MulFloat64 => 0xA2,
-                    BinaryOp::DivFloat64 => 0xA3,
-                    BinaryOp::MinFloat64 => 0xA4,
-                    BinaryOp::MaxFloat64 => 0xA5,
-                    BinaryOp::CopySignFloat64 => 0xA6,
-                    BinaryOp::EqFloat64 => 0x61,
-                    BinaryOp::NeFloat64 => 0x62,
-                    BinaryOp::LtFloat64 => 0x63,
-                    BinaryOp::GtFloat64 => 0x64,
-                    BinaryOp::LeFloat64 => 0x65,
-                    BinaryOp::GeFloat64 => 0x66,
+                let instr = match op {
+                    BinaryOp::AddInt32 => Instruction::I32Add,
+                    BinaryOp::SubInt32 => Instruction::I32Sub,
+                    BinaryOp::MulInt32 => Instruction::I32Mul,
+                    BinaryOp::DivSInt32 => Instruction::I32DivS,
+                    BinaryOp::DivUInt32 => Instruction::I32DivU,
+                    BinaryOp::RemSInt32 => Instruction::I32RemS,
+                    BinaryOp::RemUInt32 => Instruction::I32RemU,
+                    BinaryOp::AndInt32 => Instruction::I32And,
+                    BinaryOp::OrInt32 => Instruction::I32Or,
+                    BinaryOp::XorInt32 => Instruction::I32Xor,
+                    BinaryOp::ShlInt32 => Instruction::I32Shl,
+                    BinaryOp::ShrSInt32 => Instruction::I32ShrS,
+                    BinaryOp::ShrUInt32 => Instruction::I32ShrU,
+                    BinaryOp::EqInt32 => Instruction::I32Eq,
+                    BinaryOp::NeInt32 => Instruction::I32Ne,
+                    BinaryOp::LtSInt32 => Instruction::I32LtS,
+                    BinaryOp::LtUInt32 => Instruction::I32LtU,
+                    BinaryOp::GtSInt32 => Instruction::I32GtS,
+                    BinaryOp::GtUInt32 => Instruction::I32GtU,
+                    BinaryOp::LeSInt32 => Instruction::I32LeS,
+                    BinaryOp::LeUInt32 => Instruction::I32LeU,
+                    BinaryOp::GeSInt32 => Instruction::I32GeS,
+                    BinaryOp::GeUInt32 => Instruction::I32GeU,
+                    BinaryOp::RotLInt32 => Instruction::I32Rotl,
+                    BinaryOp::RotRInt32 => Instruction::I32Rotr,
+
+                    BinaryOp::AddInt64 => Instruction::I64Add,
+                    BinaryOp::SubInt64 => Instruction::I64Sub,
+                    BinaryOp::MulInt64 => Instruction::I64Mul,
+                    BinaryOp::DivSInt64 => Instruction::I64DivS,
+                    BinaryOp::DivUInt64 => Instruction::I64DivU,
+                    BinaryOp::RemSInt64 => Instruction::I64RemS,
+                    BinaryOp::RemUInt64 => Instruction::I64RemU,
+                    BinaryOp::AndInt64 => Instruction::I64And,
+                    BinaryOp::OrInt64 => Instruction::I64Or,
+                    BinaryOp::XorInt64 => Instruction::I64Xor,
+                    BinaryOp::ShlInt64 => Instruction::I64Shl,
+                    BinaryOp::ShrSInt64 => Instruction::I64ShrS,
+                    BinaryOp::ShrUInt64 => Instruction::I64ShrU,
+                    BinaryOp::RotLInt64 => Instruction::I64Rotl,
+                    BinaryOp::RotRInt64 => Instruction::I64Rotr,
+                    BinaryOp::EqInt64 => Instruction::I64Eq,
+                    BinaryOp::NeInt64 => Instruction::I64Ne,
+                    BinaryOp::LtSInt64 => Instruction::I64LtS,
+                    BinaryOp::LtUInt64 => Instruction::I64LtU,
+                    BinaryOp::GtSInt64 => Instruction::I64GtS,
+                    BinaryOp::GtUInt64 => Instruction::I64GtU,
+                    BinaryOp::LeSInt64 => Instruction::I64LeS,
+                    BinaryOp::LeUInt64 => Instruction::I64LeU,
+                    BinaryOp::GeSInt64 => Instruction::I64GeS,
+                    BinaryOp::GeUInt64 => Instruction::I64GeU,
+
+                    BinaryOp::AddFloat32 => Instruction::F32Add,
+                    BinaryOp::SubFloat32 => Instruction::F32Sub,
+                    BinaryOp::MulFloat32 => Instruction::F32Mul,
+                    BinaryOp::DivFloat32 => Instruction::F32Div,
+                    BinaryOp::MinFloat32 => Instruction::F32Min,
+                    BinaryOp::MaxFloat32 => Instruction::F32Max,
+                    BinaryOp::CopySignFloat32 => Instruction::F32Copysign,
+                    BinaryOp::EqFloat32 => Instruction::F32Eq,
+                    BinaryOp::NeFloat32 => Instruction::F32Ne,
+                    BinaryOp::LtFloat32 => Instruction::F32Lt,
+                    BinaryOp::GtFloat32 => Instruction::F32Gt,
+                    BinaryOp::LeFloat32 => Instruction::F32Le,
+                    BinaryOp::GeFloat32 => Instruction::F32Ge,
+
+                    BinaryOp::AddFloat64 => Instruction::F64Add,
+                    BinaryOp::SubFloat64 => Instruction::F64Sub,
+                    BinaryOp::MulFloat64 => Instruction::F64Mul,
+                    BinaryOp::DivFloat64 => Instruction::F64Div,
+                    BinaryOp::MinFloat64 => Instruction::F64Min,
+                    BinaryOp::MaxFloat64 => Instruction::F64Max,
+                    BinaryOp::CopySignFloat64 => Instruction::F64Copysign,
+                    BinaryOp::EqFloat64 => Instruction::F64Eq,
+                    BinaryOp::NeFloat64 => Instruction::F64Ne,
+                    BinaryOp::LtFloat64 => Instruction::F64Lt,
+                    BinaryOp::GtFloat64 => Instruction::F64Gt,
+                    BinaryOp::LeFloat64 => Instruction::F64Le,
+                    BinaryOp::GeFloat64 => Instruction::F64Ge,
                 };
-                buf.push(opcode);
+                encoder.instruction(&instr);
             }
             ExpressionKind::Unary { op, value } => {
-                Self::write_expression(buf, *value, label_stack, func_map, type_map)?;
-
-                let opcode = match op {
-                    // i32 unary operations
-                    UnaryOp::ClzInt32 => 0x67,
-                    UnaryOp::CtzInt32 => 0x68,
-                    UnaryOp::PopcntInt32 => 0x69,
-                    UnaryOp::EqZInt32 => 0x45,
-                    // i64 unary operations
-                    UnaryOp::ClzInt64 => 0x79,
-                    UnaryOp::CtzInt64 => 0x7A,
-                    UnaryOp::PopcntInt64 => 0x7B,
-                    UnaryOp::EqZInt64 => 0x50,
-                    // f32 unary operations
-                    UnaryOp::AbsFloat32 => 0x8B,
-                    UnaryOp::NegFloat32 => 0x8C,
-                    UnaryOp::CeilFloat32 => 0x8D,
-                    UnaryOp::FloorFloat32 => 0x8E,
-                    UnaryOp::TruncFloat32 => 0x8F,
-                    UnaryOp::NearestFloat32 => 0x90,
-                    UnaryOp::SqrtFloat32 => 0x91,
-                    // f64 unary operations
-                    UnaryOp::AbsFloat64 => 0x99,
-                    UnaryOp::NegFloat64 => 0x9A,
-                    UnaryOp::CeilFloat64 => 0x9B,
-                    UnaryOp::FloorFloat64 => 0x9C,
-                    UnaryOp::TruncFloat64 => 0x9D,
-                    UnaryOp::NearestFloat64 => 0x9E,
-                    UnaryOp::SqrtFloat64 => 0x9F,
-                    // Conversions (Integer <-> Float)
-                    UnaryOp::ConvertSInt32ToFloat32 => 0xB2,
-                    UnaryOp::ConvertUInt32ToFloat32 => 0xB3,
-                    UnaryOp::ConvertSInt64ToFloat32 => 0xB4,
-                    UnaryOp::ConvertUInt64ToFloat32 => 0xB5,
-                    UnaryOp::ConvertSInt32ToFloat64 => 0xB7,
-                    UnaryOp::ConvertUInt32ToFloat64 => 0xB8,
-                    UnaryOp::ConvertSInt64ToFloat64 => 0xB9,
-                    UnaryOp::ConvertUInt64ToFloat64 => 0xBA,
-                    UnaryOp::TruncSFloat32ToInt32 => 0xA8,
-                    UnaryOp::TruncUFloat32ToInt32 => 0xA9,
-                    UnaryOp::TruncSFloat64ToInt32 => 0xAA,
-                    UnaryOp::TruncUFloat64ToInt32 => 0xAB,
-                    UnaryOp::TruncSFloat32ToInt64 => 0xAE,
-                    UnaryOp::TruncUFloat32ToInt64 => 0xAF,
-                    UnaryOp::TruncSFloat64ToInt64 => 0xB0,
-                    UnaryOp::TruncUFloat64ToInt64 => 0xB1,
-                    // Conversions (Integer <-> Integer)
-                    UnaryOp::WrapInt64 => 0xA7,
-                    UnaryOp::ExtendSInt32 => 0xAC,
-                    UnaryOp::ExtendUInt32 => 0xAD,
-                    // Conversions (Float <-> Float)
-                    UnaryOp::PromoteFloat32 => 0xBB,
-                    UnaryOp::DemoteFloat64 => 0xB6,
-                    // Reinterprets
-                    UnaryOp::ReinterpretFloat32 => 0xBC,
-                    UnaryOp::ReinterpretFloat64 => 0xBD,
-                    UnaryOp::ReinterpretInt32 => 0xBE,
-                    UnaryOp::ReinterpretInt64 => 0xBF,
-                    // Sign Extensions (Post-MVP but standard)
-                    UnaryOp::ExtendS8Int32 => 0xC0,
-                    UnaryOp::ExtendS16Int32 => 0xC1,
-                    UnaryOp::ExtendS8Int64 => 0xC2,
-                    UnaryOp::ExtendS16Int64 => 0xC3,
-                    UnaryOp::ExtendS32Int64 => 0xC4,
+                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                let instr = match op {
+                    UnaryOp::EqZInt32 => Instruction::I32Eqz,
+                    UnaryOp::EqZInt64 => Instruction::I64Eqz,
+                    UnaryOp::ClzInt32 => Instruction::I32Clz,
+                    UnaryOp::CtzInt32 => Instruction::I32Ctz,
+                    UnaryOp::PopcntInt32 => Instruction::I32Popcnt,
+                    UnaryOp::ClzInt64 => Instruction::I64Clz,
+                    UnaryOp::CtzInt64 => Instruction::I64Ctz,
+                    UnaryOp::PopcntInt64 => Instruction::I64Popcnt,
+                    UnaryOp::AbsFloat32 => Instruction::F32Abs,
+                    UnaryOp::NegFloat32 => Instruction::F32Neg,
+                    UnaryOp::SqrtFloat32 => Instruction::F32Sqrt,
+                    UnaryOp::CeilFloat32 => Instruction::F32Ceil,
+                    UnaryOp::FloorFloat32 => Instruction::F32Floor,
+                    UnaryOp::TruncFloat32 => Instruction::F32Trunc,
+                    UnaryOp::NearestFloat32 => Instruction::F32Nearest,
+                    UnaryOp::AbsFloat64 => Instruction::F64Abs,
+                    UnaryOp::NegFloat64 => Instruction::F64Neg,
+                    UnaryOp::SqrtFloat64 => Instruction::F64Sqrt,
+                    UnaryOp::CeilFloat64 => Instruction::F64Ceil,
+                    UnaryOp::FloorFloat64 => Instruction::F64Floor,
+                    UnaryOp::TruncFloat64 => Instruction::F64Trunc,
+                    UnaryOp::NearestFloat64 => Instruction::F64Nearest,
+                    UnaryOp::ConvertSInt32ToFloat32 => Instruction::F32ConvertI32S,
+                    UnaryOp::ConvertUInt32ToFloat32 => Instruction::F32ConvertI32U,
+                    UnaryOp::ConvertSInt64ToFloat32 => Instruction::F32ConvertI64S,
+                    UnaryOp::ConvertUInt64ToFloat32 => Instruction::F32ConvertI64U,
+                    UnaryOp::ConvertSInt32ToFloat64 => Instruction::F64ConvertI32S,
+                    UnaryOp::ConvertUInt32ToFloat64 => Instruction::F64ConvertI32U,
+                    UnaryOp::ConvertSInt64ToFloat64 => Instruction::F64ConvertI64S,
+                    UnaryOp::ConvertUInt64ToFloat64 => Instruction::F64ConvertI64U,
+                    UnaryOp::TruncSFloat32ToInt32 => Instruction::I32TruncF32S,
+                    UnaryOp::TruncUFloat32ToInt32 => Instruction::I32TruncF32U,
+                    UnaryOp::TruncSFloat64ToInt32 => Instruction::I32TruncF64S,
+                    UnaryOp::TruncUFloat64ToInt32 => Instruction::I32TruncF64U,
+                    UnaryOp::TruncSFloat32ToInt64 => Instruction::I64TruncF32S,
+                    UnaryOp::TruncUFloat32ToInt64 => Instruction::I64TruncF32U,
+                    UnaryOp::TruncSFloat64ToInt64 => Instruction::I64TruncF64S,
+                    UnaryOp::TruncUFloat64ToInt64 => Instruction::I64TruncF64U,
+                    UnaryOp::WrapInt64 => Instruction::I32WrapI64,
+                    UnaryOp::ExtendSInt32 => Instruction::I64ExtendI32S,
+                    UnaryOp::ExtendUInt32 => Instruction::I64ExtendI32U,
+                    UnaryOp::PromoteFloat32 => Instruction::F64PromoteF32,
+                    UnaryOp::DemoteFloat64 => Instruction::F32DemoteF64,
+                    UnaryOp::ReinterpretFloat32 => Instruction::I32ReinterpretF32,
+                    UnaryOp::ReinterpretFloat64 => Instruction::I64ReinterpretF64,
+                    UnaryOp::ReinterpretInt32 => Instruction::F32ReinterpretI32,
+                    UnaryOp::ReinterpretInt64 => Instruction::F64ReinterpretI64,
+                    UnaryOp::ExtendS8Int32 => Instruction::I32Extend8S,
+                    UnaryOp::ExtendS16Int32 => Instruction::I32Extend16S,
+                    UnaryOp::ExtendS8Int64 => Instruction::I64Extend8S,
+                    UnaryOp::ExtendS16Int64 => Instruction::I64Extend16S,
+                    UnaryOp::ExtendS32Int64 => Instruction::I64Extend32S,
                 };
-                buf.push(opcode);
+                encoder.instruction(&instr);
             }
             ExpressionKind::Block { name, list } => {
-                buf.push(0x02); // block opcode
-                buf.push(0x40); // block type: empty (void)
-
-                // Push label onto stack
-                label_stack.push(name.map(|s| s.to_string()));
-
-                // Write block body
-                for child in list.iter() {
-                    Self::write_expression(buf, *child, label_stack, func_map, type_map)?;
+                label_stack.push(name.as_ref().map(|s| s.to_string()));
+                encoder.instruction(&Instruction::Block(Self::to_block_type(expr.type_)));
+                for &child in list {
+                    Self::write_instructions(encoder, child, label_stack, func_map, type_map)?;
                 }
-
-                // Pop label
+                encoder.instruction(&Instruction::End);
                 label_stack.pop();
-
-                buf.push(0x0B); // end opcode
             }
             ExpressionKind::Loop { name, body } => {
-                buf.push(0x03); // loop opcode
-                buf.push(0x40); // block type: empty (void)
-
-                // Push label onto stack
-                label_stack.push(name.map(|s| s.to_string()));
-
-                // Write loop body
-                Self::write_expression(buf, *body, label_stack, func_map, type_map)?;
-
-                // Pop label
+                label_stack.push(name.as_ref().map(|s| s.to_string()));
+                encoder.instruction(&Instruction::Loop(Self::to_block_type(expr.type_)));
+                Self::write_instructions(encoder, *body, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::End);
                 label_stack.pop();
-
-                buf.push(0x0B); // end opcode
             }
             ExpressionKind::If {
                 condition,
                 if_true,
                 if_false,
             } => {
-                // Write condition
-                Self::write_expression(buf, *condition, label_stack, func_map, type_map)?;
-
-                buf.push(0x04); // if opcode
-                buf.push(0x40); // block type: empty (void)
-
-                // Push unnamed label for if block
+                Self::write_instructions(encoder, *condition, label_stack, func_map, type_map)?;
                 label_stack.push(None);
-
-                // Write then branch
-                Self::write_expression(buf, *if_true, label_stack, func_map, type_map)?;
-
-                // Write else branch if present
-                if let Some(if_false_expr) = if_false {
-                    buf.push(0x05); // else opcode
-                    Self::write_expression(buf, *if_false_expr, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::If(Self::to_block_type(expr.type_)));
+                Self::write_instructions(encoder, *if_true, label_stack, func_map, type_map)?;
+                if let Some(f) = if_false {
+                    encoder.instruction(&Instruction::Else);
+                    Self::write_instructions(encoder, *f, label_stack, func_map, type_map)?;
                 }
-
-                // Pop label
+                encoder.instruction(&Instruction::End);
                 label_stack.pop();
-
-                buf.push(0x0B); // end opcode
             }
             ExpressionKind::Break {
                 name,
                 condition,
                 value,
             } => {
-                // Write value if present
-                if let Some(val) = value {
-                    Self::write_expression(buf, *val, label_stack, func_map, type_map)?;
+                if let Some(v) = value {
+                    Self::write_instructions(encoder, *v, label_stack, func_map, type_map)?;
                 }
-
-                // Find label depth
                 let depth = Self::find_label_depth(label_stack, name)?;
-
-                if let Some(cond) = condition {
-                    // br_if
-                    Self::write_expression(buf, *cond, label_stack, func_map, type_map)?;
-                    buf.push(0x0D); // br_if opcode
+                if let Some(c) = condition {
+                    Self::write_instructions(encoder, *c, label_stack, func_map, type_map)?;
+                    encoder.instruction(&Instruction::BrIf(depth));
                 } else {
-                    // br
-                    buf.push(0x0C); // br opcode
+                    encoder.instruction(&Instruction::Br(depth));
                 }
-
-                Self::write_leb128_u32(buf, depth)?;
             }
             ExpressionKind::Return { value } => {
-                if let Some(val) = value {
-                    Self::write_expression(buf, *val, label_stack, func_map, type_map)?;
+                if let Some(v) = value {
+                    Self::write_instructions(encoder, *v, label_stack, func_map, type_map)?;
                 }
-                buf.push(0x0F); // return opcode
+                encoder.instruction(&Instruction::Return);
             }
             ExpressionKind::Unreachable => {
-                buf.push(0x00); // unreachable opcode
+                encoder.instruction(&Instruction::Unreachable);
             }
             ExpressionKind::Drop { value } => {
-                Self::write_expression(buf, *value, label_stack, func_map, type_map)?;
-                buf.push(0x1A); // drop opcode
+                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::Drop);
             }
             ExpressionKind::Select {
                 condition,
                 if_true,
                 if_false,
             } => {
-                Self::write_expression(buf, *if_true, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *if_false, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *condition, label_stack, func_map, type_map)?;
-                buf.push(0x1B); // select opcode
+                Self::write_instructions(encoder, *if_true, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *if_false, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *condition, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::Select);
             }
             ExpressionKind::Load {
                 bytes,
@@ -793,33 +685,30 @@ impl BinaryWriter {
                 align,
                 ptr,
             } => {
-                Self::write_expression(buf, *ptr, label_stack, func_map, type_map)?;
-
-                // Opcode selection based on type, size and signedness
-                let opcode = match (expr.type_, *bytes, *signed) {
-                    // Float loads
-                    (Type::F32, 4, _) => 0x2A, // f32.load
-                    (Type::F64, 8, _) => 0x2B, // f64.load
-                    // i32 loads
-                    (Type::I32, 4, _) => 0x28,     // i32.load
-                    (Type::I32, 1, false) => 0x2D, // i32.load8_u
-                    (Type::I32, 1, true) => 0x2C,  // i32.load8_s
-                    (Type::I32, 2, false) => 0x2F, // i32.load16_u
-                    (Type::I32, 2, true) => 0x2E,  // i32.load16_s
-                    // i64 loads
-                    (Type::I64, 8, _) => 0x29,     // i64.load
-                    (Type::I64, 1, false) => 0x31, // i64.load8_u
-                    (Type::I64, 1, true) => 0x30,  // i64.load8_s
-                    (Type::I64, 2, false) => 0x33, // i64.load16_u
-                    (Type::I64, 2, true) => 0x32,  // i64.load16_s
-                    (Type::I64, 4, false) => 0x35, // i64.load32_u
-                    (Type::I64, 4, true) => 0x34,  // i64.load32_s
+                Self::write_instructions(encoder, *ptr, label_stack, func_map, type_map)?;
+                let memarg = MemArg {
+                    offset: *offset as u64,
+                    align: *align,
+                    memory_index: 0,
+                };
+                let instr = match (expr.type_, *bytes, *signed) {
+                    (Type::I32, 4, _) => Instruction::I32Load(memarg),
+                    (Type::I32, 1, true) => Instruction::I32Load8S(memarg),
+                    (Type::I32, 1, false) => Instruction::I32Load8U(memarg),
+                    (Type::I32, 2, true) => Instruction::I32Load16S(memarg),
+                    (Type::I32, 2, false) => Instruction::I32Load16U(memarg),
+                    (Type::I64, 8, _) => Instruction::I64Load(memarg),
+                    (Type::I64, 1, true) => Instruction::I64Load8S(memarg),
+                    (Type::I64, 1, false) => Instruction::I64Load8U(memarg),
+                    (Type::I64, 2, true) => Instruction::I64Load16S(memarg),
+                    (Type::I64, 2, false) => Instruction::I64Load16U(memarg),
+                    (Type::I64, 4, true) => Instruction::I64Load32S(memarg),
+                    (Type::I64, 4, false) => Instruction::I64Load32U(memarg),
+                    (Type::F32, 4, _) => Instruction::F32Load(memarg),
+                    (Type::F64, 8, _) => Instruction::F64Load(memarg),
                     _ => return Err(WriteError::InvalidExpression),
                 };
-
-                buf.push(opcode);
-                Self::write_leb128_u32(buf, *align)?;
-                Self::write_leb128_u32(buf, *offset)?;
+                encoder.instruction(&instr);
             }
             ExpressionKind::Store {
                 bytes,
@@ -828,55 +717,46 @@ impl BinaryWriter {
                 ptr,
                 value,
             } => {
-                Self::write_expression(buf, *ptr, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *value, label_stack, func_map, type_map)?;
-
-                // Opcode selection based on value type and size
-                let opcode = match (value.type_, *bytes) {
-                    // Float stores
-                    (Type::F32, 4) => 0x38, // f32.store
-                    (Type::F64, 8) => 0x39, // f64.store
-                    // i32 stores
-                    (Type::I32, 4) => 0x36, // i32.store
-                    (Type::I32, 1) => 0x3A, // i32.store8
-                    (Type::I32, 2) => 0x3B, // i32.store16
-                    // i64 stores
-                    (Type::I64, 8) => 0x37, // i64.store
-                    (Type::I64, 1) => 0x3C, // i64.store8
-                    (Type::I64, 2) => 0x3D, // i64.store16
-                    (Type::I64, 4) => 0x3E, // i64.store32
+                Self::write_instructions(encoder, *ptr, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                let memarg = MemArg {
+                    offset: *offset as u64,
+                    align: *align,
+                    memory_index: 0,
+                };
+                let instr = match (value.type_, *bytes) {
+                    (Type::I32, 4) => Instruction::I32Store(memarg),
+                    (Type::I32, 1) => Instruction::I32Store8(memarg),
+                    (Type::I32, 2) => Instruction::I32Store16(memarg),
+                    (Type::I64, 8) => Instruction::I64Store(memarg),
+                    (Type::I64, 1) => Instruction::I64Store8(memarg),
+                    (Type::I64, 2) => Instruction::I64Store16(memarg),
+                    (Type::I64, 4) => Instruction::I64Store32(memarg),
+                    (Type::F32, 4) => Instruction::F32Store(memarg),
+                    (Type::F64, 8) => Instruction::F64Store(memarg),
                     _ => return Err(WriteError::InvalidExpression),
                 };
-
-                buf.push(opcode);
-                Self::write_leb128_u32(buf, *align)?;
-                Self::write_leb128_u32(buf, *offset)?;
+                encoder.instruction(&instr);
             }
             ExpressionKind::Call {
                 target,
                 operands,
                 is_return,
             } => {
-                // Write operands (arguments)
-                for operand in operands.iter() {
-                    Self::write_expression(buf, *operand, label_stack, func_map, type_map)?;
+                for &op in operands {
+                    Self::write_instructions(encoder, op, label_stack, func_map, type_map)?;
                 }
-
-                // Look up function index
-                let func_index = func_map.get(target).ok_or(WriteError::InvalidExpression)?;
-
+                let idx = func_map.get(target).ok_or_else(|| {
+                    WriteError::UnsupportedFeature(format!("Function not found: {}", target))
+                })?;
                 if *is_return {
-                    // return_call (tail call) - opcode 0x12
-                    buf.push(0x12);
+                    encoder.instruction(&Instruction::ReturnCall(*idx));
                 } else {
-                    // call - opcode 0x10
-                    buf.push(0x10);
+                    encoder.instruction(&Instruction::Call(*idx));
                 }
-
-                Self::write_leb128_u32(buf, *func_index)?;
             }
             ExpressionKind::Nop => {
-                buf.push(0x01); // nop
+                encoder.instruction(&Instruction::Nop);
             }
             ExpressionKind::Switch {
                 names,
@@ -884,180 +764,87 @@ impl BinaryWriter {
                 condition,
                 value,
             } => {
-                // Write value if present
-                if let Some(val) = value {
-                    Self::write_expression(buf, *val, label_stack, func_map, type_map)?;
+                if let Some(v) = value {
+                    Self::write_instructions(encoder, *v, label_stack, func_map, type_map)?;
                 }
-
-                // Write condition (index)
-                Self::write_expression(buf, *condition, label_stack, func_map, type_map)?;
-
-                // br_table opcode
-                buf.push(0x0E);
-
-                // Write target count (excluding default)
-                Self::write_leb128_u32(buf, names.len() as u32)?;
-
-                // Write label indices for each target
-                for name in names.iter() {
-                    let depth = Self::find_label_depth(label_stack, name)?;
-                    Self::write_leb128_u32(buf, depth)?;
+                Self::write_instructions(encoder, *condition, label_stack, func_map, type_map)?;
+                let mut targets = Vec::new();
+                for name in names {
+                    targets.push(Self::find_label_depth(label_stack, name)?);
                 }
-
-                // Write default label index
-                let default_depth = Self::find_label_depth(label_stack, default)?;
-                Self::write_leb128_u32(buf, default_depth)?;
+                let default_target = Self::find_label_depth(label_stack, default)?;
+                encoder.instruction(&Instruction::BrTable(targets.into(), default_target));
+            }
+            ExpressionKind::MemorySize => {
+                encoder.instruction(&Instruction::MemorySize(0));
+            }
+            ExpressionKind::MemoryGrow { delta } => {
+                Self::write_instructions(encoder, *delta, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::MemoryGrow(0));
             }
             ExpressionKind::CallIndirect {
                 target,
                 operands,
-                type_: signature_type,
-                ..
+                type_,
+                table,
             } => {
-                // Write operands (arguments)
-                for operand in operands.iter() {
-                    Self::write_expression(buf, *operand, label_stack, func_map, type_map)?;
+                for &op in operands {
+                    Self::write_instructions(encoder, op, label_stack, func_map, type_map)?;
                 }
+                Self::write_instructions(encoder, *target, label_stack, func_map, type_map)?;
 
-                // Write target (function index on stack)
-                Self::write_expression(buf, *target, label_stack, func_map, type_map)?;
-
-                // call_indirect opcode
-                buf.push(0x11);
-
-                // Look up signature in type map
-                let sig_key = if signature_type.is_signature() {
-                    let sig = crate::ir::type_store::lookup_signature(*signature_type).ok_or_else(
-                        || {
-                            WriteError::UnsupportedFeature(format!(
-                                "Signature {:?} not found in TypeStore",
-                                signature_type
-                            ))
-                        },
-                    )?;
-                    (
-                        Self::expand_type(sig.params),
-                        Self::expand_type(sig.results),
-                    )
+                let sig = if type_.is_signature() {
+                    let s = crate::ir::type_store::lookup_signature(*type_).ok_or_else(|| {
+                        WriteError::UnsupportedFeature(format!("Signature {:?} not found", type_))
+                    })?;
+                    (Self::expand_type(s.params), Self::expand_type(s.results))
                 } else {
-                    // Fallback for case where type_ might be a single result type instead of a signature handle
-                    // (Though BinaryReader now ensures it's a signature)
-                    (Vec::new(), Self::expand_type(*signature_type))
+                    (Vec::new(), Self::expand_type(*type_))
                 };
 
-                let idx = type_map.iter().position(|t| *t == sig_key).ok_or_else(|| {
-                    WriteError::UnsupportedFeature(format!(
-                        "Signature {:?} not found in module type map",
-                        signature_type
-                    ))
+                let idx = type_map.iter().position(|t| *t == sig).ok_or_else(|| {
+                    WriteError::UnsupportedFeature(format!("Signature {:?} not in type_map", type_))
                 })?;
-                Self::write_leb128_u32(buf, idx as u32)?;
 
-                // Table index (always 0 in MVP)
-                Self::write_leb128_u32(buf, 0)?;
-            }
-            ExpressionKind::MemorySize => {
-                // memory.size opcode
-                buf.push(0x3F);
-                // Memory index (always 0 in MVP)
-                buf.push(0x00);
-            }
-            ExpressionKind::MemoryGrow { delta } => {
-                Self::write_expression(buf, *delta, label_stack, func_map, type_map)?;
-
-                // memory.grow opcode
-                buf.push(0x40);
-                // Memory index (always 0 in MVP)
-                buf.push(0x00);
-            }
-            ExpressionKind::MemoryFill { dest, value, size } => {
-                Self::write_expression(buf, *dest, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *value, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *size, label_stack, func_map, type_map)?;
-                buf.push(0xFC);
-                Self::write_leb128_u32(buf, 0x0B)?;
-                buf.push(0x00); // memory index
-            }
-            ExpressionKind::MemoryCopy { dest, src, size } => {
-                Self::write_expression(buf, *dest, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *src, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *size, label_stack, func_map, type_map)?;
-                buf.push(0xFC);
-                Self::write_leb128_u32(buf, 0x0A)?;
-                buf.push(0x00); // dest memory index
-                buf.push(0x00); // src memory index
-            }
-            ExpressionKind::TableGet { table: _, index } => {
-                Self::write_expression(buf, *index, label_stack, func_map, type_map)?;
-                buf.push(0x25);
-                Self::write_leb128_u32(buf, 0)?; // table index
-            }
-            ExpressionKind::TableSet {
-                table: _,
-                index,
-                value,
-            } => {
-                Self::write_expression(buf, *index, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *value, label_stack, func_map, type_map)?;
-                buf.push(0x26);
-                Self::write_leb128_u32(buf, 0)?; // table index
-            }
-            ExpressionKind::TableSize { table: _ } => {
-                buf.push(0xFC);
-                Self::write_leb128_u32(buf, 0x10)?;
-                Self::write_leb128_u32(buf, 0)?; // table index
-            }
-            ExpressionKind::TableGrow {
-                table: _,
-                delta,
-                value,
-            } => {
-                Self::write_expression(buf, *value, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *delta, label_stack, func_map, type_map)?;
-                buf.push(0xFC);
-                Self::write_leb128_u32(buf, 0x0F)?;
-                Self::write_leb128_u32(buf, 0)?; // table index
-            }
-            ExpressionKind::TableFill {
-                table: _,
-                dest,
-                value,
-                size,
-            } => {
-                Self::write_expression(buf, *dest, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *value, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *size, label_stack, func_map, type_map)?;
-                buf.push(0xFC);
-                Self::write_leb128_u32(buf, 0x11)?;
-                Self::write_leb128_u32(buf, 0)?; // table index
-            }
-            ExpressionKind::TableCopy {
-                dest_table: _,
-                src_table: _,
-                dest,
-                src,
-                size,
-            } => {
-                Self::write_expression(buf, *dest, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *src, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *size, label_stack, func_map, type_map)?;
-                buf.push(0xFC);
-                Self::write_leb128_u32(buf, 0x0E)?;
-                Self::write_leb128_u32(buf, 0)?; // dest table index
-                Self::write_leb128_u32(buf, 0)?; // src table index
+                let table_idx = table.parse::<u32>().unwrap_or(0);
+                encoder.instruction(&Instruction::CallIndirect {
+                    type_index: idx as u32,
+                    table_index: table_idx,
+                });
             }
             ExpressionKind::RefNull { type_ } => {
-                buf.push(0xD0);
-                Self::write_value_type(buf, *type_)?;
+                let reftype = Self::to_ref_type(*type_);
+                encoder.instruction(&Instruction::RefNull(reftype.heap_type));
             }
             ExpressionKind::RefIsNull { value } => {
-                Self::write_expression(buf, *value, label_stack, func_map, type_map)?;
-                buf.push(0xD1);
+                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::RefIsNull);
             }
             ExpressionKind::RefFunc { func } => {
-                let func_index = func_map.get(func).ok_or(WriteError::InvalidExpression)?;
-                buf.push(0xD2);
-                Self::write_leb128_u32(buf, *func_index)?;
+                let idx = func_map.get(func).ok_or_else(|| {
+                    WriteError::UnsupportedFeature(format!("Function not found: {}", func))
+                })?;
+                encoder.instruction(&Instruction::RefFunc(*idx));
+            }
+            ExpressionKind::RefEq { left, right } => {
+                Self::write_instructions(encoder, *left, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *right, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::RefEq);
+            }
+            ExpressionKind::MemoryFill { dest, value, size } => {
+                Self::write_instructions(encoder, *dest, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *size, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::MemoryFill(0));
+            }
+            ExpressionKind::MemoryCopy { dest, src, size } => {
+                Self::write_instructions(encoder, *dest, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *src, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *size, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
             }
             ExpressionKind::MemoryInit {
                 segment,
@@ -1065,69 +852,93 @@ impl BinaryWriter {
                 offset,
                 size,
             } => {
-                Self::write_expression(buf, *dest, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *offset, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *size, label_stack, func_map, type_map)?;
-                buf.push(0xFC);
-                Self::write_leb128_u32(buf, 0x08)?;
-                Self::write_leb128_u32(buf, *segment)?;
-                buf.push(0x00); // memory index
+                Self::write_instructions(encoder, *dest, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *offset, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *size, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::MemoryInit {
+                    mem: 0,
+                    data_index: *segment,
+                });
             }
             ExpressionKind::DataDrop { segment } => {
-                buf.push(0xFC);
-                Self::write_leb128_u32(buf, 0x09)?;
-                Self::write_leb128_u32(buf, *segment)?;
+                encoder.instruction(&Instruction::DataDrop(*segment));
+            }
+            ExpressionKind::TableGet { table, index } => {
+                Self::write_instructions(encoder, *index, label_stack, func_map, type_map)?;
+                let table_idx = table.parse::<u32>().unwrap_or(0);
+                encoder.instruction(&Instruction::TableGet(table_idx));
+            }
+            ExpressionKind::TableSet {
+                table,
+                index,
+                value,
+            } => {
+                Self::write_instructions(encoder, *index, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                let table_idx = table.parse::<u32>().unwrap_or(0);
+                encoder.instruction(&Instruction::TableSet(table_idx));
+            }
+            ExpressionKind::TableSize { table } => {
+                let table_idx = table.parse::<u32>().unwrap_or(0);
+                encoder.instruction(&Instruction::TableSize(table_idx));
+            }
+            ExpressionKind::TableGrow {
+                table,
+                delta,
+                value,
+            } => {
+                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *delta, label_stack, func_map, type_map)?;
+                let table_idx = table.parse::<u32>().unwrap_or(0);
+                encoder.instruction(&Instruction::TableGrow(table_idx));
+            }
+            ExpressionKind::TableFill {
+                table,
+                dest,
+                value,
+                size,
+            } => {
+                Self::write_instructions(encoder, *dest, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *size, label_stack, func_map, type_map)?;
+                let table_idx = table.parse::<u32>().unwrap_or(0);
+                encoder.instruction(&Instruction::TableFill(table_idx));
+            }
+            ExpressionKind::TableCopy {
+                dest_table,
+                src_table,
+                dest,
+                src,
+                size,
+            } => {
+                Self::write_instructions(encoder, *dest, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *src, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *size, label_stack, func_map, type_map)?;
+                let dst_idx = dest_table.parse::<u32>().unwrap_or(0);
+                let src_idx = src_table.parse::<u32>().unwrap_or(0);
+                encoder.instruction(&Instruction::TableCopy {
+                    src_table: src_idx,
+                    dst_table: dst_idx,
+                });
             }
             ExpressionKind::TableInit {
-                table: _,
+                table,
                 segment,
                 dest,
                 offset,
                 size,
             } => {
-                Self::write_expression(buf, *dest, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *offset, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *size, label_stack, func_map, type_map)?;
-                buf.push(0xFC);
-                Self::write_leb128_u32(buf, 0x0C)?;
-                Self::write_leb128_u32(buf, *segment)?;
-                Self::write_leb128_u32(buf, 0)?; // table index
+                Self::write_instructions(encoder, *dest, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *offset, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *size, label_stack, func_map, type_map)?;
+                let table_idx = table.parse::<u32>().unwrap_or(0);
+                encoder.instruction(&Instruction::TableInit {
+                    table: table_idx,
+                    elem_index: *segment,
+                });
             }
             ExpressionKind::ElemDrop { segment } => {
-                buf.push(0xFC);
-                Self::write_leb128_u32(buf, 0x0D)?;
-                Self::write_leb128_u32(buf, *segment)?;
-            }
-            ExpressionKind::AtomicFence => {
-                buf.push(0xFE);
-                Self::write_leb128_u32(buf, 0x03)?;
-            }
-            ExpressionKind::AtomicNotify { ptr, count } => {
-                Self::write_expression(buf, *ptr, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *count, label_stack, func_map, type_map)?;
-                buf.push(0xFE);
-                Self::write_leb128_u32(buf, 0x02)?;
-                Self::write_leb128_u32(buf, 0)?; // align placeholder
-                Self::write_leb128_u32(buf, 0)?; // offset placeholder
-            }
-            ExpressionKind::AtomicWait {
-                ptr,
-                expected,
-                timeout,
-                expected_type,
-            } => {
-                Self::write_expression(buf, *ptr, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *expected, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *timeout, label_stack, func_map, type_map)?;
-                buf.push(0xFE);
-                let sub = if *expected_type == Type::I32 {
-                    0x00
-                } else {
-                    0x01
-                };
-                Self::write_leb128_u32(buf, sub)?;
-                Self::write_leb128_u32(buf, 0)?; // align placeholder
-                Self::write_leb128_u32(buf, 0)?; // offset placeholder
+                encoder.instruction(&Instruction::ElemDrop(*segment));
             }
             ExpressionKind::AtomicRMW {
                 op,
@@ -1136,33 +947,94 @@ impl BinaryWriter {
                 ptr,
                 value,
             } => {
-                Self::write_expression(buf, *ptr, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *value, label_stack, func_map, type_map)?;
-                buf.push(0xFE);
-
-                let base = match (expr.type_, *bytes) {
-                    (Type::I32, 4) => 0x17,
-                    (Type::I32, 1) => 0x1D,
-                    (Type::I32, 2) => 0x23,
-                    (Type::I64, 8) => 0x29,
-                    (Type::I64, 1) => 0x2F,
-                    (Type::I64, 2) => 0x35,
-                    (Type::I64, 4) => 0x3B,
-                    _ => return Err(WriteError::InvalidExpression),
+                Self::write_instructions(encoder, *ptr, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                let arg = MemArg {
+                    offset: *offset as u64,
+                    align: match *bytes {
+                        1 => 0,
+                        2 => 1,
+                        4 => 2,
+                        8 => 3,
+                        _ => 0,
+                    },
+                    memory_index: 0,
                 };
-
-                let sub = base
-                    + match op {
-                        AtomicOp::Add => 0x00,
-                        AtomicOp::Sub => 0x01,
-                        AtomicOp::And => 0x02,
-                        AtomicOp::Or => 0x03,
-                        AtomicOp::Xor => 0x04,
-                        AtomicOp::Xchg => 0x05,
-                    };
-                Self::write_leb128_u32(buf, sub)?;
-                Self::write_leb128_u32(buf, 0)?; // align placeholder
-                Self::write_leb128_u32(buf, *offset)?;
+                let ty = value.type_;
+                match *op {
+                    AtomicOp::Add => {
+                        if ty == Type::I32 {
+                            encoder.instruction(&Instruction::I32AtomicRmwAdd(arg));
+                        } else if ty == Type::I64 {
+                            encoder.instruction(&Instruction::I64AtomicRmwAdd(arg));
+                        } else {
+                            return Err(WriteError::UnsupportedFeature(format!(
+                                "Atomic RMW Add for type {:?}",
+                                ty
+                            )));
+                        }
+                    }
+                    AtomicOp::Sub => {
+                        if ty == Type::I32 {
+                            encoder.instruction(&Instruction::I32AtomicRmwSub(arg));
+                        } else if ty == Type::I64 {
+                            encoder.instruction(&Instruction::I64AtomicRmwSub(arg));
+                        } else {
+                            return Err(WriteError::UnsupportedFeature(format!(
+                                "Atomic RMW Sub for type {:?}",
+                                ty
+                            )));
+                        }
+                    }
+                    AtomicOp::And => {
+                        if ty == Type::I32 {
+                            encoder.instruction(&Instruction::I32AtomicRmwAnd(arg));
+                        } else if ty == Type::I64 {
+                            encoder.instruction(&Instruction::I64AtomicRmwAnd(arg));
+                        } else {
+                            return Err(WriteError::UnsupportedFeature(format!(
+                                "Atomic RMW And for type {:?}",
+                                ty
+                            )));
+                        }
+                    }
+                    AtomicOp::Or => {
+                        if ty == Type::I32 {
+                            encoder.instruction(&Instruction::I32AtomicRmwOr(arg));
+                        } else if ty == Type::I64 {
+                            encoder.instruction(&Instruction::I64AtomicRmwOr(arg));
+                        } else {
+                            return Err(WriteError::UnsupportedFeature(format!(
+                                "Atomic RMW Or for type {:?}",
+                                ty
+                            )));
+                        }
+                    }
+                    AtomicOp::Xor => {
+                        if ty == Type::I32 {
+                            encoder.instruction(&Instruction::I32AtomicRmwXor(arg));
+                        } else if ty == Type::I64 {
+                            encoder.instruction(&Instruction::I64AtomicRmwXor(arg));
+                        } else {
+                            return Err(WriteError::UnsupportedFeature(format!(
+                                "Atomic RMW Xor for type {:?}",
+                                ty
+                            )));
+                        }
+                    }
+                    AtomicOp::Xchg => {
+                        if ty == Type::I32 {
+                            encoder.instruction(&Instruction::I32AtomicRmwXchg(arg));
+                        } else if ty == Type::I64 {
+                            encoder.instruction(&Instruction::I64AtomicRmwXchg(arg));
+                        } else {
+                            return Err(WriteError::UnsupportedFeature(format!(
+                                "Atomic RMW Xchg for type {:?}",
+                                ty
+                            )));
+                        }
+                    }
+                }
             }
             ExpressionKind::AtomicCmpxchg {
                 bytes,
@@ -1171,38 +1043,78 @@ impl BinaryWriter {
                 expected,
                 replacement,
             } => {
-                Self::write_expression(buf, *ptr, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *expected, label_stack, func_map, type_map)?;
-                Self::write_expression(buf, *replacement, label_stack, func_map, type_map)?;
-                buf.push(0xFE);
-
-                let sub = match (expr.type_, *bytes) {
-                    (Type::I32, 4) => 0x41,
-                    (Type::I32, 1) => 0x42,
-                    (Type::I32, 2) => 0x43,
-                    (Type::I64, 8) => 0x44,
-                    (Type::I64, 1) => 0x45,
-                    (Type::I64, 2) => 0x46,
-                    (Type::I64, 4) => 0x47,
-                    _ => return Err(WriteError::InvalidExpression),
+                Self::write_instructions(encoder, *ptr, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *expected, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *replacement, label_stack, func_map, type_map)?;
+                let arg = MemArg {
+                    offset: *offset as u64,
+                    align: match *bytes {
+                        1 => 0,
+                        2 => 1,
+                        4 => 2,
+                        8 => 3,
+                        _ => 0,
+                    },
+                    memory_index: 0,
                 };
-
-                Self::write_leb128_u32(buf, sub)?;
-                Self::write_leb128_u32(buf, 0)?; // align placeholder
-                Self::write_leb128_u32(buf, *offset)?;
+                let ty = expected.type_;
+                if ty == Type::I32 {
+                    encoder.instruction(&Instruction::I32AtomicRmwCmpxchg(arg));
+                } else if ty == Type::I64 {
+                    encoder.instruction(&Instruction::I64AtomicRmwCmpxchg(arg));
+                } else {
+                    return Err(WriteError::UnsupportedFeature(format!(
+                        "Atomic Cmpxchg for type {:?}",
+                        ty
+                    )));
+                }
             }
-            _ => {
-                todo!(
-                    "Implementation of advanced instructions in binary writer: {:?}",
-                    expr.kind
-                )
+            ExpressionKind::AtomicWait {
+                ptr,
+                expected,
+                timeout,
+                expected_type,
+            } => {
+                Self::write_instructions(encoder, *ptr, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *expected, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *timeout, label_stack, func_map, type_map)?;
+                let arg = MemArg {
+                    offset: 0,
+                    align: if *expected_type == Type::I32 { 2 } else { 3 },
+                    memory_index: 0,
+                };
+                if *expected_type == Type::I32 {
+                    encoder.instruction(&Instruction::MemoryAtomicWait32(arg));
+                } else if *expected_type == Type::I64 {
+                    encoder.instruction(&Instruction::MemoryAtomicWait64(arg));
+                } else {
+                    return Err(WriteError::UnsupportedFeature(format!(
+                        "Atomic Wait for type {:?}",
+                        expected_type
+                    )));
+                }
             }
+            ExpressionKind::AtomicNotify { ptr, count } => {
+                Self::write_instructions(encoder, *ptr, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *count, label_stack, func_map, type_map)?;
+                encoder.instruction(&Instruction::MemoryAtomicNotify(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+            }
+            ExpressionKind::AtomicFence => {
+                encoder.instruction(&Instruction::AtomicFence);
+            }
+            _ => todo!(
+                "Other instructions implementation with wasm-encoder: {:?}",
+                expr.kind
+            ),
         }
         Ok(())
     }
 
     fn find_label_depth(label_stack: &[Option<String>], target: &str) -> Result<u32> {
-        // Search from the end (most recent) to the beginning
         for (i, label) in label_stack.iter().rev().enumerate() {
             if let Some(name) = label {
                 if name == target {
@@ -1211,207 +1123,6 @@ impl BinaryWriter {
             }
         }
         Err(WriteError::LabelNotFound(target.to_string()))
-    }
-
-    fn write_value_type(buf: &mut Vec<u8>, type_: Type) -> Result<()> {
-        let byte = if type_ == Type::I32 {
-            0x7F
-        } else if type_ == Type::I64 {
-            0x7E
-        } else if type_ == Type::F32 {
-            0x7D
-        } else if type_ == Type::F64 {
-            0x7C
-        } else if type_ == Type::V128 {
-            0x7B
-        } else if type_ == Type::FUNCREF {
-            0x70
-        } else if type_ == Type::EXTERNREF {
-            0x6F
-        } else {
-            return Err(WriteError::UnsupportedFeature(format!(
-                "Type: {:?} (is_interned: {})",
-                type_,
-                type_.is_signature()
-            )));
-        };
-        buf.push(byte);
-        Ok(())
-    }
-
-    fn write_u32(&mut self, value: u32) -> Result<()> {
-        self.buffer.extend_from_slice(&value.to_le_bytes());
-        Ok(())
-    }
-
-    fn write_leb128_u32(buf: &mut Vec<u8>, mut value: u32) -> Result<()> {
-        loop {
-            let mut byte = (value & 0x7F) as u8;
-            value >>= 7;
-            if value != 0 {
-                byte |= 0x80;
-            }
-            buf.push(byte);
-            if value == 0 {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    fn write_leb128_i32(buf: &mut Vec<u8>, mut value: i32) -> Result<()> {
-        loop {
-            let mut byte = (value & 0x7F) as u8;
-            value >>= 7;
-            let sign_bit_set = (byte & 0x40) != 0;
-
-            if (value == 0 && !sign_bit_set) || (value == -1 && sign_bit_set) {
-                buf.push(byte);
-                break;
-            } else {
-                byte |= 0x80;
-                buf.push(byte);
-            }
-        }
-        Ok(())
-    }
-
-    fn write_table_section(&mut self, table: &TableLimits) -> Result<()> {
-        let mut section_buf = Vec::new();
-
-        // Count (always 1 for now - WASM MVP supports only one table)
-        Self::write_leb128_u32(&mut section_buf, 1)?;
-
-        // Element type
-        Self::write_value_type(&mut section_buf, table.element_type)?;
-
-        // Limits
-        if let Some(max) = table.maximum {
-            section_buf.push(0x01); // flag: has maximum
-            Self::write_leb128_u32(&mut section_buf, table.initial)?;
-            Self::write_leb128_u32(&mut section_buf, max)?;
-        } else {
-            section_buf.push(0x00); // flag: no maximum
-            Self::write_leb128_u32(&mut section_buf, table.initial)?;
-        }
-
-        // Section id (4 = Table)
-        self.buffer.push(0x04);
-        // Section size
-        Self::write_leb128_u32(&mut self.buffer, section_buf.len() as u32)?;
-        // Section content
-        self.buffer.extend_from_slice(&section_buf);
-
-        Ok(())
-    }
-
-    fn write_element_section(
-        &mut self,
-        elements: &[crate::ir::module::ElementSegment],
-        type_map: &[(Vec<Type>, Vec<Type>)],
-    ) -> Result<()> {
-        if elements.is_empty() {
-            return Ok(());
-        }
-
-        let mut section_buf = Vec::new();
-
-        // Count
-        Self::write_leb128_u32(&mut section_buf, elements.len() as u32)?;
-
-        for segment in elements {
-            // Table index
-            Self::write_leb128_u32(&mut section_buf, segment.table_index)?;
-
-            // Offset expression
-            let mut label_stack = Vec::new();
-            let func_map = std::collections::HashMap::new();
-            Self::write_expression(
-                &mut section_buf,
-                segment.offset,
-                &mut label_stack,
-                &func_map,
-                type_map,
-            )?;
-            section_buf.push(0x0B); // end
-
-            // Function indices (count + indices)
-            Self::write_leb128_u32(&mut section_buf, segment.func_indices.len() as u32)?;
-            for &func_idx in &segment.func_indices {
-                Self::write_leb128_u32(&mut section_buf, func_idx)?;
-            }
-        }
-
-        // Section id (9 = Element)
-        self.buffer.push(0x09);
-        // Section size
-        Self::write_leb128_u32(&mut self.buffer, section_buf.len() as u32)?;
-        // Section content
-        self.buffer.extend_from_slice(&section_buf);
-
-        Ok(())
-    }
-
-    fn write_data_section(
-        &mut self,
-        data_segments: &[crate::ir::module::DataSegment],
-        type_map: &[(Vec<Type>, Vec<Type>)],
-    ) -> Result<()> {
-        if data_segments.is_empty() {
-            return Ok(());
-        }
-
-        let mut section_buf = Vec::new();
-
-        // Count
-        Self::write_leb128_u32(&mut section_buf, data_segments.len() as u32)?;
-
-        for segment in data_segments {
-            // Memory index
-            Self::write_leb128_u32(&mut section_buf, segment.memory_index)?;
-
-            // Offset expression
-            let mut label_stack = Vec::new();
-            let func_map = std::collections::HashMap::new();
-            Self::write_expression(
-                &mut section_buf,
-                segment.offset,
-                &mut label_stack,
-                &func_map,
-                type_map,
-            )?;
-            section_buf.push(0x0B); // end
-
-            // Data bytes (length + bytes)
-            Self::write_leb128_u32(&mut section_buf, segment.data.len() as u32)?;
-            section_buf.extend_from_slice(&segment.data);
-        }
-
-        // Section id (11 = Data)
-        self.buffer.push(0x0B);
-        // Section size
-        Self::write_leb128_u32(&mut self.buffer, section_buf.len() as u32)?;
-        // Section content
-        self.buffer.extend_from_slice(&section_buf);
-
-        Ok(())
-    }
-
-    fn write_leb128_i64(buf: &mut Vec<u8>, mut value: i64) -> Result<()> {
-        loop {
-            let mut byte = (value & 0x7F) as u8;
-            value >>= 7;
-            let sign_bit_set = (byte & 0x40) != 0;
-
-            if (value == 0 && !sign_bit_set) || (value == -1 && sign_bit_set) {
-                buf.push(byte);
-                break;
-            } else {
-                byte |= 0x80;
-                buf.push(byte);
-            }
-        }
-        Ok(())
     }
 }
 
@@ -1491,25 +1202,6 @@ mod tests {
                 _ => panic!("Expected i32.const 42"),
             }
         }
-    }
-
-    #[test]
-    fn test_leb128_encode() {
-        let mut buf = Vec::new();
-        BinaryWriter::write_leb128_u32(&mut buf, 624485).unwrap();
-        assert_eq!(buf, vec![0xE5, 0x8E, 0x26]);
-    }
-
-    #[test]
-    fn test_leb128_signed() {
-        let mut buf = Vec::new();
-        BinaryWriter::write_leb128_i32(&mut buf, -123456).unwrap();
-
-        // Verify by reading back
-        let bump = Bump::new();
-        let mut reader = BinaryReader::new(&bump, buf);
-        let value = reader.read_leb128_i32().unwrap();
-        assert_eq!(value, -123456);
     }
 
     #[test]

@@ -3600,6 +3600,7 @@ dependencies = [
  "similar",
  "tempfile",
  "washm-testgen-macros",
+ "wasm-encoder",
  "wasmparser",
  "wasmprinter",
  "wast",
