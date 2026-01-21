@@ -245,9 +245,7 @@ impl SemanticEngine {
                 "use std::borrow::Cow;\nuse std::future::Future;",
             );
         }
-        if path_str.ends_with("brush-core/src/wellknownvars.rs") {
-            content = content.replace("crate::callstack", "crate::brush_core::callstack");
-        }
+
         if path_str.ends_with("brush-core/src/prompt.rs") {
             content = content.replace("brush_parser::", "crate::brush_parser::");
             content = content.replace("crate::crate::brush_parser", "crate::brush_parser");
@@ -332,15 +330,11 @@ impl SemanticEngine {
                 "default_value_t = crate::entry::DEFAULT_ENABLE_HIGHLIGHTING",
                 "default_value_t = crate::brush_shell::entry::DEFAULT_ENABLE_HIGHLIGHTING",
             );
-            // Fix clap parsing to use String type
-            content = content.replace(
-                "Self::try_parse_from([\"brush\"])",
-                "Self::try_parse_from([\"brush\".to_string()])",
-            );
         }
 
-        if path_str.contains("input_backend.rs") || path_str.contains("term_line_reader.rs") {
-            return Ok(content);
+        if path_str.ends_with("brush-core/src/wellknownvars.rs") {
+            println!("cargo:warning=Applying rewrites for wellknownvars.rs");
+            content = content.replace("crate::callstack", "crate::brush_core::callstack");
         }
 
         // Pre-processing: Semantic Rerooting
@@ -386,7 +380,6 @@ impl SemanticEngine {
         let root = parse.tree().syntax().clone();
         let mut editor = SyntaxEditor::new(root.clone());
 
-        self.apply_test_stripping(&mut editor, &root);
         self.apply_path_rewrites(&mut editor, &root, path);
         self.apply_macro_fixes(&mut editor, &root, path);
         self.apply_stub_replacements(&mut editor, &root, path);
@@ -677,59 +670,6 @@ impl SemanticEngine {
         }
     }
 
-    fn apply_test_stripping(&self, editor: &mut SyntaxEditor, root: &SyntaxNode) {
-        let mut to_delete = Vec::new();
-
-        // 1. Find nodes marked with specifically #[cfg(test)] or #[test]
-        for attr in root.descendants().filter_map(ast::Attr::cast) {
-            if let Some(meta) = attr.meta() {
-                let text = meta.to_string();
-                if text == "cfg(test)" || text == "test" {
-                    if let Some(item) = attr.syntax().parent().and_then(ast::Item::cast) {
-                        to_delete.push(item.syntax().clone());
-                    }
-                }
-            }
-        }
-
-        // 2. Find imports or items that mention problematic crates
-        for node in root.descendants() {
-            if let Some(item) = ast::Item::cast(node.clone()) {
-                let text = item.to_string();
-                let problematic_crates = ["pretty_assertions", "insta", "proptest", "tempfile"];
-
-                let is_problematic = problematic_crates.iter().any(|&c| {
-                    text.contains(&format!("extern crate {}", c))
-                        || text.contains(&format!("use {}", c))
-                        || text.contains(&format!("{}::", c))
-                });
-
-                if is_problematic {
-                    to_delete.push(item.syntax().clone());
-                }
-            }
-        }
-
-        // Only delete top-most nodes to avoid intersecting ranges
-        let mut final_to_delete = Vec::new();
-        for node in &to_delete {
-            let is_nested = to_delete
-                .iter()
-                .any(|other| other != node && other.text_range().contains_range(node.text_range()));
-            if !is_nested {
-                final_to_delete.push(node.clone());
-            }
-        }
-
-        // Deduplicate
-        final_to_delete.sort_by_key(|n| n.text_range().start());
-        final_to_delete.dedup_by(|a, b| a.text_range() == b.text_range());
-
-        for node in final_to_delete {
-            editor.delete(node);
-        }
-    }
-
     fn apply_path_rewrites(&self, editor: &mut SyntaxEditor, root: &SyntaxNode, path: &Path) {
         let path_str = normalize_path(path);
         // println!("cargo:warning=Checking path rewrites for: {}", path_str);
@@ -739,23 +679,6 @@ impl SemanticEngine {
             self.rewrite_path(editor, root, "brush_parser", "crate::brush_parser");
             self.rewrite_path(editor, root, "crate::regex", "crate::brush_core::regex");
             self.rewrite_macro_path(editor, root, "crate::regex", "crate::brush_core::regex");
-        }
-
-        if path_str.ends_with("brush-core/src/wellknownvars.rs") {
-            println!("cargo:warning=Applying rewrites for wellknownvars.rs");
-            self.rewrite_path(
-                editor,
-                root,
-                "crate::callstack",
-                "crate::brush_core::callstack",
-            );
-            self.rewrite_path(editor, root, "callstack", "crate::brush_core::callstack");
-            self.rewrite_macro_path(
-                editor,
-                root,
-                "crate::callstack",
-                "crate::brush_core::callstack",
-            );
         }
 
         if path_str.ends_with("brush-core/src/prompt.rs") {
@@ -1327,10 +1250,11 @@ impl SemanticEngine {
         }
 
         if path_str.ends_with("brush-shell/src/entry.rs") {
-            // Visibility
+            // Visibility and Renaming
             for func in root.descendants().filter_map(ast::Fn::cast) {
                 if let Some(name) = func.name() {
-                    if name.text() == "run_async" || name.text() == "try_parse_from" {
+                    let name_text = name.text().to_string();
+                    if name_text == "run_async" || name_text == "try_parse_from" {
                         if func.visibility().is_none() {
                             let pub_vis = make_mutable(make::visibility_pub());
                             // Check for async token to place pub before it
@@ -1346,6 +1270,30 @@ impl SemanticEngine {
                                     make::tokens::single_space(),
                                 );
                                 editor.insert(Position::before(fn_token.clone()), pub_vis.syntax());
+                            }
+                        }
+
+                        // Rename try_parse_from to try_parse_from_brush to avoid shadowing clap trait
+                        if name_text == "try_parse_from" {
+                            let new_name = make_mutable(make::name("try_parse_from_brush"));
+                            editor.replace(name.syntax(), new_name.syntax());
+                        }
+                    }
+                }
+            }
+
+            // Rename internal calls
+            for path in root.descendants().filter_map(ast::Path::cast) {
+                if let Some(seg) = path.segment() {
+                    if let Some(name_ref) = seg.name_ref() {
+                        if name_ref.text() == "try_parse_from" {
+                            let full_path = path.to_string();
+                            if full_path.contains("CommandLineArgs")
+                                || full_path.starts_with("Self")
+                            {
+                                let new_name_ref =
+                                    make_mutable(make::name_ref("try_parse_from_brush"));
+                                editor.replace(name_ref.syntax(), new_name_ref.syntax());
                             }
                         }
                     }

@@ -25,7 +25,7 @@ pub fn run_custom(
         return;
     }
 
-    let parsed_args = match CommandLineArgs::try_parse_from(args.iter().cloned()) {
+    let parsed_args = match CommandLineArgs::try_parse_from_brush(args.iter().cloned()) {
         Ok(a) => a,
         Err(e) => {
             let _ = e.print();
