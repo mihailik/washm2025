@@ -296,34 +296,6 @@ impl SemanticEngine {
             );
         }
 
-        if path_str.ends_with("brush-shell/src/config.rs") {
-            println!("cargo:warning=Patching config.rs for WASM");
-            // Stub out etcetera
-            content = content.replace(
-                "use etcetera::BaseStrategy;",
-                "// use etcetera::BaseStrategy; // Stubbed for WASM",
-            );
-            // Stub default_config_path to return None
-            content = content.replace(
-                "    let strategy = etcetera::choose_base_strategy().ok()?;\n    Some(\n        strategy\n            .config_dir()\n            .join(CONFIG_SUBDIR_NAME)\n            .join(CONFIG_FILE_NAME),\n    )",
-                "    None // Stubbed for WASM - no filesystem config",
-            );
-            // Stub out toml parsing - replace with serde_json
-            content = content.replace(
-                "    match toml::from_str(&content) {",
-                "    match serde_json::from_str::<Config>(&content) {",
-            );
-            // Fix error mapping
-            content = content.replace(
-                "            error: Some(ConfigLoadError::Parse(e)),",
-                "            error: Some(ConfigLoadError::Parse(e.to_string())),",
-            );
-            content = content.replace(
-                "Parse(#[from] toml::de::Error),",
-                "Parse(String), // toml stubbed for WASM",
-            );
-        }
-
         if path_str.ends_with("brush-shell/src/args.rs") {
             println!("cargo:warning=Patching args.rs");
             content = content.replace(
