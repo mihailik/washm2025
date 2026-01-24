@@ -361,12 +361,21 @@ impl BinaryWriter {
         // 10. Code Section
         if !module.functions.is_empty() {
             let mut code = CodeSection::new();
-            let func_map: std::collections::HashMap<&str, u32> = module
-                .functions
-                .iter()
-                .enumerate()
-                .map(|(i, f)| (f.name.as_str(), i as u32))
-                .collect();
+            let mut func_map: std::collections::HashMap<&str, u32> =
+                std::collections::HashMap::new();
+
+            let mut func_idx = 0;
+            for import in &module.imports {
+                if let ImportKind::Function(_, _) = import.kind {
+                    func_map.insert(import.name.as_str(), func_idx);
+                    func_idx += 1;
+                }
+            }
+
+            for func in &module.functions {
+                func_map.insert(func.name.as_str(), func_idx);
+                func_idx += 1;
+            }
 
             for func in &module.functions {
                 let mut locals = Vec::new();

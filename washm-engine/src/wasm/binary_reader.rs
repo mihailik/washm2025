@@ -18,6 +18,7 @@ pub struct BinaryReader<'a> {
     all_function_types: Vec<u32>,
     next_label_id: u32,
     last_op_was_else: bool,
+    import_names: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -59,6 +60,7 @@ impl<'a> BinaryReader<'a> {
             all_function_types: Vec::new(),
             next_label_id: 0,
             last_op_was_else: false,
+            import_names: Vec::new(),
         }
     }
 
@@ -212,7 +214,10 @@ impl<'a> BinaryReader<'a> {
                                     };
                                     let params = Self::types_to_type(&func_type.0);
                                     let results = Self::types_to_type(&func_type.1);
-                                    unsafe { (*this).all_function_types.push(type_idx) };
+                                    unsafe {
+                                        (*this).all_function_types.push(type_idx);
+                                        (*this).import_names.push(field_name.to_string());
+                                    }
                                     ImportKind::Function(params, results)
                                 }
                                 TypeRef::Table(table_type) => ImportKind::Table(
@@ -659,8 +664,11 @@ impl<'a> BinaryReader<'a> {
                     }
                     operands.reverse();
 
-                    let func_name =
-                        bumpalo::format!(in self.bump, "func_{}", function_index).into_bump_str();
+                    let func_name = if (function_index as usize) < self.import_names.len() {
+                        bumpalo::format!(in self.bump, "{}", self.import_names[function_index as usize]).into_bump_str()
+                    } else {
+                        bumpalo::format!(in self.bump, "func_{}", function_index).into_bump_str()
+                    };
 
                     let result_type = Self::types_to_type(&func_type.1);
 
