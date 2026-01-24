@@ -36,6 +36,7 @@ pub mod post_emscripten;
 pub mod precompute;
 pub mod precompute_propagate;
 pub mod print;
+pub mod re_finalize;
 pub mod remove_imports;
 pub mod remove_memory_init;
 pub mod remove_unused_brs;

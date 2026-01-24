@@ -7,6 +7,7 @@ pub mod effects;
 pub mod evaluator;
 pub mod global_analysis;
 pub mod hasher;
+pub mod liveness;
 pub mod patterns;
 pub mod ssa;
 pub mod stats;

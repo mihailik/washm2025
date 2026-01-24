@@ -1,9 +1,11 @@
 use crate::analysis::call_graph::CallGraph;
+use crate::analysis::liveness::Liveness;
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
 use crate::ir::module::{Function, Global, ImportKind, Module};
-use crate::ir::visitor::ReadOnlyVisitor;
+use crate::ir::visitor::{ReadOnlyVisitor, Visitor};
 use crate::ir::{Literal, Type};
 use crate::passes::flatten::Flatten;
+use crate::passes::re_finalize::ReFinalize;
 use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
 use std::collections::{HashMap, HashSet};
@@ -138,7 +140,7 @@ impl Pass for Asyncify {
             flow.process(&mut body);
             module.functions[i].body = Some(body);
 
-            let mut locals = AsyncifyLocals::new(module, &analyzer, i, state_index);
+            let mut locals = AsyncifyLocals::new(module, &analyzer, i, state_index, pointer_type);
             locals.run();
         }
     }
@@ -436,6 +438,7 @@ pub struct AsyncifyLocals<'a, 'b> {
     analyzer: &'a ModuleAnalyzer,
     func_idx: usize,
     state_index: u32,
+    pointer_type: Type,
 }
 
 impl<'a, 'b> AsyncifyLocals<'a, 'b> {
@@ -444,75 +447,338 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
         analyzer: &'a ModuleAnalyzer,
         func_idx: usize,
         state_index: u32,
+        pointer_type: Type,
     ) -> Self {
         Self {
             module,
             analyzer,
             func_idx,
             state_index,
+            pointer_type,
         }
     }
 
+    fn map_global(&self, name: &str) -> String {
+        name.to_string()
+    }
+
+    fn make_get_stack_pos(&self, builder: &IrBuilder<'b>) -> ExprRef<'b> {
+        let global_idx = self
+            .module
+            .globals
+            .iter()
+            .position(|g| g.name == self.map_global(ASYNCIFY_DATA))
+            .unwrap() as u32;
+        builder.load(
+            4,
+            false,
+            0,
+            4,
+            builder.global_get(global_idx, self.pointer_type),
+            Type::I32,
+        )
+    }
+
+    fn make_inc_stack_pos(&self, builder: &IrBuilder<'b>, delta: i32) -> ExprRef<'b> {
+        let global_idx = self
+            .module
+            .globals
+            .iter()
+            .position(|g| g.name == self.map_global(ASYNCIFY_DATA))
+            .unwrap() as u32;
+        let stack_ptr_addr = builder.global_get(global_idx, self.pointer_type);
+        let current = builder.load(4, false, 0, 4, stack_ptr_addr, Type::I32);
+        let new_val = builder.binary(
+            crate::ir::ops::BinaryOp::AddInt32,
+            current,
+            builder.const_(Literal::I32(delta)),
+            Type::I32,
+        );
+        builder.store(4, 0, 4, stack_ptr_addr, new_val)
+    }
+
     pub fn run(&mut self) {
+        let asyncify_data_global_idx = self
+            .module
+            .globals
+            .iter()
+            .position(|g| g.name == self.map_global(ASYNCIFY_DATA))
+            .unwrap() as u32;
+        let pointer_type = self.pointer_type;
+
+        let func = &mut self.module.functions[self.func_idx];
+        if let Some(body) = func.body {
+            ReFinalize::run(body);
+        } else {
+            return;
+        }
+
+        let liveness = Liveness::new(&self.module.functions[self.func_idx]);
+        let mut relevant_live_locals = HashSet::new();
+        let mut check_call_finder = CheckCallFinder::new();
+
+        for block in &liveness.cfg.blocks {
+            let mut found = false;
+            for &expr in &block.contents {
+                check_call_finder.reset();
+                check_call_finder.visit(expr);
+                if check_call_finder.found {
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                if let Some(locals) = liveness.live_in.get(&block.id) {
+                    relevant_live_locals.extend(locals);
+                }
+            }
+        }
+
         let builder = IrBuilder::new(self.module.allocator);
-        let rewind_index_local = self.module.functions[self.func_idx].add_var(Type::I32);
-        let fake_globals = self.analyzer.fake_call_globals.clone();
+        let func = &mut self.module.functions[self.func_idx];
+
+        let rewind_index_local = func.add_var(Type::I32);
+        let unwind_index_local = func.add_var(Type::I32);
+
         let mut transformer = LocalTransformer {
             builder,
             rewind_index_local,
-            _fake_globals: fake_globals,
+            unwind_index_local,
+            _fake_globals: self.analyzer.fake_call_globals.clone(),
             _fake_locals: HashMap::new(),
-            func: &mut self.module.functions[self.func_idx],
-            _state_index: self.state_index,
         };
-        let body = transformer.func.body.unwrap();
-        transformer.func.body = Some(transformer.visit_top_level(body));
+        let body = func.body.unwrap();
+        let new_inner_body = transformer.visit_top_level(body);
 
-        let func = &mut self.module.functions[self.func_idx];
-        let mut list = BumpVec::new_in(self.module.allocator);
+        // --- Rewind Logic (Load) ---
+        let mut live_locals_vec: Vec<u32> = relevant_live_locals.into_iter().collect();
+        live_locals_vec.sort();
+
+        let mut load_block_list = BumpVec::new_in(self.module.allocator);
+
+        if !live_locals_vec.is_empty() {
+            let mut total_size = 0;
+            for &local_idx in &live_locals_vec {
+                let ty = func.get_local_type(local_idx);
+                total_size += match ty {
+                    Type::I64 | Type::F64 => 8,
+                    _ => 4,
+                };
+            }
+
+            load_block_list.push(builder.store(
+                4,
+                0,
+                4,
+                builder.global_get(asyncify_data_global_idx, pointer_type),
+                builder.binary(
+                    crate::ir::ops::BinaryOp::AddInt32,
+                    builder.load(
+                        4,
+                        false,
+                        0,
+                        4,
+                        builder.global_get(asyncify_data_global_idx, pointer_type),
+                        Type::I32,
+                    ),
+                    builder.const_(Literal::I32(-total_size)),
+                    Type::I32,
+                ),
+            ));
+            let stack_ptr_temp = func.add_var(self.pointer_type);
+            load_block_list.push(builder.local_set(
+                stack_ptr_temp,
+                builder.load(
+                    4,
+                    false,
+                    0,
+                    4,
+                    builder.global_get(asyncify_data_global_idx, pointer_type),
+                    Type::I32,
+                ),
+            ));
+
+            let mut offset = 0;
+
+            for &local_idx in &live_locals_vec {
+                let ty = func.get_local_type(local_idx);
+                let size = match ty {
+                    Type::I64 | Type::F64 => 8,
+                    _ => 4,
+                };
+
+                load_block_list.push(builder.local_set(
+                    local_idx,
+                    builder.load(
+                        size,
+                        true,
+                        offset,
+                        4,
+                        builder.local_get(stack_ptr_temp, self.pointer_type),
+                        ty,
+                    ),
+                ));
+                offset += size as u32;
+            }
+        }
+        let load_block = builder.block(None, load_block_list, Type::NONE);
+
+        // --- Save Logic (Unwind) ---
+        let mut save_block_list = BumpVec::new_in(self.module.allocator);
+        let mut total_size = 0;
+        if !live_locals_vec.is_empty() {
+            for &local_idx in &live_locals_vec {
+                let ty = func.get_local_type(local_idx);
+                total_size += match ty {
+                    Type::I64 | Type::F64 => 8,
+                    _ => 4,
+                };
+            }
+
+            let stack_ptr_temp = func.add_var(self.pointer_type);
+            save_block_list.push(builder.local_set(
+                stack_ptr_temp,
+                builder.load(
+                    4,
+                    false,
+                    0,
+                    4,
+                    builder.global_get(asyncify_data_global_idx, pointer_type),
+                    Type::I32,
+                ),
+            ));
+
+            let mut offset = 0;
+
+            for &local_idx in &live_locals_vec {
+                let ty = func.get_local_type(local_idx);
+                let size = match ty {
+                    Type::I64 | Type::F64 => 8,
+                    _ => 4,
+                };
+
+                save_block_list.push(builder.store(
+                    size,
+                    offset,
+                    4,
+                    builder.local_get(stack_ptr_temp, self.pointer_type),
+                    builder.local_get(local_idx, ty),
+                ));
+                offset += size as u32;
+            }
+            save_block_list.push(builder.store(
+                4,
+                0,
+                4,
+                builder.global_get(asyncify_data_global_idx, pointer_type),
+                builder.binary(
+                    crate::ir::ops::BinaryOp::AddInt32,
+                    builder.load(
+                        4,
+                        false,
+                        0,
+                        4,
+                        builder.global_get(asyncify_data_global_idx, pointer_type),
+                        Type::I32,
+                    ),
+                    builder.const_(Literal::I32(total_size)),
+                    Type::I32,
+                ),
+            ));
+        }
+        let save_block = builder.block(None, save_block_list, Type::NONE);
+
+        // Combine
+        let mut list: BumpVec<ExprRef> = BumpVec::new_in(self.module.allocator);
         let rewinding = builder.binary(
             crate::ir::ops::BinaryOp::EqInt32,
             builder.global_get(self.state_index, Type::I32),
             builder.const_(Literal::I32(AsyncifyState::Rewinding as i32)),
             Type::I32,
         );
+        let mut rewind_then = BumpVec::new_in(self.module.allocator);
+        rewind_then.push(load_block);
+        rewind_then.push(builder.local_set(
+            rewind_index_local,
+            builder.call(
+                ASYNCIFY_GET_CALL_INDEX,
+                BumpVec::new_in(self.module.allocator),
+                Type::I32,
+                false,
+            ),
+        ));
         list.push(builder.if_(
             rewinding,
-            builder.local_set(
-                rewind_index_local,
-                builder.call(
-                    ASYNCIFY_GET_CALL_INDEX,
-                    BumpVec::new_in(self.module.allocator),
-                    Type::I32,
-                    false,
-                ),
-            ),
+            builder.block(None, rewind_then, Type::NONE),
             None,
             Type::NONE,
         ));
+
         list.push(builder.block(
             Some(ASYNCIFY_UNWIND),
             {
                 let mut v = BumpVec::new_in(self.module.allocator);
-                v.push(func.body.unwrap());
+                v.push(new_inner_body);
                 v
             },
             Type::NONE,
         ));
+
+        let unwinding = builder.binary(
+            crate::ir::ops::BinaryOp::EqInt32,
+            builder.global_get(self.state_index, Type::I32),
+            builder.const_(Literal::I32(AsyncifyState::Unwinding as i32)),
+            Type::I32,
+        );
+        let mut unwind_then = BumpVec::new_in(self.module.allocator);
+        unwind_then.push(builder.store(
+            4,
+            0,
+            4,
+            builder.global_get(asyncify_data_global_idx, pointer_type),
+            builder.local_get(unwind_index_local, Type::I32),
+        ));
+        unwind_then.push(builder.store(
+            4,
+            0,
+            4,
+            builder.global_get(asyncify_data_global_idx, pointer_type),
+            builder.binary(
+                crate::ir::ops::BinaryOp::AddInt32,
+                builder.load(
+                    4,
+                    false,
+                    0,
+                    4,
+                    builder.global_get(asyncify_data_global_idx, pointer_type),
+                    Type::I32,
+                ),
+                builder.const_(Literal::I32(4)),
+                Type::I32,
+            ),
+        ));
+        unwind_then.push(save_block);
+
+        list.push(builder.if_(
+            unwinding,
+            builder.block(None, unwind_then, Type::NONE),
+            None,
+            Type::NONE,
+        ));
+
         func.body = Some(builder.block(None, list, Type::NONE));
     }
 }
 
-struct LocalTransformer<'a, 'b> {
+struct LocalTransformer<'b> {
     builder: IrBuilder<'b>,
     rewind_index_local: u32,
+    unwind_index_local: u32,
     _fake_globals: HashMap<Type, String>,
     _fake_locals: HashMap<Type, u32>,
-    func: &'a mut Function<'b>,
-    _state_index: u32,
 }
 
-impl<'a, 'b> LocalTransformer<'a, 'b> {
+impl<'b> LocalTransformer<'b> {
     fn visit_top_level(&mut self, expr: ExprRef<'b>) -> ExprRef<'b> {
         match &expr.kind {
             ExpressionKind::Block { name, list } => {
@@ -526,8 +792,14 @@ impl<'a, 'b> LocalTransformer<'a, 'b> {
                 target, operands, ..
             } => {
                 if *target == ASYNCIFY_UNWIND {
-                    self.builder
-                        .break_(ASYNCIFY_UNWIND, None, None, Type::UNREACHABLE)
+                    let capture = self.builder.local_set(self.unwind_index_local, operands[0]);
+                    let br = self
+                        .builder
+                        .break_(ASYNCIFY_UNWIND, None, None, Type::UNREACHABLE);
+                    let mut v = BumpVec::new_in(self.builder.bump);
+                    v.push(capture);
+                    v.push(br);
+                    self.builder.block(None, v, Type::UNREACHABLE)
                 } else if *target == ASYNCIFY_CHECK_CALL_INDEX {
                     self.builder.binary(
                         crate::ir::ops::BinaryOp::EqInt32,
@@ -543,6 +815,34 @@ impl<'a, 'b> LocalTransformer<'a, 'b> {
             }
             _ => expr,
         }
+    }
+}
+
+struct CheckCallFinder {
+    found: bool,
+}
+
+impl CheckCallFinder {
+    fn new() -> Self {
+        Self { found: false }
+    }
+    fn reset(&mut self) {
+        self.found = false;
+    }
+}
+
+impl<'a> ReadOnlyVisitor<'a> for CheckCallFinder {
+    fn visit_expression(&mut self, expr: ExprRef<'a>) {
+        if self.found {
+            return;
+        }
+        if let ExpressionKind::Call { target, .. } = &expr.kind {
+            if *target == ASYNCIFY_CHECK_CALL_INDEX {
+                self.found = true;
+                return;
+            }
+        }
+        self.visit_children(expr);
     }
 }
 
