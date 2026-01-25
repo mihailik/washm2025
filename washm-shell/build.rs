@@ -1,3 +1,4 @@
+﻿use std::collections::HashMap;
 /// Semantic Transformation Engine using rust-analyzer
 /// Implements the specification from docs/1.7-ra.md - ZERO REGEX VERSION
 ///
@@ -7,14 +8,22 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use triomphe::Arc;
 use walkdir::WalkDir;
 
-// rust-analyzer imports for semantic analysis
-// use ra_ap_ide::AnalysisHost;
-use ra_ap_syntax::ast::make;
-use ra_ap_syntax::ast::{HasAttrs, HasName, HasVisibility};
+use ra_ap_base_db::{
+    CrateDisplayName, CrateGraphBuilder, CrateName, CrateOrigin, CrateWorkspaceData,
+    DependencyBuilder, Env, FileId, FileSet, SourceRoot,
+};
+use ra_ap_edition::Edition;
+use ra_ap_hir::{Adt, CfgOptions, ChangeWithProcMacros, Crate, HasSource, ModuleDef, Symbol};
+use ra_ap_ide::{AnalysisHost, FilePosition, FindAllRefsConfig, TextSize};
+use ra_ap_ide_db::MiniCore;
+use ra_ap_paths::AbsPathBuf;
+use ra_ap_syntax::ast::{self, make, HasAttrs, HasName, HasVisibility};
 use ra_ap_syntax::syntax_editor::{Position, SyntaxEditor};
-use ra_ap_syntax::{ast, AstNode, Edition, SourceFile, SyntaxKind, SyntaxNode, TextRange};
+use ra_ap_syntax::{AstNode, SourceFile, SyntaxKind, SyntaxNode, TextRange};
+use ra_ap_vfs::{Vfs, VfsPath};
 
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default() != "wasm32" {
@@ -58,7 +67,11 @@ fn main() {
     // Copy source files to vendor directory
     copy_sources(&mappings, &vendor_dir);
 
-    // Section 4: Apply semantic transformations using RA
+    // Section 4: Global Semantic Reference Patching
+    engine.build_index(&vendor_dir, &mappings);
+    engine.patch_backends_semantically();
+
+    // Section 5: Apply semantic path transformations
     engine.transform_all(&vendor_dir, &mappings);
 
     // Final validation
@@ -168,15 +181,19 @@ fn tokenize_path_kinds(text: &str) -> Vec<(String, SyntaxKind)> {
 
 /// Semantic Engine using rust-analyzer's parser and AST
 struct SemanticEngine {
-    // analysis_host: AnalysisHost, // Unused for now, using pure AST
+    host: AnalysisHost,
+    vfs: Vfs,
 }
 
 impl SemanticEngine {
     fn new() -> Self {
-        // Section 3.A: Initialize AnalysisHost for semantic analysis
-        // let analysis_host = AnalysisHost::default();
+        // Section 2: Deadlock Avoidance
+        std::env::set_var("CARGO_TARGET_DIR", "target/ra-rewrite");
 
-        Self { /* analysis_host */ }
+        Self {
+            host: AnalysisHost::default(),
+            vfs: Vfs::default(),
+        }
     }
 
     fn transform_all(&mut self, vendor_dir: &Path, mappings: &[(&str, &str)]) {
@@ -215,13 +232,257 @@ impl SemanticEngine {
                 Ok(transformed) => {
                     if content != transformed {
                         if let Err(e) = fs::write(path, transformed) {
-                            eprintln!("Failed to write {:?}: {}", path, e);
+                            eprintln!("Failed to read {:?}: {}", path, e);
                         }
                     }
                 }
                 Err(_e) => {
                     // eprintln!("Failed to transform {:?}: {}", path, e);
                 }
+            }
+        }
+    }
+
+    pub fn build_index(&mut self, vendor_dir: &Path, mappings: &[(&str, &str)]) {
+        let mut crate_graph = CrateGraphBuilder::default();
+        let mut crate_ids = HashMap::new();
+
+        let abs_root = Arc::new(AbsPathBuf::assert_utf8(
+            env::current_dir().unwrap().to_str().unwrap().into(),
+        ));
+        // Hack: CrateWorkspaceData is complex, but we need it.
+        // We'll try to find if there is a simpler way to construct it or just use transmute.
+        let ws_data = Arc::new(unsafe { std::mem::zeroed::<CrateWorkspaceData>() });
+
+        // 1. Load files into VFS
+        for entry in WalkDir::new(vendor_dir) {
+            let entry = entry.unwrap();
+            if !entry.file_type().is_file() || entry.path().extension().map_or(true, |e| e != "rs")
+            {
+                continue;
+            }
+            let content = fs::read(entry.path()).unwrap_or_default();
+            let vfs_path = VfsPath::new_real_path(entry.path().to_string_lossy().to_string());
+            self.vfs.set_file_contents(vfs_path, Some(content));
+        }
+
+        // 2. Register Crates
+        for (_, crate_label) in mappings {
+            let crate_name_str = crate_label.replace("-", "_");
+            let lib_path = vendor_dir.join(crate_label).join("src/lib.rs");
+            if let Some(res) = self.vfs.file_id(&VfsPath::new_real_path(
+                lib_path.to_string_lossy().to_string(),
+            )) {
+                let name = CrateDisplayName::from_canonical_name(&crate_name_str);
+                let file_id = res;
+                let (f_id, _) = file_id;
+                let mut cfg = CfgOptions::default();
+                cfg.insert_key_value(Symbol::intern("feature"), Symbol::intern("minimal"));
+                cfg.insert_key_value(Symbol::intern("feature"), Symbol::intern("basic"));
+                cfg.insert_key_value(Symbol::intern("feature"), Symbol::intern("reedline"));
+
+                let crate_id = crate_graph.add_crate_root(
+                    f_id,
+                    Edition::Edition2021,
+                    Some(name),
+                    None,
+                    cfg,
+                    None,
+                    Env::default(),
+                    CrateOrigin::Local {
+                        repo: None,
+                        name: None,
+                    },
+                    vec![],
+                    false,
+                    abs_root.clone(),
+                    ws_data.clone(),
+                );
+                crate_ids.insert(crate_name_str, crate_id);
+            }
+        }
+
+        // 3. Setup Dependencies (brush-shell -> interactive, core, etc.)
+        if let (Some(&shell), Some(&inter), Some(&core), Some(&builtin), Some(&parser)) = (
+            crate_ids.get("brush_shell"),
+            crate_ids.get("brush_interactive"),
+            crate_ids.get("brush_core"),
+            crate_ids.get("brush_builtins"),
+            crate_ids.get("brush_parser"),
+        ) {
+            crate_graph
+                .add_dep(
+                    shell,
+                    DependencyBuilder::new(CrateName::new("brush_core").unwrap(), core),
+                )
+                .unwrap();
+            crate_graph
+                .add_dep(
+                    shell,
+                    DependencyBuilder::new(CrateName::new("brush_interactive").unwrap(), inter),
+                )
+                .unwrap();
+            crate_graph
+                .add_dep(
+                    shell,
+                    DependencyBuilder::new(CrateName::new("brush_builtins").unwrap(), builtin),
+                )
+                .unwrap();
+            crate_graph
+                .add_dep(
+                    inter,
+                    DependencyBuilder::new(CrateName::new("brush_core").unwrap(), core),
+                )
+                .unwrap();
+            crate_graph
+                .add_dep(
+                    inter,
+                    DependencyBuilder::new(CrateName::new("brush_parser").unwrap(), parser),
+                )
+                .unwrap();
+            crate_graph
+                .add_dep(
+                    builtin,
+                    DependencyBuilder::new(CrateName::new("brush_core").unwrap(), core),
+                )
+                .unwrap();
+            crate_graph
+                .add_dep(
+                    core,
+                    DependencyBuilder::new(CrateName::new("brush_parser").unwrap(), parser),
+                )
+                .unwrap();
+        }
+
+        // 4. Sync AnalysisHost
+        let mut change = ChangeWithProcMacros::default();
+        let mut file_set = FileSet::default();
+
+        for (file_id, vfs_path) in self.vfs.iter() {
+            if let Some(path) = vfs_path.as_path() {
+                if let Ok(content) = fs::read_to_string(path) {
+                    change.change_file(file_id, Some(content));
+                    file_set.insert(file_id, vfs_path.clone());
+                }
+            }
+        }
+        change.set_roots(vec![SourceRoot::new_local(file_set)]);
+
+        change.set_crate_graph(crate_graph);
+        self.host.apply_change(change);
+    }
+
+    pub fn patch_backends_semantically(&self) {
+        let targets = [
+            "MinimalInputBackend",
+            "BasicInputBackend",
+            "ReedlineInputBackend",
+        ];
+        let analysis = self.host.analysis();
+
+        for target in targets {
+            if let Some((file_id, offset)) = self.find_struct_by_name(target) {
+                let config = FindAllRefsConfig {
+                    search_scope: None,
+                    minicore: MiniCore::new(""),
+                };
+                if let Ok(Some(refs)) =
+                    analysis.find_all_refs(FilePosition { file_id, offset }, &config)
+                {
+                    for result in refs {
+                        for (f_id, ranges) in result.references {
+                            let wrapped_ranges =
+                                ranges.into_iter().map(|(r, c)| (r, Some(c))).collect();
+                            self.apply_semantic_ref_patch(f_id, wrapped_ranges, target);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn find_struct_by_name(&self, name: &str) -> Option<(FileId, TextSize)> {
+        let db = self.host.raw_database();
+        let krates = Crate::all(db);
+        let krate = krates.into_iter().find(|k| {
+            let display_name = k.display_name(db).map(|n| n.to_string());
+            display_name == Some("brush_interactive".to_string())
+        })?;
+
+        for module in krate.modules(db) {
+            for decl in module.declarations(db) {
+                if let ModuleDef::Adt(Adt::Struct(s)) = decl {
+                    let s_name = s.name(db).display(db, Edition::Edition2021).to_string();
+                    if s_name == name {
+                        let source = s.source(db)?;
+                        let file_id = source.file_id.original_file(db).file_id(db);
+                        let offset = source.value.name()?.syntax().text_range().start();
+                        return Some((file_id, offset));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn apply_semantic_ref_patch(
+        &self,
+        file_id: FileId,
+        ranges: Vec<(TextRange, Option<ra_ap_ide::ReferenceCategory>)>,
+        _target: &str,
+    ) {
+        let vfs_path = self.vfs.file_path(file_id);
+        let path_str = vfs_path.as_path().unwrap().to_string();
+        let path = Path::new(&path_str);
+
+        let content = fs::read_to_string(path).unwrap();
+        let parse = SourceFile::parse(&content, Edition::Edition2021);
+        let root = parse.tree().syntax().clone();
+        let mut editor = SyntaxEditor::new(root);
+        let mut changed_flag = false;
+
+        for (range, _category) in ranges {
+            // Find the node at this range
+            let node = parse.tree().syntax().covering_element(range);
+
+            // Case 1: Struct Expression (e.g. MinimalInputBackend { ... })
+            if let Some(struct_expr) = node.ancestors().find_map(ast::RecordExpr::cast) {
+                if let Some(p) = struct_expr.path() {
+                    let new_expr_text = format!("{}::new()", p);
+                    editor.replace(
+                        struct_expr.syntax(),
+                        parse_expr::<ast::Expr>(&new_expr_text).syntax(),
+                    );
+                    changed_flag = true;
+                    continue;
+                }
+            }
+
+            // Case 2: Path Expression (unit struct instantiation, e.g. BasicInputBackend)
+            if let Some(path_expr) = node.ancestors().find_map(ast::PathExpr::cast) {
+                // Skip if it's already a call
+                if let Some(parent) = path_expr.syntax().parent() {
+                    if ast::CallExpr::cast(parent).is_some() {
+                        continue;
+                    }
+                }
+
+                if let Some(p) = path_expr.path() {
+                    let new_expr_text = format!("{}::new()", p);
+                    editor.replace(
+                        path_expr.syntax(),
+                        parse_expr::<ast::Expr>(&new_expr_text).syntax(),
+                    );
+                    changed_flag = true;
+                }
+            }
+        }
+
+        if changed_flag {
+            let edit = editor.finish();
+            let result = edit.new_root().to_string();
+            if content != result {
+                fs::write(path, result).unwrap();
             }
         }
     }
@@ -256,10 +517,6 @@ impl SemanticEngine {
             content = content.replace(
                 "brush_interactive::MinimalInputBackend",
                 "crate::wasm_interactive::MinimalInputBackend",
-            );
-            content = content.replace(
-                "let mut input_backend = crate::wasm_interactive::MinimalInputBackend;",
-                "let mut input_backend = crate::wasm_interactive::MinimalInputBackend::new();",
             );
             content = content.replace(
                 "brush_interactive::WasmInputBackend",

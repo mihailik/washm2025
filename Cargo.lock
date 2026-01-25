@@ -3437,6 +3437,10 @@ name = "triomphe"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd69c5aa8f924c7519d6372789a74eac5b94fb0f8fcf0d4a97eb0bfc3e785f39"
+dependencies = [
+ "serde",
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "type-map"
@@ -3638,6 +3642,7 @@ dependencies = [
  "async-trait",
  "bon",
  "cached",
+ "camino",
  "cfg-if",
  "chrono",
  "clap 4.5.54",
@@ -3671,6 +3676,7 @@ dependencies = [
  "platform-info",
  "pretty_assertions",
  "ra_ap_base_db",
+ "ra_ap_edition",
  "ra_ap_hir",
  "ra_ap_ide",
  "ra_ap_ide_db",
@@ -3694,6 +3700,7 @@ dependencies = [
  "toml 0.9.11+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "triomphe",
  "unic-langid",
  "utf8-chars",
  "uucore_procs",
