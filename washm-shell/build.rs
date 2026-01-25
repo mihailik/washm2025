@@ -16,7 +16,9 @@ use ra_ap_base_db::{
     DependencyBuilder, Env, FileId, FileSet, SourceRoot,
 };
 use ra_ap_edition::Edition;
-use ra_ap_hir::{Adt, CfgOptions, ChangeWithProcMacros, Crate, HasSource, ModuleDef, Symbol};
+use ra_ap_hir::{
+    Adt, AssocItem, CfgOptions, ChangeWithProcMacros, Crate, HasSource, ModuleDef, Symbol,
+};
 use ra_ap_ide::{AnalysisHost, FilePosition, FindAllRefsConfig, TextSize};
 use ra_ap_ide_db::MiniCore;
 use ra_ap_paths::AbsPathBuf;
@@ -70,6 +72,7 @@ fn main() {
     // Section 4: Global Semantic Reference Patching
     engine.build_index(&vendor_dir, &mappings);
     engine.patch_backends_semantically();
+    engine.patch_read_line_async();
 
     // Section 5: Apply semantic path transformations
     engine.transform_all(&vendor_dir, &mappings);
@@ -372,6 +375,109 @@ impl SemanticEngine {
         self.host.apply_change(change);
     }
 
+    pub fn patch_read_line_async(&self) {
+        let analysis = self.host.analysis();
+        if let Some((file_id, offset)) = self.find_trait_method_by_name("InputBackend", "read_line")
+        {
+            let config = FindAllRefsConfig {
+                search_scope: None,
+                minicore: MiniCore::new(""),
+            };
+            if let Ok(Some(refs)) =
+                analysis.find_all_refs(FilePosition { file_id, offset }, &config)
+            {
+                for result in refs {
+                    // 1. Patch declaration (the trait method itself)
+                    if let Some(decl) = result.declaration {
+                        self.apply_async_to_fn(decl.nav.file_id, decl.nav.focus_or_full_range());
+                    }
+
+                    // 2. Patch references (implementations)
+                    for (f_id, ranges) in result.references {
+                        for (range, _category) in ranges {
+                            self.apply_async_to_fn(f_id, range);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_async_to_fn(&self, file_id: FileId, range: TextRange) {
+        let vfs_path = self.vfs.file_path(file_id);
+        let path_str = vfs_path.as_path().unwrap().to_string();
+        let path = Path::new(&path_str);
+
+        let content = fs::read_to_string(path).unwrap();
+        let parse = SourceFile::parse(&content, Edition::Edition2021);
+        let root = parse.tree().syntax().clone();
+        let mut editor = SyntaxEditor::new(root.clone());
+        let mut changed_flag = false;
+
+        // Find the method definition (Fn node) at this range
+        let node = parse.tree().syntax().covering_element(range);
+        if let Some(fn_def) = node.ancestors().find_map(ast::Fn::cast) {
+            if fn_def.async_token().is_none() {
+                if let Some(fn_token) = fn_def.fn_token() {
+                    let async_token = parse_token("async", SyntaxKind::ASYNC_KW);
+
+                    editor.insert(
+                        Position::before(fn_token.clone()),
+                        make::tokens::single_space(),
+                    );
+                    editor.insert(Position::before(fn_token), async_token);
+                    changed_flag = true;
+                }
+            }
+        }
+
+        if changed_flag {
+            let edit = editor.finish();
+            let new_content = edit.new_root().to_string();
+            fs::write(path, new_content).unwrap();
+            println!(
+                "cargo:warning=Applied async patch to function in file {:?}",
+                path
+            );
+        }
+    }
+
+    fn find_trait_method_by_name(
+        &self,
+        trait_name: &str,
+        method_name: &str,
+    ) -> Option<(FileId, TextSize)> {
+        let db = self.host.raw_database();
+        let krates = Crate::all(db);
+        let krate = krates.into_iter().find(|k| {
+            let display_name = k.display_name(db).map(|n| n.to_string());
+            display_name == Some("brush_interactive".to_string())
+        })?;
+
+        for module in krate.modules(db) {
+            for decl in module.declarations(db) {
+                if let ModuleDef::Trait(t) = decl {
+                    let t_name = t.name(db).display(db, Edition::Edition2021).to_string();
+                    if t_name == trait_name {
+                        for item in t.items(db) {
+                            if let AssocItem::Function(f) = item {
+                                let f_name =
+                                    f.name(db).display(db, Edition::Edition2021).to_string();
+                                if f_name == method_name {
+                                    let source = f.source(db)?;
+                                    let file_id = source.file_id.original_file(db).file_id(db);
+                                    let offset = source.value.name()?.syntax().text_range().start();
+                                    return Some((file_id, offset));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub fn patch_backends_semantically(&self) {
         let targets = [
             "MinimalInputBackend",
@@ -547,10 +653,6 @@ impl SemanticEngine {
                 "use crate::brush_interactive::ShellError;",
             );
             content = content.replace("&crate::ShellRef", "&crate::brush_interactive::ShellRef");
-            content = content.replace(
-                "    fn read_line(\n        &mut self,",
-                "    async fn read_line(\n        &mut self,",
-            );
         }
 
         if path_str.ends_with("brush-shell/src/args.rs") {
