@@ -291,11 +291,11 @@ pub static PASS_REGISTRY: &[PassInfo] = &[
         description: "sorts types by usage",
         create: |_| Box::new(crate::passes::reorder_types::ReorderTypes),
     },
-    PassInfo {
+    /*PassInfo {
         name: "reorder-globals",
         description: "sorts globals by usage",
         create: |_| Box::new(crate::passes::reorder_globals::ReorderGlobals),
-    },
+    },*/
     PassInfo {
         name: "merge-locals",
         description: "merges locals with the same type",

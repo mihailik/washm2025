@@ -11,20 +11,17 @@ pub struct Validator<'a, 'm> {
     errors: Vec<String>,
     // Caches for index spaces
     func_imports: Vec<&'m crate::ir::module::Import>,
-    global_imports: Vec<&'m crate::ir::module::Import>,
     memory_import: Option<&'m crate::ir::module::Import>,
 }
 
 impl<'a, 'm> Validator<'a, 'm> {
     pub fn new(module: &'m Module<'a>) -> Self {
         let mut func_imports = Vec::new();
-        let mut global_imports = Vec::new();
         let mut memory_import = None;
 
         for import in &module.imports {
             match import.kind {
                 crate::ir::module::ImportKind::Function(..) => func_imports.push(import),
-                crate::ir::module::ImportKind::Global(..) => global_imports.push(import),
                 crate::ir::module::ImportKind::Memory(..) => memory_import = Some(import),
                 _ => {}
             }
@@ -36,7 +33,6 @@ impl<'a, 'm> Validator<'a, 'm> {
             valid: true,
             errors: Vec::new(),
             func_imports,
-            global_imports,
             memory_import,
         }
     }
@@ -93,36 +89,29 @@ impl<'a, 'm> Validator<'a, 'm> {
             }
 
             match export.kind {
-                ExportKind::Function => {
+                ExportKind::Function(idx) => {
                     let total_funcs = self.func_imports.len() + self.module.functions.len();
-                    if (export.index as usize) >= total_funcs {
-                        self.fail(&format!(
-                            "Exported function index {} out of bounds",
-                            export.index
-                        ));
+                    if (idx as usize) >= total_funcs {
+                        self.fail(&format!("Exported function index {} out of bounds", idx));
                     }
                 }
-                ExportKind::Global => {
-                    let total_globals = self.global_imports.len() + self.module.globals.len();
-                    if (export.index as usize) >= total_globals {
-                        self.fail(&format!(
-                            "Exported global index {} out of bounds",
-                            export.index
-                        ));
+                ExportKind::Global(id) => {
+                    if self.module.globals.get(id.cast()).is_none() {
+                        self.fail(&format!("Exported global {:?} does not exist", id));
                     }
                 }
-                ExportKind::Memory => {
+                ExportKind::Memory(idx) => {
                     let has_memory = self.memory_import.is_some() || self.module.memory.is_some();
                     if !has_memory {
                         self.fail("Exported memory but no memory exists");
-                    } else if export.index != 0 {
+                    } else if idx != 0 {
                         self.fail(&format!(
                             "Exported memory index {} out of bounds (only 0 allowed)",
-                            export.index
+                            idx
                         ));
                     }
                 }
-                ExportKind::Table => {
+                ExportKind::Table(idx) => {
                     let has_table = self.module.table.is_some()
                         || self.module.imports.iter().any(|imp| {
                             matches!(imp.kind, crate::ir::module::ImportKind::Table(..))
@@ -130,10 +119,10 @@ impl<'a, 'm> Validator<'a, 'm> {
 
                     if !has_table {
                         self.fail("Exported table but no table exists");
-                    } else if export.index != 0 {
+                    } else if idx != 0 {
                         self.fail(&format!(
                             "Exported table index {} out of bounds (only 0 allowed)",
-                            export.index
+                            idx
                         ));
                     }
                 }
@@ -312,60 +301,31 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
                     }
                 }
             }
-            ExpressionKind::GlobalGet { index } => {
-                let idx = *index as usize;
-                let global_type = if idx < self.global_imports.len() {
-                    let import = self.global_imports[idx];
-                    if let crate::ir::module::ImportKind::Global(ty, _) = import.kind {
-                        Some(ty)
-                    } else {
-                        None
-                    }
-                } else {
-                    let local_idx = idx - self.global_imports.len();
-                    self.module.globals.get(local_idx).map(|g| g.type_)
-                };
-
-                if let Some(ty) = global_type {
-                    if expr.type_ != ty {
+            ExpressionKind::GlobalGet { id } => {
+                if let Some(g) = self.module.globals.get(id.cast()) {
+                    if expr.type_ != g.type_ && expr.type_ != Type::UNREACHABLE {
                         self.fail(&format!(
                             "GlobalGet: Expression type {:?} does not match global type {:?}",
-                            expr.type_, ty
+                            expr.type_, g.type_
                         ));
                     }
                 } else {
-                    self.fail(&format!("GlobalGet: Index {} out of bounds", index));
+                    self.fail(&format!("GlobalGet: Invalid ID {:?}", id));
                 }
             }
-            ExpressionKind::GlobalSet { index, value } => {
-                let idx = *index as usize;
-                let global_info = if idx < self.global_imports.len() {
-                    let import = self.global_imports[idx];
-                    if let crate::ir::module::ImportKind::Global(ty, mutable) = import.kind {
-                        Some((ty, mutable))
-                    } else {
-                        None
+            ExpressionKind::GlobalSet { id, value } => {
+                if let Some(g) = self.module.globals.get(id.cast()) {
+                    if !g.mutable {
+                        self.fail(&format!("GlobalSet: Global {:?} is immutable", id));
                     }
-                } else {
-                    let local_idx = idx - self.global_imports.len();
-                    self.module
-                        .globals
-                        .get(local_idx)
-                        .map(|g| (g.type_, g.mutable))
-                };
-
-                if let Some((ty, mutable)) = global_info {
-                    if !mutable {
-                        self.fail(&format!("GlobalSet: Global {} is immutable", index));
-                    }
-                    if value.type_ != ty && value.type_ != Type::UNREACHABLE {
+                    if value.type_ != g.type_ && value.type_ != Type::UNREACHABLE {
                         self.fail(&format!(
                             "GlobalSet: Value type {:?} does not match global type {:?}",
-                            value.type_, ty
+                            value.type_, g.type_
                         ));
                     }
                 } else {
-                    self.fail(&format!("GlobalSet: Index {} out of bounds", index));
+                    self.fail(&format!("GlobalSet: Invalid ID {:?}", id));
                 }
             }
             ExpressionKind::Call {

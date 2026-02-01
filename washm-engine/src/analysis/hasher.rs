@@ -33,10 +33,11 @@ impl<'a, H: Hasher> ReadOnlyVisitor<'a> for DeepHasher<'a, H> {
             },
             ExpressionKind::LocalGet { index }
             | ExpressionKind::LocalSet { index, .. }
-            | ExpressionKind::LocalTee { index, .. }
-            | ExpressionKind::GlobalGet { index }
-            | ExpressionKind::GlobalSet { index, .. } => {
+            | ExpressionKind::LocalTee { index, .. } => {
                 index.hash(self.hasher);
+            }
+            ExpressionKind::GlobalGet { id } | ExpressionKind::GlobalSet { id, .. } => {
+                id.hash(self.hasher);
             }
             ExpressionKind::Block { name, .. } | ExpressionKind::Loop { name, .. } => {
                 name.hash(self.hasher);

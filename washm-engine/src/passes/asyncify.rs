@@ -1,7 +1,7 @@
 use crate::analysis::call_graph::CallGraph;
 use crate::analysis::liveness::Liveness;
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
-use crate::ir::module::{Function, Global, ImportKind, Module};
+use crate::ir::module::{Function, Global, GlobalKind, ImportKind, Module};
 use crate::ir::visitor::{ReadOnlyVisitor, Visitor};
 use crate::ir::{Literal, Type};
 use crate::passes::flatten::Flatten;
@@ -72,57 +72,59 @@ impl Asyncify {
     }
 
     fn add_globals<'a>(&self, module: &mut Module<'a>, pointer_type: Type) {
-        if module.globals.iter().any(|g| g.name == ASYNCIFY_STATE) {
+        if module.globals.iter().any(|(_, g)| g.name == ASYNCIFY_STATE) {
             return;
         }
 
         let builder = IrBuilder::new(module.allocator);
 
-        module.globals.push(Global {
+        module.add_global(Global {
             name: ASYNCIFY_STATE.to_string(),
             type_: Type::I32,
             mutable: true,
-            init: builder.const_(Literal::I32(0)),
+            kind: GlobalKind::Local {
+                init: builder.const_(Literal::I32(0)),
+            },
         });
 
-        module.globals.push(Global {
+        module.add_global(Global {
             name: ASYNCIFY_DATA.to_string(),
             type_: pointer_type,
             mutable: true,
-            init: if pointer_type == Type::I64 {
-                builder.const_(Literal::I64(0))
-            } else {
-                builder.const_(Literal::I32(0))
+            kind: GlobalKind::Local {
+                init: if pointer_type == Type::I64 {
+                    builder.const_(Literal::I64(0))
+                } else {
+                    builder.const_(Literal::I32(0))
+                },
             },
         });
 
         for ty in [Type::I32, Type::I64, Type::F32, Type::F64] {
-            module.globals.push(Global {
+            module.add_global(Global {
                 name: format!("asyncify_fake_global_{}", ty.to_string()),
                 type_: ty,
                 mutable: true,
-                init: match ty {
-                    Type::I32 => builder.const_(Literal::I32(0)),
-                    Type::I64 => builder.const_(Literal::I64(0)),
-                    Type::F32 => builder.const_(Literal::F32(0.0)),
-                    Type::F64 => builder.const_(Literal::F64(0.0)),
-                    _ => unreachable!(),
+                kind: GlobalKind::Local {
+                    init: match ty {
+                        Type::I32 => builder.const_(Literal::I32(0)),
+                        Type::I64 => builder.const_(Literal::I64(0)),
+                        Type::F32 => builder.const_(Literal::F32(0.0)),
+                        Type::F64 => builder.const_(Literal::F64(0.0)),
+                        _ => unreachable!(),
+                    },
                 },
             });
         }
     }
 
     fn add_functions<'a>(&self, module: &mut Module<'a>, pointer_type: Type) {
-        let state_idx = module
-            .globals
-            .iter()
-            .position(|g| g.name == ASYNCIFY_STATE)
-            .unwrap() as u32;
-        let data_idx = module
-            .globals
-            .iter()
-            .position(|g| g.name == ASYNCIFY_DATA)
-            .unwrap() as u32;
+        let (state_id, _) = module
+            .get_global_by_name(ASYNCIFY_STATE)
+            .expect("Asyncify state global not found");
+        let (data_id, _) = module
+            .get_global_by_name(ASYNCIFY_DATA)
+            .expect("Asyncify data global not found");
 
         self.make_helper(
             module,
@@ -130,8 +132,8 @@ impl Asyncify {
             true,
             AsyncifyState::Unwinding,
             pointer_type,
-            state_idx,
-            data_idx,
+            state_id,
+            data_id,
         );
         self.make_helper(
             module,
@@ -139,8 +141,8 @@ impl Asyncify {
             false,
             AsyncifyState::Normal,
             pointer_type,
-            state_idx,
-            data_idx,
+            state_id,
+            data_id,
         );
         self.make_helper(
             module,
@@ -148,8 +150,8 @@ impl Asyncify {
             true,
             AsyncifyState::Rewinding,
             pointer_type,
-            state_idx,
-            data_idx,
+            state_id,
+            data_id,
         );
         self.make_helper(
             module,
@@ -157,13 +159,13 @@ impl Asyncify {
             false,
             AsyncifyState::Normal,
             pointer_type,
-            state_idx,
-            data_idx,
+            state_id,
+            data_id,
         );
 
         // asyncify_get_state
         let builder = IrBuilder::new(module.allocator);
-        let get_state_body = builder.global_get(state_idx, Type::I32);
+        let get_state_body = builder.global_get(state_id, Type::I32);
         let func = Function::new(
             ASYNCIFY_GET_STATE.to_string(),
             Type::NONE,
@@ -188,18 +190,18 @@ impl Asyncify {
         set_data: bool,
         state: AsyncifyState,
         pointer_type: Type,
-        state_idx: u32,
-        data_idx: u32,
+        state_id: crate::ir::GlobalId,
+        data_id: crate::ir::GlobalId,
     ) {
         let builder = IrBuilder::new(module.allocator);
         let mut list = BumpVec::new_in(module.allocator);
 
-        list.push(builder.global_set(state_idx, builder.const_(Literal::I32(state as i32))));
+        list.push(builder.global_set(state_id, builder.const_(Literal::I32(state as i32))));
 
         let params = if set_data { pointer_type } else { Type::NONE };
 
         if set_data {
-            list.push(builder.global_set(data_idx, builder.local_get(0, pointer_type)));
+            list.push(builder.global_set(data_id, builder.local_get(0, pointer_type)));
         }
 
         let body = builder.block(None, list, Type::NONE);
@@ -234,11 +236,9 @@ impl Pass for Asyncify {
         };
         self.add_globals(module, pointer_type);
 
-        let state_index = module
-            .globals
-            .iter()
-            .position(|g| g.name == ASYNCIFY_STATE)
-            .unwrap() as u32;
+        let (state_id, _) = module
+            .get_global_by_name(ASYNCIFY_STATE)
+            .expect("Asyncify state global not found");
 
         for i in 0..module.functions.len() {
             if !analyzer.needs_instrumentation(&module.functions[i]) {
@@ -249,7 +249,7 @@ impl Pass for Asyncify {
             let base_local_index =
                 (module.functions[i].params.tuple_len() + module.functions[i].vars.len()) as u32;
             let (start_idx, end_idx, added_locals) = {
-                let mut flow = AsyncifyFlow::new(module, &analyzer, state_index, base_local_index);
+                let mut flow = AsyncifyFlow::new(module, &analyzer, state_id, base_local_index);
                 let range = flow.process(&mut body);
                 (range.0, range.1, flow.added_locals)
             };
@@ -263,7 +263,7 @@ impl Pass for Asyncify {
                 module,
                 &analyzer,
                 i,
-                state_index,
+                state_id,
                 pointer_type,
                 start_idx,
                 end_idx,
@@ -439,7 +439,7 @@ pub struct AsyncifyFlow<'a, 'b> {
     module: &'a Module<'b>,
     analyzer: &'a ModuleAnalyzer,
     builder: IrBuilder<'b>,
-    state_index: u32,
+    state_id: crate::ir::GlobalId,
     call_index: u32,
     added_locals: Vec<Type>,
     next_local_index: u32,
@@ -451,14 +451,14 @@ impl<'a, 'b> AsyncifyFlow<'a, 'b> {
     pub fn new(
         module: &'a Module<'b>,
         analyzer: &'a ModuleAnalyzer,
-        state_index: u32,
+        state_id: crate::ir::GlobalId,
         base_local_index: u32,
     ) -> Self {
         Self {
             module,
             analyzer,
             builder: IrBuilder::new(module.allocator),
-            state_index,
+            state_id,
             call_index: 0,
             added_locals: Vec::new(),
             next_local_index: base_local_index,
@@ -476,7 +476,7 @@ impl<'a, 'b> AsyncifyFlow<'a, 'b> {
     fn make_state_check(&self, state: AsyncifyState) -> ExprRef<'b> {
         self.builder.binary(
             crate::ir::ops::BinaryOp::EqInt32,
-            self.builder.global_get(self.state_index, Type::I32),
+            self.builder.global_get(self.state_id, Type::I32),
             self.builder.const_(Literal::I32(state as i32)),
             Type::I32,
         )
@@ -654,7 +654,7 @@ impl<'a, 'b> AsyncifyFlow<'a, 'b> {
         let stop_rewind_if_needed = self.builder.if_(
             self.make_state_check(AsyncifyState::Rewinding),
             self.builder.global_set(
-                self.state_index,
+                self.state_id,
                 self.builder
                     .const_(Literal::I32(AsyncifyState::Normal as i32)),
             ),
@@ -689,7 +689,7 @@ pub struct AsyncifyLocals<'a, 'b> {
     module: &'a mut Module<'b>,
     analyzer: &'a ModuleAnalyzer,
     func_idx: usize,
-    state_index: u32,
+    state_id: crate::ir::GlobalId,
     pointer_type: Type,
 }
 
@@ -698,7 +698,7 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
         module: &'a mut Module<'b>,
         analyzer: &'a ModuleAnalyzer,
         func_idx: usize,
-        state_index: u32,
+        state_id: crate::ir::GlobalId,
         pointer_type: Type,
         _start_index: u32,
         _end_index: u32,
@@ -707,22 +707,16 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
             module,
             analyzer,
             func_idx,
-            state_index,
+            state_id,
             pointer_type,
         }
     }
 
-    fn map_global(&self, name: &str) -> String {
-        name.to_string()
-    }
-
     pub fn run(&mut self) {
-        let asyncify_data_global_idx = self
+        let (asyncify_data_global_id, _) = self
             .module
-            .globals
-            .iter()
-            .position(|g| g.name == self.map_global(ASYNCIFY_DATA))
-            .unwrap() as u32;
+            .get_global_by_name(ASYNCIFY_DATA)
+            .expect("Asyncify data global not found");
         let pointer_type = self.pointer_type;
 
         let func = &mut self.module.functions[self.func_idx];
@@ -801,7 +795,7 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
         let mut live_locals_vec: Vec<u32> = relevant_live_locals.into_iter().collect();
         live_locals_vec.sort();
 
-        let data_ptr = builder.global_get(asyncify_data_global_idx, pointer_type);
+        let data_ptr = builder.global_get(asyncify_data_global_id, pointer_type);
         let mut load_block_list = BumpVec::new_in(self.module.allocator);
 
         let mut total_locals_size = 0;
@@ -905,7 +899,7 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
         let mut list: BumpVec<ExprRef> = BumpVec::new_in(self.module.allocator);
         let rewinding = builder.binary(
             crate::ir::ops::BinaryOp::EqInt32,
-            builder.global_get(self.state_index, Type::I32),
+            builder.global_get(self.state_id, Type::I32),
             builder.const_(Literal::I32(AsyncifyState::Rewinding as i32)),
             Type::I32,
         );
@@ -947,7 +941,7 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
 
         let unwinding = builder.binary(
             crate::ir::ops::BinaryOp::EqInt32,
-            builder.global_get(self.state_index, Type::I32),
+            builder.global_get(self.state_id, Type::I32),
             builder.const_(Literal::I32(AsyncifyState::Unwinding as i32)),
             Type::I32,
         );
@@ -1064,9 +1058,9 @@ impl<'b> LocalTransformer<'b> {
                 let v = self.visit(*value);
                 self.builder.local_tee(*index, v, expr.type_)
             }
-            ExpressionKind::GlobalSet { index, value } => {
+            ExpressionKind::GlobalSet { id, value } => {
                 let v = self.visit(*value);
-                self.builder.global_set(*index, v)
+                self.builder.global_set(*id, v)
             }
             ExpressionKind::Drop { value } => {
                 let v = self.visit(*value);
@@ -1155,8 +1149,8 @@ mod tests {
         asyncify.run(&mut module);
 
         // Verification: Check if globals were added
-        assert!(module.globals.iter().any(|g| g.name == ASYNCIFY_STATE));
-        assert!(module.globals.iter().any(|g| g.name == ASYNCIFY_DATA));
+        assert!(module.globals.iter().any(|(_, g)| g.name == ASYNCIFY_STATE));
+        assert!(module.globals.iter().any(|(_, g)| g.name == ASYNCIFY_DATA));
 
         // The function body should have been wrapped in a block
         let func = &module.functions[0];

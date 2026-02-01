@@ -23,7 +23,7 @@ impl Pass for RemoveMemoryInit {
             let is_exported = module
                 .exports
                 .iter()
-                .any(|e| e.kind == crate::ir::module::ExportKind::Function && e.index == idx);
+                .any(|e| matches!(e.kind, crate::ir::module::ExportKind::Function(i) if i == idx));
 
             if !is_exported {
                 // Remove function and remap
@@ -40,9 +40,9 @@ impl RemoveMemoryInit {
 
             // Remap exports
             for export in &mut module.exports {
-                if export.kind == crate::ir::module::ExportKind::Function {
-                    if export.index > index {
-                        export.index -= 1;
+                if let crate::ir::module::ExportKind::Function(func_idx) = &mut export.kind {
+                    if *func_idx > index {
+                        *func_idx -= 1;
                     }
                 }
             }

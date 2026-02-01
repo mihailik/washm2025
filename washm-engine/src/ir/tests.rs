@@ -73,23 +73,8 @@ fn test_validation_failure() {
         local_names: vec![],
     }];
 
-    let module = Module {
-        type_names: Vec::new(),
-        allocator: &bump,
-        features: FeatureSet::DEFAULT,
-
-        types: vec![],
-        imports: vec![],
-        functions,
-        globals: Vec::new(),
-        table: None,
-        memory: None,
-        start: None,
-        exports: Vec::new(),
-        elements: Vec::new(),
-        data: Vec::new(),
-        annotations: AnnotationStore::new(),
-    };
+    let mut module = Module::new(&bump);
+    module.functions = functions;
 
     let validator = Validator::new(&module);
     let (valid, errors) = validator.validate();
@@ -104,28 +89,35 @@ fn test_global_validation() {
     let bump = Bump::new();
     let builder = IrBuilder::new(&bump);
 
-    // Helper to create standard globals
-    let create_globals = || {
-        vec![
-            crate::ir::module::Global {
+    macro_rules! create_globals {
+        ($module:expr) => {
+            $module.add_global(crate::ir::module::Global {
                 name: "g0".to_string(),
+                kind: crate::ir::module::GlobalKind::Local {
+                    init: builder.const_(Literal::I32(0)),
+                },
                 type_: Type::I32,
                 mutable: false,
-                init: builder.const_(Literal::I32(0)),
-            },
-            crate::ir::module::Global {
+            });
+            $module.add_global(crate::ir::module::Global {
                 name: "g1".to_string(),
+                kind: crate::ir::module::GlobalKind::Local {
+                    init: builder.const_(Literal::F32(0.0)),
+                },
                 type_: Type::F32,
                 mutable: true,
-                init: builder.const_(Literal::F32(0.0)),
-            },
-        ]
-    };
+            });
+        };
+    }
 
     // 1. Test GlobalSet on immutable global (g0)
     {
+        let mut module = Module::new(&bump);
+        create_globals!(&mut module);
+        let g0_id = module.globals.ids().next().unwrap().cast();
+
         let val = builder.const_(Literal::I32(42));
-        let set_immutable = builder.global_set(0, val);
+        let set_immutable = builder.global_set(g0_id, val);
 
         let func = Function {
             name: "fail_immut".to_string(),
@@ -137,23 +129,7 @@ fn test_global_validation() {
             local_names: vec![],
         };
 
-        let module = Module {
-            type_names: Vec::new(),
-            allocator: &bump,
-            features: FeatureSet::DEFAULT,
-
-            types: vec![],
-            imports: vec![],
-            functions: vec![func],
-            globals: create_globals(),
-            memory: None,
-            start: None,
-            table: None,
-            elements: Vec::new(),
-            exports: vec![],
-            data: Vec::new(),
-            annotations: AnnotationStore::new(),
-        };
+        module.functions.push(func);
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
@@ -163,8 +139,14 @@ fn test_global_validation() {
 
     // 2. Test GlobalSet type mismatch
     {
+        let mut module = Module::new(&bump);
+        create_globals!(&mut module);
+        let mut ids = module.globals.ids();
+        let _ = ids.next();
+        let g1_id = ids.next().unwrap().cast();
+
         let val = builder.const_(Literal::I32(42)); // i32
-        let set_mismatch = builder.global_set(1, val); // trying to set to g1 (f32)
+        let set_mismatch = builder.global_set(g1_id, val); // trying to set to g1 (f32)
 
         let func = Function {
             name: "fail_type".to_string(),
@@ -176,23 +158,7 @@ fn test_global_validation() {
             local_names: vec![],
         };
 
-        let module = Module {
-            type_names: Vec::new(),
-            allocator: &bump,
-            features: FeatureSet::DEFAULT,
-
-            types: vec![],
-            imports: vec![],
-            functions: vec![func],
-            globals: create_globals(),
-            memory: None,
-            start: None,
-            table: None,
-            elements: Vec::new(),
-            exports: vec![],
-            data: Vec::new(),
-            annotations: AnnotationStore::new(),
-        };
+        module.functions.push(func);
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
@@ -204,7 +170,11 @@ fn test_global_validation() {
 
     // 3. Test GlobalGet out of bounds
     {
-        let get_oob = builder.global_get(99, Type::I32);
+        let mut module = Module::new(&bump);
+        create_globals!(&mut module);
+
+        let oob_id = unsafe { std::mem::transmute(99u64) };
+        let get_oob = builder.global_get(oob_id, Type::I32);
 
         let func = Function {
             name: "fail_oob".to_string(),
@@ -216,28 +186,12 @@ fn test_global_validation() {
             local_names: vec![],
         };
 
-        let module = Module {
-            type_names: Vec::new(),
-            allocator: &bump,
-            features: FeatureSet::DEFAULT,
-
-            types: vec![],
-            imports: vec![],
-            functions: vec![func],
-            globals: create_globals(),
-            memory: None,
-            start: None,
-            table: None,
-            elements: Vec::new(),
-            exports: vec![],
-            data: Vec::new(),
-            annotations: AnnotationStore::new(),
-        };
+        module.functions.push(func);
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid, "OOB GlobalGet should fail");
-        assert!(errors.iter().any(|e| e.contains("out of bounds")));
+        assert!(errors.iter().any(|e| e.contains("Invalid ID")));
     }
 }
 
@@ -375,7 +329,7 @@ fn test_export_validation() {
         name: "g0".to_string(),
         type_: Type::I32,
         mutable: false,
-        init: global_init,
+        kind: GlobalKind::Local { init: global_init },
     };
 
     let memory = MemoryLimits {
@@ -395,39 +349,13 @@ fn test_export_validation() {
             local_names: vec![],
         };
 
-        let module = Module {
-            type_names: Vec::new(),
-            allocator: &bump,
-            features: FeatureSet::DEFAULT,
-
-            types: vec![],
-            imports: vec![],
-            functions: vec![func_valid],  // f0 is index 0
-            globals: vec![global],        // g0 is index 0
-            memory: Some(memory.clone()), // memory is index 0
-            start: None,
-            table: None,
-            elements: Vec::new(),
-            exports: vec![
-                Export {
-                    name: "exp_func".to_string(),
-                    kind: ExportKind::Function,
-                    index: 0,
-                },
-                Export {
-                    name: "exp_glob".to_string(),
-                    kind: ExportKind::Global,
-                    index: 0,
-                },
-                Export {
-                    name: "exp_mem".to_string(),
-                    kind: ExportKind::Memory,
-                    index: 0,
-                },
-            ],
-            data: Vec::new(),
-            annotations: AnnotationStore::new(),
-        };
+        let mut module = Module::new(&bump);
+        module.functions.push(func_valid);
+        let g0_id = module.add_global(global);
+        module.memory = Some(memory.clone());
+        module.add_export("exp_func".to_string(), ExportKind::Function(0));
+        module.add_export("exp_glob".to_string(), ExportKind::Global(g0_id));
+        module.add_export("exp_mem".to_string(), ExportKind::Memory(0));
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
@@ -436,34 +364,10 @@ fn test_export_validation() {
 
     // 2. Duplicate export name
     {
-        let module = Module {
-            type_names: Vec::new(),
-            allocator: &bump,
-            features: FeatureSet::DEFAULT,
+        let mut module = Module::new(&bump);
+        module.add_export("same".to_string(), ExportKind::Function(0));
+        module.add_export("same".to_string(), ExportKind::Function(0));
 
-            types: vec![],
-            imports: vec![],
-            functions: vec![],
-            globals: vec![],
-            memory: None,
-            start: None,
-            table: None,
-            elements: Vec::new(),
-            exports: vec![
-                Export {
-                    name: "same".to_string(),
-                    kind: ExportKind::Function,
-                    index: 0,
-                },
-                Export {
-                    name: "same".to_string(),
-                    kind: ExportKind::Function,
-                    index: 0,
-                },
-            ],
-            data: Vec::new(),
-            annotations: AnnotationStore::new(),
-        };
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid);
@@ -481,27 +385,9 @@ fn test_export_validation() {
             body: None,
             local_names: vec![],
         };
-        let module = Module {
-            type_names: Vec::new(),
-            allocator: &bump,
-            features: FeatureSet::DEFAULT,
-
-            types: vec![],
-            imports: vec![],
-            functions: vec![func_valid],
-            globals: vec![],
-            memory: None,
-            start: None,
-            table: None,
-            elements: Vec::new(),
-            exports: vec![Export {
-                name: "f1".to_string(),
-                kind: ExportKind::Function,
-                index: 1,
-            }],
-            data: Vec::new(),
-            annotations: AnnotationStore::new(),
-        };
+        let mut module = Module::new(&bump);
+        module.functions.push(func_valid);
+        module.add_export("f1".to_string(), ExportKind::Function(1));
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid);
@@ -512,58 +398,20 @@ fn test_export_validation() {
 
     // 4. Global OOB
     {
-        let module = Module {
-            type_names: Vec::new(),
-            allocator: &bump,
-            features: FeatureSet::DEFAULT,
+        let mut module = Module::new(&bump);
+        let oob_id = unsafe { std::mem::transmute(0u64) };
+        module.add_export("g0".to_string(), ExportKind::Global(oob_id));
 
-            types: vec![],
-            imports: vec![],
-            functions: vec![],
-            globals: vec![],
-            memory: None,
-            start: None,
-            table: None,
-            elements: Vec::new(),
-            exports: vec![Export {
-                name: "g0".to_string(),
-                kind: ExportKind::Global,
-                index: 0,
-            }],
-            data: Vec::new(),
-            annotations: AnnotationStore::new(),
-        };
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid);
-        assert!(errors
-            .iter()
-            .any(|e| e.contains("Exported global index 0 out of bounds")));
+        assert!(errors.iter().any(|e| e.contains("does not exist")));
     }
 
     // 5. Memory OOB / No Memory
     {
-        let module = Module {
-            type_names: Vec::new(),
-            allocator: &bump,
-            features: FeatureSet::DEFAULT,
-
-            types: vec![],
-            imports: vec![],
-            functions: vec![],
-            globals: vec![],
-            memory: None,
-            start: None,
-            table: None,
-            elements: Vec::new(),
-            exports: vec![Export {
-                name: "m0".to_string(),
-                kind: ExportKind::Memory,
-                index: 0,
-            }],
-            data: Vec::new(),
-            annotations: AnnotationStore::new(),
-        };
+        let mut module = Module::new(&bump);
+        module.add_export("m0".to_string(), ExportKind::Memory(0));
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid);
@@ -575,7 +423,7 @@ fn test_export_validation() {
 
 #[test]
 fn test_exports_roundtrip() {
-    use crate::ir::module::{Export, ExportKind, Global, MemoryLimits};
+    use crate::ir::module::{ExportKind, Global, MemoryLimits};
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
@@ -583,50 +431,25 @@ fn test_exports_roundtrip() {
     let builder = IrBuilder::new(&bump);
 
     let func = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], None);
-    let global = Global {
+    let mut module = Module::new(&bump);
+    module.functions.push(func);
+    let g0_id = module.add_global(Global {
         name: "g0".to_string(),
         type_: Type::I32,
         mutable: false,
-        init: builder.const_(Literal::I32(123)),
-    };
-    let memory = MemoryLimits {
+        kind: crate::ir::module::GlobalKind::Local {
+            init: builder.const_(Literal::I32(123)),
+        },
+    });
+    module.memory = Some(MemoryLimits {
         initial: 1,
         maximum: None,
-    };
+    });
 
-    let module = Module {
-        type_names: Vec::new(),
-        allocator: &bump,
-        features: FeatureSet::DEFAULT,
+    module.add_export("test_func".to_string(), ExportKind::Function(0));
+    module.add_export("test_glob".to_string(), ExportKind::Global(g0_id.cast()));
+    module.add_export("test_mem".to_string(), ExportKind::Memory(0));
 
-        types: vec![],
-        imports: vec![],
-        functions: vec![func],
-        globals: vec![global],
-        memory: Some(memory),
-        start: None,
-        table: None,
-        elements: Vec::new(),
-        exports: vec![
-            Export {
-                name: "test_func".to_string(),
-                kind: ExportKind::Function,
-                index: 0,
-            },
-            Export {
-                name: "test_glob".to_string(),
-                kind: ExportKind::Global,
-                index: 0,
-            },
-            Export {
-                name: "test_mem".to_string(),
-                kind: ExportKind::Memory,
-                index: 0,
-            },
-        ],
-        data: Vec::new(),
-        annotations: AnnotationStore::new(),
-    };
 
     // Write
     let mut writer = BinaryWriter::new();
@@ -645,24 +468,22 @@ fn test_exports_roundtrip() {
         .iter()
         .find(|e| e.name == "test_func")
         .unwrap();
-    assert_eq!(func_exp.kind, ExportKind::Function);
-    assert_eq!(func_exp.index, 0);
+    assert_eq!(func_exp.kind, ExportKind::Function(0));
 
     let glob_exp = read_module
         .exports
         .iter()
         .find(|e| e.name == "test_glob")
         .unwrap();
-    assert_eq!(glob_exp.kind, ExportKind::Global);
-    assert_eq!(glob_exp.index, 0);
+    let g0_id = read_module.globals.ids().next().unwrap().cast();
+    assert_eq!(glob_exp.kind, ExportKind::Global(g0_id));
 
     let mem_exp = read_module
         .exports
         .iter()
         .find(|e| e.name == "test_mem")
         .unwrap();
-    assert_eq!(mem_exp.kind, ExportKind::Memory);
-    assert_eq!(mem_exp.index, 0);
+    assert_eq!(mem_exp.kind, ExportKind::Memory(0));
 }
 
 #[test]
@@ -682,10 +503,14 @@ fn test_imports_roundtrip() {
     });
 
     // 2. Global Import (i32, immutable)
-    module.add_import(Import {
-        module: "env".to_string(),
+    module.add_global(Global {
         name: "limit".to_string(),
-        kind: ImportKind::Global(Type::I32, false),
+        type_: Type::I32,
+        mutable: false,
+        kind: GlobalKind::Import {
+            module: "env".to_string(),
+            field: "limit".to_string(),
+        },
     });
 
     // 3. Memory Import
@@ -707,7 +532,8 @@ fn test_imports_roundtrip() {
     let mut reader = BinaryReader::new(&read_bump, bytes);
     let read_module = reader.parse_module().expect("parse failed");
 
-    assert_eq!(read_module.imports.len(), 3);
+    assert_eq!(read_module.imports.len(), 2);
+    assert_eq!(read_module.globals.len(), 1);
 
     let log_import = &read_module.imports[0];
     assert_eq!(log_import.module, "env");
@@ -719,11 +545,16 @@ fn test_imports_roundtrip() {
         panic!("Expected function import");
     }
 
-    let global_import = &read_module.imports[1];
+    let memory_import = &read_module.imports[1];
+    assert_eq!(memory_import.name, "memory");
+
+    let (_, global_import) = read_module.globals.iter().next().unwrap();
     assert_eq!(global_import.name, "limit");
-    if let ImportKind::Global(ty, mut_) = global_import.kind {
-        assert_eq!(ty, Type::I32);
-        assert!(!mut_);
+    if let GlobalKind::Import { module, field } = &global_import.kind {
+        assert_eq!(module, "env");
+        assert_eq!(field, "limit");
+        assert_eq!(global_import.type_, Type::I32);
+        assert!(!global_import.mutable);
     } else {
         panic!("Expected global import");
     }
@@ -739,25 +570,29 @@ fn test_import_validation() {
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
 
-    // Import Global 0: i32, immutable
-    module.add_import(Import {
-        module: "env".to_string(),
+    // Import Global: i32, immutable
+    let g_imp_id = module.add_global(Global {
         name: "g_imp".to_string(),
-        kind: ImportKind::Global(Type::I32, false),
+        type_: Type::I32,
+        mutable: false,
+        kind: GlobalKind::Import {
+            module: "env".to_string(),
+            field: "g_imp".to_string(),
+        },
     });
 
-    // Define Global 1: f32, mutable
+    // Define Global: f32, mutable
     let init_expr = builder.const_(Literal::F32(1.0));
-    module.add_global(Global {
+    let g_def_id = module.add_global(Global {
         name: "g_def".to_string(),
         type_: Type::F32,
         mutable: true,
-        init: init_expr,
+        kind: GlobalKind::Local { init: init_expr },
     });
 
-    // Test 1: Get imported global (index 0) - Valid
+    // Test 1: Get imported global - Valid
     {
-        let get_imp = builder.global_get(0, Type::I32);
+        let get_imp = builder.global_get(g_imp_id, Type::I32);
         let func = Function::new(
             "test1".to_string(),
             Type::NONE,
@@ -773,9 +608,9 @@ fn test_import_validation() {
         module.functions.pop();
     }
 
-    // Test 2: Get defined global (index 1) - Valid
+    // Test 2: Get defined global - Valid
     {
-        let get_def = builder.global_get(1, Type::F32);
+        let get_def = builder.global_get(g_def_id, Type::F32);
         let func = Function::new(
             "test2".to_string(),
             Type::NONE,
@@ -791,9 +626,10 @@ fn test_import_validation() {
         module.functions.pop();
     }
 
-    // Test 3: Get OOB global (index 2) - Invalid
+    // Test 3: Get OOB global - Invalid
     {
-        let get_oob = builder.global_get(2, Type::I32);
+        let get_oob =
+            builder.global_get(crate::ir::GlobalId::from_raw_parts(2, 0).cast(), Type::I32);
         let func = Function::new(
             "test3".to_string(),
             Type::NONE,
@@ -2883,12 +2719,12 @@ fn test_code_section_global_operations() {
         name: "g0".to_string(),
         type_: Type::I32,
         mutable: false,
-        init: global_init,
+        kind: GlobalKind::Local { init: global_init },
     };
-    module.add_global(global);
+    let g0_id = module.add_global(global);
 
     // Function that gets the global
-    let body = builder.global_get(0, Type::I32);
+    let body = builder.global_get(g0_id, Type::I32);
     let func = Function::new(
         "get_global".to_string(),
         Type::NONE,
@@ -3265,7 +3101,7 @@ fn test_roundtrip_all_sections_together() {
         name: "g0".to_string(),
         type_: Type::I32,
         mutable: false,
-        init,
+        kind: crate::ir::module::GlobalKind::Local { init },
     });
 
     // Table
@@ -3278,8 +3114,7 @@ fn test_roundtrip_all_sections_together() {
     // Exports (export the local function, not the imported one)
     module.add_export(
         "exported_func".to_string(),
-        crate::ir::module::ExportKind::Function,
-        1, // Index 1 = first local function (after the import at index 0)
+        crate::ir::module::ExportKind::Function(1),
     );
 
     let mut writer = BinaryWriter::new();
@@ -3358,17 +3193,21 @@ fn test_import_memory() {
 
 #[test]
 fn test_import_global() {
-    use crate::ir::module::{Import, ImportKind};
+    use crate::ir::module::{Global, GlobalKind};
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
 
-    module.add_import(Import {
-        module: "env".to_string(),
+    module.add_global(Global {
         name: "global_val".to_string(),
-        kind: ImportKind::Global(Type::I32, false),
+        type_: Type::I32,
+        mutable: false,
+        kind: GlobalKind::Import {
+            module: "env".to_string(),
+            field: "global_val".to_string(),
+        },
     });
 
     let mut writer = BinaryWriter::new();
@@ -3377,7 +3216,8 @@ fn test_import_global() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports.len(), 0);
+    assert_eq!(parsed.globals.len(), 1);
 }
 
 #[test]
@@ -3404,10 +3244,14 @@ fn test_multiple_imports_mixed() {
     });
 
     // Global import
-    module.add_import(Import {
-        module: "js".to_string(),
+    module.add_global(Global {
         name: "g".to_string(),
-        kind: ImportKind::Global(Type::F32, true),
+        type_: Type::F32,
+        mutable: true,
+        kind: crate::ir::module::GlobalKind::Import {
+            module: "js".to_string(),
+            field: "g".to_string(),
+        },
     });
 
     // Memory import
@@ -3426,7 +3270,8 @@ fn test_multiple_imports_mixed() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert_eq!(parsed.imports.len(), 4);
+    assert_eq!(parsed.imports.len(), 3);
+    assert_eq!(parsed.globals.len(), 1);
 }
 
 #[test]
@@ -3476,7 +3321,7 @@ fn test_export_function() {
     ));
 
     // Export it
-    module.add_export("exported".to_string(), ExportKind::Function, 0);
+    module.add_export("exported".to_string(), ExportKind::Function(0));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
@@ -3505,7 +3350,7 @@ fn test_export_multiple_functions() {
             vec![],
             None,
         ));
-        module.add_export(format!("export_{}", i), ExportKind::Function, i);
+        module.add_export(format!("export_{}", i), ExportKind::Function(i));
     }
 
     let mut writer = BinaryWriter::new();
@@ -3528,7 +3373,7 @@ fn test_export_memory() {
     let mut module = Module::new(&bump);
 
     module.set_memory(1, Some(100));
-    module.add_export("memory".to_string(), ExportKind::Memory, 0);
+    module.add_export("memory".to_string(), ExportKind::Memory(0));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
@@ -3552,14 +3397,14 @@ fn test_export_global() {
     let mut module = Module::new(&bump);
 
     let init = builder.const_(Literal::I32(42));
-    module.add_global(Global {
+    let g0_id = module.add_global(Global {
         name: "g0".to_string(),
         type_: Type::I32,
         mutable: false,
-        init,
+        kind: GlobalKind::Local { init },
     });
 
-    module.add_export("my_global".to_string(), ExportKind::Global, 0);
+    module.add_export("my_global".to_string(), ExportKind::Global(g0_id));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
@@ -3586,7 +3431,7 @@ fn test_export_table() {
         maximum: Some(100),
     });
 
-    module.add_export("my_table".to_string(), ExportKind::Table, 0);
+    module.add_export("my_table".to_string(), ExportKind::Table(0));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
@@ -3684,7 +3529,7 @@ fn test_global_immutable_i32() {
         name: "g0".to_string(),
         type_: Type::I32,
         mutable: false,
-        init,
+        kind: GlobalKind::Local { init },
     });
 
     let mut writer = BinaryWriter::new();
@@ -3694,8 +3539,9 @@ fn test_global_immutable_i32() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.globals.len(), 1);
-    assert_eq!(parsed.globals[0].type_, Type::I32);
-    assert!(!parsed.globals[0].mutable);
+    let g0_id = parsed.globals.ids().next().unwrap();
+    assert_eq!(parsed.globals[g0_id].type_, Type::I32);
+    assert!(!parsed.globals[g0_id].mutable);
 }
 
 #[test]
@@ -3714,7 +3560,7 @@ fn test_global_mutable_i64() {
         name: "g0".to_string(),
         type_: Type::I64,
         mutable: true,
-        init,
+        kind: GlobalKind::Local { init },
     });
 
     let mut writer = BinaryWriter::new();
@@ -3724,19 +3570,19 @@ fn test_global_mutable_i64() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.globals.len(), 1);
-    assert_eq!(parsed.globals[0].type_, Type::I64);
-    assert!(parsed.globals[0].mutable);
+    let g0_id = parsed.globals.ids().next().unwrap();
+    assert_eq!(parsed.globals[g0_id].type_, Type::I64);
+    assert!(parsed.globals[g0_id].mutable);
 }
 
 #[test]
 fn test_global_all_types() {
-    use crate::ir::module::Global;
+    use crate::ir::module::{Global, GlobalKind};
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
     let bump = Bump::new();
     let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
 
     // i32 global
@@ -3745,7 +3591,7 @@ fn test_global_all_types() {
         name: "g1".to_string(),
         type_: Type::I32,
         mutable: false,
-        init: init1,
+        kind: GlobalKind::Local { init: init1 },
     });
 
     // i64 global
@@ -3754,7 +3600,7 @@ fn test_global_all_types() {
         name: "g2".to_string(),
         type_: Type::I64,
         mutable: true,
-        init: init2,
+        kind: GlobalKind::Local { init: init2 },
     });
 
     // f32 global
@@ -3763,7 +3609,7 @@ fn test_global_all_types() {
         name: "g3".to_string(),
         type_: Type::F32,
         mutable: false,
-        init: init3,
+        kind: GlobalKind::Local { init: init3 },
     });
 
     // f64 global
@@ -3772,7 +3618,7 @@ fn test_global_all_types() {
         name: "g4".to_string(),
         type_: Type::F64,
         mutable: true,
-        init: init4,
+        kind: GlobalKind::Local { init: init4 },
     });
 
     let mut writer = BinaryWriter::new();
@@ -3786,13 +3632,12 @@ fn test_global_all_types() {
 
 #[test]
 fn test_global_many() {
-    use crate::ir::module::Global;
+    use crate::ir::module::{Global, GlobalKind};
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
     let bump = Bump::new();
     let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
 
     for i in 0..100 {
@@ -3801,7 +3646,7 @@ fn test_global_many() {
             name: format!("g{}", i),
             type_: Type::I32,
             mutable: i % 2 == 0,
-            init,
+            kind: GlobalKind::Local { init },
         });
     }
 
@@ -5157,28 +5002,28 @@ fn test_global_operations_complex() {
 
     // Add two globals
     let init1 = builder.const_(Literal::I32(100));
-    module.add_global(Global {
+    let g0_id = module.add_global(Global {
         name: "g0".to_string(),
         type_: Type::I32,
         mutable: true,
-        init: init1,
+        kind: GlobalKind::Local { init: init1 },
     });
 
     let init2 = builder.const_(Literal::I32(200));
-    module.add_global(Global {
+    let g1_id = module.add_global(Global {
         name: "g1".to_string(),
         type_: Type::I32,
         mutable: true,
-        init: init2,
+        kind: GlobalKind::Local { init: init2 },
     });
 
     // Function: swap globals and return their sum
-    let get0 = builder.global_get(0, Type::I32);
-    let get1 = builder.global_get(1, Type::I32);
-    let set0 = builder.global_set(0, get1);
-    let set1 = builder.global_set(1, get0);
-    let get0_new = builder.global_get(0, Type::I32);
-    let get1_new = builder.global_get(1, Type::I32);
+    let get0 = builder.global_get(g0_id, Type::I32);
+    let get1 = builder.global_get(g1_id, Type::I32);
+    let set0 = builder.global_set(g0_id, get1);
+    let set1 = builder.global_set(g1_id, get0);
+    let get0_new = builder.global_get(g0_id, Type::I32);
+    let get1_new = builder.global_get(g1_id, Type::I32);
     let result = builder.binary(BinaryOp::AddInt32, get0_new, get1_new, Type::I32);
 
     let mut list = BumpVec::new_in(&bump);

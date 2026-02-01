@@ -163,7 +163,7 @@ fn are_expressions_equal<'a>(left: &Expression<'a>, right: &Expression<'a>) -> b
         (ExpressionKind::LocalGet { index: i1 }, ExpressionKind::LocalGet { index: i2 }) => {
             i1 == i2
         }
-        (ExpressionKind::GlobalGet { index: i1 }, ExpressionKind::GlobalGet { index: i2 }) => {
+        (ExpressionKind::GlobalGet { id: i1 }, ExpressionKind::GlobalGet { id: i2 }) => {
             i1 == i2
         }
         (ExpressionKind::Const(l1), ExpressionKind::Const(l2)) => l1 == l2,

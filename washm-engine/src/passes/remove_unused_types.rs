@@ -45,9 +45,6 @@ impl Pass for RemoveUnusedTypes {
                     *params = self.remap_type(*params, &remap);
                     *results = self.remap_type(*results, &remap);
                 }
-                ImportKind::Global(ty, _) => {
-                    *ty = self.remap_type(*ty, &remap);
-                }
                 ImportKind::Table(ty, _, _) => {
                     *ty = self.remap_type(*ty, &remap);
                 }
@@ -78,9 +75,11 @@ impl Pass for RemoveUnusedTypes {
             }
         }
 
-        for global in &mut module.globals {
+        for (_, global) in &mut module.globals {
             global.type_ = self.remap_type(global.type_, &remap);
-            updater_visit_init(&mut global.init, &remap, self);
+            if let crate::ir::module::GlobalKind::Local { ref mut init } = global.kind {
+                updater_visit_init(init, &remap, self);
+            }
         }
     }
 }

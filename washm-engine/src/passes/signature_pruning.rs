@@ -24,9 +24,9 @@ impl Pass for SignaturePruning {
             .count();
 
         for export in &module.exports {
-            if let crate::ir::module::ExportKind::Function = export.kind {
-                if export.index >= func_import_count as u32 {
-                    let defined_idx = (export.index as usize) - func_import_count;
+            if let crate::ir::module::ExportKind::Function(idx) = export.kind {
+                if idx >= func_import_count as u32 {
+                    let defined_idx = (idx as usize) - func_import_count;
                     if let Some(f) = module.functions.get(defined_idx) {
                         exported_names.insert(f.name.clone());
                     }

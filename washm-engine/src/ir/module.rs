@@ -1,7 +1,20 @@
+use crate::collections::id_arena::{Id, IdArena};
 use crate::ir::annotation::AnnotationStore;
 use crate::ir::expression::ExprRef;
 use crate::ir::wasm_features::FeatureSet;
 use crate::ir::Type;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct GlobalMarker;
+pub type GlobalId = Id<GlobalMarker>;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct FuncMarker;
+pub type FuncId = Id<FuncMarker>;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct LocalMarker;
+pub type LocalId = Id<LocalMarker>;
 
 #[derive(Debug)]
 pub struct Function<'a> {
@@ -82,22 +95,48 @@ pub struct Global<'a> {
     pub name: String,
     pub type_: Type,
     pub mutable: bool,
-    pub init: ExprRef<'a>, // Initialization expression (must be constant)
+    pub kind: GlobalKind<'a>,
+}
+
+#[derive(Debug)]
+pub enum GlobalKind<'a> {
+    Import { module: String, field: String },
+    Local { init: ExprRef<'a> },
+}
+
+impl<'a> Global<'a> {
+    pub fn is_import(&self) -> bool {
+        matches!(self.kind, GlobalKind::Import { .. })
+    }
+
+    pub fn kind_to_init(&self) -> Option<ExprRef<'a>> {
+        match self.kind {
+            GlobalKind::Local { init } => Some(init),
+            GlobalKind::Import { .. } => None,
+        }
+    }
+}
+
+impl<'a> GlobalKind<'a> {
+    pub fn set_init(&mut self, new_init: ExprRef<'a>) {
+        if let GlobalKind::Local { init } = self {
+            *init = new_init;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Export {
     pub name: String,
     pub kind: ExportKind,
-    pub index: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportKind {
-    Function = 0,
-    Table = 1,
-    Memory = 2,
-    Global = 3,
+    Function(u32),
+    Table(u32),
+    Memory(u32),
+    Global(GlobalId),
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +157,6 @@ pub enum ImportKind {
     Function(Type, Type),          // params, results
     Table(Type, u32, Option<u32>), // elem_type, min, max
     Memory(MemoryLimits),
-    Global(Type, bool), // type, mutable
 }
 
 #[derive(Debug)]
@@ -150,7 +188,7 @@ pub struct Module<'a> {
     pub imports: Vec<Import>,
     pub functions: Vec<Function<'a>>,
     pub table: Option<TableLimits>, // Table section (MVP: single table)
-    pub globals: Vec<Global<'a>>,
+    pub globals: IdArena<Global<'a>>,
     pub memory: Option<MemoryLimits>,
     pub start: Option<u32>, // Start function index
     pub exports: Vec<Export>,
@@ -169,7 +207,7 @@ impl<'a> Module<'a> {
             imports: Vec::new(),
             functions: Vec::new(),
             table: None,
-            globals: Vec::new(),
+            globals: IdArena::new(),
             memory: None,
             start: None,
             exports: Vec::new(),
@@ -204,24 +242,28 @@ impl<'a> Module<'a> {
         self.memory = Some(MemoryLimits { initial, maximum });
     }
 
-    pub fn add_export(&mut self, name: String, kind: ExportKind, index: u32) {
-        self.exports.push(Export { name, kind, index });
+    pub fn add_export(&mut self, name: String, kind: ExportKind) {
+        self.exports.push(Export { name, kind });
     }
 
     pub fn export_function(&mut self, func_index: u32, export_name: String) {
-        self.add_export(export_name, ExportKind::Function, func_index);
+        self.add_export(export_name, ExportKind::Function(func_index));
     }
 
-    pub fn add_global(&mut self, global: Global<'a>) {
-        self.globals.push(global);
+    pub fn add_global(&mut self, global: Global<'a>) -> GlobalId {
+        self.globals.alloc(global).cast()
     }
 
-    pub fn get_global(&self, name: &str) -> Option<&Global<'a>> {
-        self.globals.iter().find(|g| g.name == name)
+    pub fn get_global(&self, id: GlobalId) -> Option<&Global<'a>> {
+        self.globals.get(id.cast())
     }
 
-    pub fn export_global(&mut self, global_index: u32, export_name: String) {
-        self.add_export(export_name, ExportKind::Global, global_index);
+    pub fn get_global_by_name(&self, name: &str) -> Option<(GlobalId, &Global<'a>)> {
+        self.globals.iter().find(|(_, g)| g.name == name).map(|(id, g)| (id.cast(), g))
+    }
+
+    pub fn export_global(&mut self, id: GlobalId, export_name: String) {
+        self.add_export(export_name, ExportKind::Global(id));
     }
 
     pub fn add_data_segment(&mut self, segment: DataSegment<'a>) {

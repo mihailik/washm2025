@@ -313,7 +313,7 @@ fn are_pointers_equal(ptr1: &Expression, ptr2: &Expression) -> bool {
         }
 
         // Same global
-        (ExpressionKind::GlobalGet { index: n1 }, ExpressionKind::GlobalGet { index: n2 }) => {
+        (ExpressionKind::GlobalGet { id: n1 }, ExpressionKind::GlobalGet { id: n2 }) => {
             n1 == n2
         }
 
@@ -351,8 +351,8 @@ fn are_local_sets_redundant(set1: &Expression, set2: &Expression) -> bool {
 }
 
 fn are_global_sets_redundant(set1: &Expression, set2: &Expression) -> bool {
-    if let ExpressionKind::GlobalSet { index: idx1, .. } = &set1.kind {
-        if let ExpressionKind::GlobalSet { index: idx2, .. } = &set2.kind {
+    if let ExpressionKind::GlobalSet { id: idx1, .. } = &set1.kind {
+        if let ExpressionKind::GlobalSet { id: idx2, .. } = &set2.kind {
             return idx1 == idx2;
         }
     }
@@ -1072,6 +1072,7 @@ mod tests {
     #[test]
     fn test_global_set_elimination() {
         let bump = Bump::new();
+        let g0_id = unsafe { std::mem::transmute(0u64) };
 
         // global.set(0, 10)
         // global.set(0, 20)  // redundant
@@ -1081,7 +1082,7 @@ mod tests {
         }));
         let set1 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::GlobalSet {
-                index: 0,
+                id: g0_id,
                 value: val1,
             },
             type_: Type::NONE,
@@ -1093,7 +1094,7 @@ mod tests {
         }));
         let set2 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::GlobalSet {
-                index: 0,
+                id: g0_id,
                 value: val2,
             },
             type_: Type::NONE,

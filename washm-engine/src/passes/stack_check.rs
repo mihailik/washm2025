@@ -14,38 +14,25 @@ impl Pass for StackCheck {
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         // Find __stack_pointer and __stack_limit globals
-        let mut sp_index = None;
-        let mut limit_index = None;
+        let mut sp_id = None;
+        let mut limit_id = None;
 
-        let mut index: u32 = 0;
-        for import in &module.imports {
-            if let ImportKind::Global(_, _) = import.kind {
-                if import.name == "__stack_pointer" {
-                    sp_index = Some(index);
-                } else if import.name == "__stack_limit" {
-                    limit_index = Some(index);
-                }
-                index += 1;
-            }
-        }
-
-        for global in &module.globals {
+        for (id, global) in module.globals.iter() {
             if global.name == "__stack_pointer" {
-                sp_index = Some(index);
+                sp_id = Some(id);
             } else if global.name == "__stack_limit" {
-                limit_index = Some(index);
+                limit_id = Some(id);
             }
-            index += 1;
         }
 
-        if let (Some(sp), Some(limit)) = (sp_index, limit_index) {
+        if let (Some(sp), Some(limit)) = (sp_id, limit_id) {
             for func in &mut module.functions {
                 if let Some(body) = func.body {
                     let builder = IrBuilder::new(module.allocator);
 
                     // Create check: if (sp < limit) unreachable
-                    let sp_get = builder.global_get(sp, Type::I32);
-                    let limit_get = builder.global_get(limit, Type::I32);
+                    let sp_get = builder.global_get(sp.cast(), Type::I32);
+                    let limit_get = builder.global_get(limit.cast(), Type::I32);
                     // Assuming stack grows down, check if SP < Limit (overflow)
                     // Using LtU32 for unsigned comparison of addresses
                     let condition =
@@ -98,15 +85,19 @@ mod tests {
             name: "__stack_pointer".to_string(),
             type_: Type::I32,
             mutable: true,
-            init: Expression::const_expr(&allocator, Literal::I32(1000), Type::I32),
+            kind: crate::ir::module::GlobalKind::Local {
+                init: Expression::const_expr(&allocator, Literal::I32(1000), Type::I32),
+            },
         };
-        module.add_global(sp_global);
+        let sp_id = module.add_global(sp_global);
 
         let limit_global = Global {
             name: "__stack_limit".to_string(),
             type_: Type::I32,
             mutable: false,
-            init: Expression::const_expr(&allocator, Literal::I32(100), Type::I32),
+            kind: crate::ir::module::GlobalKind::Local {
+                init: Expression::const_expr(&allocator, Literal::I32(100), Type::I32),
+            },
         };
         module.add_global(limit_global);
 
@@ -143,8 +134,8 @@ mod tests {
             {
                 if let ExpressionKind::Binary { op, left, .. } = &condition.kind {
                     assert!(matches!(op, BinaryOp::LtUInt32));
-                    if let ExpressionKind::GlobalGet { index } = left.kind {
-                        assert_eq!(index, 0); // SP is first global (index 0 if no imports)
+                    if let ExpressionKind::GlobalGet { id } = left.kind {
+                        assert_eq!(id, sp_id); // SP is first global
                     } else {
                         panic!("Expected GlobalGet for SP");
                     }

@@ -26,8 +26,8 @@ impl SimplifyGlobals {
         let mut changed = false;
 
         // 0. Mark immutable in practice
-        for (idx, global) in module.globals.iter_mut().enumerate() {
-            let info = &infos[&idx];
+        for (id, global) in module.globals.iter_mut() {
+            let info = &infos[&id.cast()];
             if global.mutable && !info.exported && info.written == 0 {
                 global.mutable = false;
                 changed = true;
@@ -56,7 +56,7 @@ impl SimplifyGlobals {
     fn fold_single_uses<'a>(
         &self,
         module: &mut Module<'a>,
-        infos: &HashMap<usize, GlobalInfo>,
+        infos: &HashMap<crate::ir::GlobalId, GlobalInfo>,
     ) -> bool {
         let mut folder = SingleUseFolder {
             globals: &module.globals,
@@ -76,20 +76,20 @@ impl SimplifyGlobals {
     fn remove_unneeded_writes<'a>(
         &self,
         module: &Module<'a>,
-        infos: &HashMap<usize, GlobalInfo>,
-    ) -> (bool, HashSet<usize>) {
+        infos: &HashMap<crate::ir::GlobalId, GlobalInfo>,
+    ) -> (bool, HashSet<crate::ir::GlobalId>) {
         let mut to_remove_sets = HashSet::new();
         let mut progress = false;
 
-        for (idx, global) in module.globals.iter().enumerate() {
-            let info = &infos[&idx];
+        for (id, global) in module.globals.iter() {
+            let info = &infos[&id.cast()];
             // If it's only written in read_only_to_write patterns and never read otherwise
             if global.mutable
                 && !info.exported
                 && info.read == info.read_only_to_write
                 && info.read > 0
             {
-                to_remove_sets.insert(idx);
+                to_remove_sets.insert(id.cast());
                 progress = true;
             }
         }
@@ -97,7 +97,7 @@ impl SimplifyGlobals {
         (progress, to_remove_sets)
     }
 
-    fn apply_set_removal<'a>(&self, module: &mut Module<'a>, to_remove: HashSet<usize>) {
+    fn apply_set_removal<'a>(&self, module: &mut Module<'a>, to_remove: HashSet<crate::ir::GlobalId>) {
         let mut remover = GlobalSetRemover {
             to_remove,
             builder: IrBuilder::new(module.allocator),
@@ -112,10 +112,12 @@ impl SimplifyGlobals {
 
     fn propagate_constants_to_globals<'a>(&self, module: &mut Module<'a>) -> bool {
         let mut constants = HashMap::new();
-        for (idx, global) in module.globals.iter().enumerate() {
+        for (id, global) in module.globals.iter() {
             if !global.mutable {
-                if let ExpressionKind::Const(lit) = &global.init.kind {
-                    constants.insert(idx, lit.clone());
+                if let Some(init) = global.kind_to_init() {
+                    if let ExpressionKind::Const(lit) = &init.kind {
+                        constants.insert(id.cast(), lit.clone());
+                    }
                 }
             }
         }
@@ -125,17 +127,20 @@ impl SimplifyGlobals {
 
         let mut changed = false;
         let builder = IrBuilder::new(module.allocator);
-        for i in 0..module.globals.len() {
+        let ids: Vec<_> = module.globals.iter().map(|(id, _)| id).collect();
+        for id in ids {
             let mut applier = GlobalConstantApplier {
                 constants: &constants,
                 builder: &builder,
                 changed: false,
             };
-            let mut init = module.globals[i].init;
-            applier.visit(&mut init);
-            module.globals[i].init = init;
-            if applier.changed {
-                changed = true;
+            if let Some(mut init) = module.globals[id].kind_to_init() {
+                applier.visit(&mut init);
+                // Re-wrap init back into GlobalKind
+                module.globals[id].kind.set_init(init);
+                if applier.changed {
+                    changed = true;
+                }
             }
         }
         changed
@@ -143,10 +148,12 @@ impl SimplifyGlobals {
 
     fn propagate_constants_to_code<'a>(&self, module: &mut Module<'a>) -> bool {
         let mut constant_globals = HashSet::new();
-        for (idx, global) in module.globals.iter().enumerate() {
+        for (id, global) in module.globals.iter() {
             if !global.mutable {
-                if let ExpressionKind::Const(_) = &global.init.kind {
-                    constant_globals.insert(idx);
+                if let Some(init) = global.kind_to_init() {
+                    if let ExpressionKind::Const(_) = &init.kind {
+                        constant_globals.insert(id.cast());
+                    }
                 }
             }
         }
@@ -206,18 +213,18 @@ struct GlobalInfo {
 
 struct GlobalUsageTracker<'a> {
     module: &'a Module<'a>,
-    infos: HashMap<usize, GlobalInfo>,
+    infos: HashMap<crate::ir::GlobalId, GlobalInfo>,
 }
 
 impl<'a> GlobalUsageTracker<'a> {
     fn new(module: &'a Module<'a>) -> Self {
         let mut infos = HashMap::new();
-        for (idx, _) in module.globals.iter().enumerate() {
-            infos.insert(idx, GlobalInfo::default());
+        for (id, _) in module.globals.iter() {
+            infos.insert(id.cast(), GlobalInfo::default());
         }
         for export in &module.exports {
-            if export.kind == ExportKind::Global {
-                if let Some(info) = infos.get_mut(&(export.index as usize)) {
+            if let ExportKind::Global(id) = export.kind {
+                if let Some(info) = infos.get_mut(&id) {
                     info.exported = true;
                 }
             }
@@ -231,21 +238,22 @@ impl<'a> GlobalUsageTracker<'a> {
                 self.visit_usage(body);
             }
         }
-        for global in &self.module.globals {
-            self.visit_usage(global.init);
+        for (_, global) in &self.module.globals {
+            if let Some(init) = global.kind_to_init() {
+                self.visit_usage(init);
+            }
         }
     }
 
     fn visit_usage(&mut self, expr: ExprRef<'a>) {
         match &expr.kind {
-            ExpressionKind::GlobalGet { index } => {
-                if let Some(info) = self.infos.get_mut(&(*index as usize)) {
+            ExpressionKind::GlobalGet { id } => {
+                if let Some(info) = self.infos.get_mut(id) {
                     info.read += 1;
                 }
             }
-            ExpressionKind::GlobalSet { index, value } => {
-                let idx = *index as usize;
-                if let Some(info) = self.infos.get_mut(&idx) {
+            ExpressionKind::GlobalSet { id, value } => {
+                if let Some(info) = self.infos.get_mut(id) {
                     info.written += 1;
                 }
                 self.visit_usage(*value);
@@ -275,26 +283,26 @@ impl<'a> GlobalUsageTracker<'a> {
         }
     }
 
-    fn is_read_only_to_write(&self, condition: ExprRef<'a>, code: ExprRef<'a>) -> Option<usize> {
-        if let ExpressionKind::GlobalSet { index, value } = &code.kind {
+    fn is_read_only_to_write(&self, condition: ExprRef<'a>, code: ExprRef<'a>) -> Option<crate::ir::GlobalId> {
+        if let ExpressionKind::GlobalSet { id, value } = &code.kind {
             if let ExpressionKind::Const(_) = &value.kind {
-                if self.expression_reads_global(condition, *index as usize) {
-                    return Some(*index as usize);
+                if self.expression_reads_global(condition, *id) {
+                    return Some(*id);
                 }
             }
         }
         None
     }
 
-    fn expression_reads_global(&self, expr: ExprRef<'a>, target_idx: usize) -> bool {
-        if let ExpressionKind::GlobalGet { index } = &expr.kind {
-            if *index as usize == target_idx {
+    fn expression_reads_global(&self, expr: ExprRef<'a>, target_id: crate::ir::GlobalId) -> bool {
+        if let ExpressionKind::GlobalGet { id } = &expr.kind {
+            if *id == target_id {
                 return true;
             }
         }
         let mut reads = false;
         expr.kind.for_each_child(|child| {
-            if self.expression_reads_global(child, target_idx) {
+            if self.expression_reads_global(child, target_id) {
                 reads = true;
             }
         });
@@ -303,23 +311,24 @@ impl<'a> GlobalUsageTracker<'a> {
 }
 
 struct SingleUseFolder<'a, 'b, 'c> {
-    globals: &'b [crate::ir::module::Global<'a>],
-    infos: &'c HashMap<usize, GlobalInfo>,
+    globals: &'b crate::collections::id_arena::IdArena<crate::ir::module::Global<'a>>,
+    infos: &'c HashMap<crate::ir::GlobalId, GlobalInfo>,
     changed: bool,
     allocator: &'a bumpalo::Bump,
 }
 
 impl<'a, 'b, 'c> Visitor<'a> for SingleUseFolder<'a, 'b, 'c> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if let ExpressionKind::GlobalGet { index } = &expr.kind {
-            let idx = *index as usize;
-            if let Some(info) = self.infos.get(&idx) {
+        if let ExpressionKind::GlobalGet { id } = &expr.kind {
+            if let Some(info) = self.infos.get(id) {
                 if info.written == 0 && info.read == 1 && !info.exported {
-                    let global = &self.globals[idx];
-                    if let ExpressionKind::Const(lit) = &global.init.kind {
-                        *expr = IrBuilder::new(self.allocator).const_(lit.clone());
-                        self.changed = true;
-                        return;
+                    let global = &self.globals[id.cast()];
+                    if !global.is_import() {
+                        if let ExpressionKind::Const(lit) = &global.kind_to_init().unwrap().kind {
+                            *expr = IrBuilder::new(self.allocator).const_(lit.clone());
+                            self.changed = true;
+                            return;
+                        }
                     }
                 }
             }
@@ -329,14 +338,14 @@ impl<'a, 'b, 'c> Visitor<'a> for SingleUseFolder<'a, 'b, 'c> {
 }
 
 struct GlobalSetRemover<'a> {
-    to_remove: HashSet<usize>,
+    to_remove: HashSet<crate::ir::GlobalId>,
     builder: IrBuilder<'a>,
 }
 
 impl<'a> Visitor<'a> for GlobalSetRemover<'a> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if let ExpressionKind::GlobalSet { index, value } = &expr.kind {
-            if self.to_remove.contains(&(*index as usize)) {
+        if let ExpressionKind::GlobalSet { id, value } = &expr.kind {
+            if self.to_remove.contains(id) {
                 *expr = self.builder.drop(*value);
             }
         }
@@ -345,15 +354,15 @@ impl<'a> Visitor<'a> for GlobalSetRemover<'a> {
 }
 
 struct GlobalConstantApplier<'a, 'b> {
-    constants: &'b HashMap<usize, Literal>,
+    constants: &'b HashMap<crate::ir::GlobalId, Literal>,
     builder: &'b IrBuilder<'a>,
     changed: bool,
 }
 
 impl<'a, 'b> Visitor<'a> for GlobalConstantApplier<'a, 'b> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if let ExpressionKind::GlobalGet { index } = &expr.kind {
-            if let Some(lit) = self.constants.get(&(*index as usize)) {
+        if let ExpressionKind::GlobalGet { id } = &expr.kind {
+            if let Some(lit) = self.constants.get(id) {
                 *expr = self.builder.const_(lit.clone());
                 self.changed = true;
             }
@@ -363,9 +372,9 @@ impl<'a, 'b> Visitor<'a> for GlobalConstantApplier<'a, 'b> {
 }
 
 struct ConstantCodeApplier<'a, 'b, 'c> {
-    globals: &'b [crate::ir::module::Global<'a>],
-    constant_globals: &'c HashSet<usize>,
-    curr_constants: HashMap<usize, Literal>,
+    globals: &'b crate::collections::id_arena::IdArena<crate::ir::module::Global<'a>>,
+    constant_globals: &'c HashSet<crate::ir::GlobalId>,
+    curr_constants: HashMap<crate::ir::GlobalId, Literal>,
     builder: IrBuilder<'a>,
     replaced: bool,
 }
@@ -374,36 +383,37 @@ impl<'a, 'b, 'c> Visitor<'a> for ConstantCodeApplier<'a, 'b, 'c> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
         // Handle GlobalSet for linear trace
         let mut set_idx = None;
-        if let ExpressionKind::GlobalSet { index, .. } = &expr.kind {
-            set_idx = Some(*index as usize);
+        if let ExpressionKind::GlobalSet { id, .. } = &expr.kind {
+            set_idx = Some(*id);
         }
 
-        if let Some(idx) = set_idx {
+        if let Some(id) = set_idx {
             self.visit_children(expr);
             if let ExpressionKind::GlobalSet { value, .. } = &expr.kind {
                 if let ExpressionKind::Const(lit) = &value.kind {
-                    self.curr_constants.insert(idx, lit.clone());
+                    self.curr_constants.insert(id, lit.clone());
                 } else {
-                    self.curr_constants.remove(&idx);
+                    self.curr_constants.remove(&id);
                 }
             }
             return;
         }
 
         // Handle GlobalGet
-        if let ExpressionKind::GlobalGet { index } = &expr.kind {
-            let idx = *index as usize;
+        if let ExpressionKind::GlobalGet { id } = &expr.kind {
             // 1. Check if it's a constant global
-            if self.constant_globals.contains(&idx) {
-                let global = &self.globals[idx];
-                if let ExpressionKind::Const(lit) = &global.init.kind {
-                    *expr = self.builder.const_(lit.clone());
-                    self.replaced = true;
-                    return;
+            if self.constant_globals.contains(id) {
+                let global = &self.globals[id.cast()];
+                if !global.is_import() {
+                    if let ExpressionKind::Const(lit) = &global.kind_to_init().unwrap().kind {
+                        *expr = self.builder.const_(lit.clone());
+                        self.replaced = true;
+                        return;
+                    }
                 }
             }
             // 2. Check linear trace
-            if let Some(lit) = self.curr_constants.get(&idx) {
+            if let Some(lit) = self.curr_constants.get(id) {
                 *expr = self.builder.const_(lit.clone());
                 self.replaced = true;
                 return;
@@ -435,13 +445,15 @@ mod tests {
     fn test_propagate_constant_global() {
         let bump = Bump::new();
         let (mut module, builder) = setup_module(&bump);
-        module.globals.push(Global {
+        let g0 = module.add_global(Global {
             name: "g0".to_string(),
             type_: Type::I32,
             mutable: false,
-            init: builder.const_(Literal::I32(42)),
+            kind: crate::ir::module::GlobalKind::Local {
+                init: builder.const_(Literal::I32(42)),
+            },
         });
-        let body = builder.global_get(0, Type::I32);
+        let body = builder.global_get(g0, Type::I32);
         module.functions.push(Function::new(
             "test".to_string(),
             Type::NONE,
@@ -461,14 +473,16 @@ mod tests {
     fn test_linear_trace_propagation() {
         let bump = Bump::new();
         let (mut module, builder) = setup_module(&bump);
-        module.globals.push(Global {
+        let g0 = module.add_global(Global {
             name: "g0".to_string(),
             type_: Type::I32,
             mutable: true,
-            init: builder.const_(Literal::I32(0)),
+            kind: crate::ir::module::GlobalKind::Local {
+                init: builder.const_(Literal::I32(0)),
+            },
         });
-        let set = builder.global_set(0, builder.const_(Literal::I32(100)));
-        let get = builder.global_get(0, Type::I32);
+        let set = builder.global_set(g0, builder.const_(Literal::I32(100)));
+        let get = builder.global_get(g0, Type::I32);
         let ret = builder.return_(Some(get));
 
         let mut list = bumpalo::collections::Vec::new_in(&bump);
@@ -500,21 +514,23 @@ mod tests {
         let bump = Bump::new();
         let (mut module, builder) = setup_module(&bump);
         // Mutable global, initially 0
-        module.globals.push(Global {
+        let g0 = module.add_global(Global {
             name: "g0".to_string(),
             type_: Type::I32,
             mutable: true,
-            init: builder.const_(Literal::I32(0)),
+            kind: crate::ir::module::GlobalKind::Local {
+                init: builder.const_(Literal::I32(0)),
+            },
         });
 
         // if (g0 == 0) g0 = 1;
         let cond = builder.binary(
             crate::ir::ops::BinaryOp::EqInt32,
-            builder.global_get(0, Type::I32),
+            builder.global_get(g0, Type::I32),
             builder.const_(Literal::I32(0)),
             Type::I32,
         );
-        let set = builder.global_set(0, builder.const_(Literal::I32(1)));
+        let set = builder.global_set(g0, builder.const_(Literal::I32(1)));
         let if_ = builder.if_(cond, set, None, Type::NONE);
 
         module.functions.push(Function::new(

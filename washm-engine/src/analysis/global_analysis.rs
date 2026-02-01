@@ -1,10 +1,9 @@
 use crate::analysis::call_graph::CallGraph;
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::Module;
-use crate::ir::Literal;
+use crate::ir::{Literal, GlobalId};
 use std::collections::{HashMap, HashSet};
 
-pub type GlobalId = usize;
 pub type FunctionId = usize;
 
 pub struct GlobalAnalysis {
@@ -65,18 +64,19 @@ impl GlobalAnalysis {
         }
 
         // Visit global initializers
-        for global in &module.globals {
-            self.visit_usage(module, global.init);
+        for (_, global) in module.globals.iter() {
+            if let crate::ir::module::GlobalKind::Local { init } = &global.kind {
+                self.visit_usage(module, *init);
+            }
         }
 
         // Mark exports as read/written
         for export in &module.exports {
-            if export.kind == crate::ir::module::ExportKind::Global {
-                let idx = export.index as usize;
-                self.read_globals.insert(idx);
-                self.written_globals.insert(idx);
-                *self.write_counts.entry(idx).or_insert(0) += 1;
-                *self.read_counts.entry(idx).or_insert(0) += 1;
+            if let crate::ir::module::ExportKind::Global(id) = export.kind {
+                self.read_globals.insert(id);
+                self.written_globals.insert(id);
+                *self.write_counts.entry(id).or_insert(0) += 1;
+                *self.read_counts.entry(id).or_insert(0) += 1;
             }
         }
     }
@@ -87,36 +87,43 @@ impl GlobalAnalysis {
         while changed {
             changed = false;
 
-            for (id, global) in module.globals.iter().enumerate() {
-                if self.constant_globals.contains(&id) && self.global_values.contains_key(&id) {
+            for (id, global) in module.globals.iter() {
+                let gid = id.cast();
+                if self.constant_globals.contains(&gid) && self.global_values.contains_key(&gid) {
                     continue;
                 }
 
                 let mut is_effectively_constant = false;
                 if !global.mutable {
                     is_effectively_constant = true;
-                } else if !self.written_globals.contains(&id)
-                    || !self.non_init_written.contains(&id)
+                } else if !self.written_globals.contains(&gid)
+                    || !self.non_init_written.contains(&gid)
                 {
                     is_effectively_constant = true;
                 }
 
                 if is_effectively_constant {
-                    self.constant_globals.insert(id);
+                    self.constant_globals.insert(gid);
 
                     // Try to resolve the value
-                    if let ExpressionKind::Const(value) = &global.init.kind {
-                        if !self.global_values.contains_key(&id) {
-                            self.global_values.insert(id, value.clone());
-                            changed = true;
-                        }
-                    } else if let ExpressionKind::GlobalGet { index } = &global.init.kind {
-                        if let Some(value) = self.global_values.get(&(*index as usize)) {
-                            let val = value.clone();
-                            if !self.global_values.get(&id).map_or(false, |v| v == &val) {
-                                self.global_values.insert(id, val);
+                    if let crate::ir::module::GlobalKind::Local { init } = &global.kind {
+                        if let ExpressionKind::Const(value) = &init.kind {
+                            if !self.global_values.contains_key(&gid) {
+                                self.global_values.insert(gid, value.clone());
                                 changed = true;
                             }
+                        } else if let ExpressionKind::GlobalGet { id: other_id } = &init.kind {
+                            if let Some(value) = self.global_values.get(other_id) {
+                                let val = value.clone();
+                                if !self.global_values.get(&gid).map_or(false, |v| v == &val) {
+                                    self.global_values.insert(gid, val);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    } else if let crate::ir::module::GlobalKind::Import { .. } = &global.kind {
+                        if !global.mutable {
+                            self.constant_globals.insert(gid);
                         }
                     }
                 }
@@ -126,31 +133,33 @@ impl GlobalAnalysis {
 
     fn visit_usage(&mut self, module: &Module, expr: ExprRef) {
         match &expr.kind {
-            ExpressionKind::GlobalGet { index } => {
-                let idx = *index as usize;
-                self.read_globals.insert(idx);
-                *self.read_counts.entry(idx).or_insert(0) += 1;
+            ExpressionKind::GlobalGet { id } => {
+                let id = *id;
+                self.read_globals.insert(id);
+                *self.read_counts.entry(id).or_insert(0) += 1;
             }
-            ExpressionKind::GlobalSet { index, value } => {
-                let idx = *index as usize;
-                self.written_globals.insert(idx);
-                *self.write_counts.entry(idx).or_insert(0) += 1;
+            ExpressionKind::GlobalSet { id, value } => {
+                let id = *id;
+                self.written_globals.insert(id);
+                *self.write_counts.entry(id).or_insert(0) += 1;
 
                 // Check if we are writing a value different from the initializer
                 if let ExpressionKind::Const(lit) = &value.kind {
-                    if let Some(global) = module.globals.get(idx) {
-                        if let ExpressionKind::Const(init_lit) = &global.init.kind {
-                            if lit != init_lit {
-                                self.non_init_written.insert(idx);
+                    if let Some(global) = module.globals.get(id.cast()) {
+                        if let crate::ir::module::GlobalKind::Local { init } = &global.kind {
+                            if let ExpressionKind::Const(init_lit) = &init.kind {
+                                if lit != init_lit {
+                                    self.non_init_written.insert(id);
+                                }
+                            } else {
+                                // Non-const initializer, any write is non-init (effectively)
+                                self.non_init_written.insert(id);
                             }
-                        } else {
-                            // Non-const initializer, any write is non-init (effectively)
-                            self.non_init_written.insert(idx);
                         }
                     }
                 } else {
                     // Non-const value being set
-                    self.non_init_written.insert(idx);
+                    self.non_init_written.insert(id);
                 }
 
                 self.visit_usage(module, *value);
@@ -238,8 +247,8 @@ impl GlobalAnalysis {
 
         // 1. Exports
         for export in &module.exports {
-            if export.kind == crate::ir::module::ExportKind::Function {
-                roots.insert(export.index as usize);
+            if let crate::ir::module::ExportKind::Function(idx) = export.kind {
+                roots.insert(idx as usize);
             }
         }
 

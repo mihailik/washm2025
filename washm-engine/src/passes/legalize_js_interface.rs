@@ -1,5 +1,5 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
-use crate::ir::module::{ExportKind, Function, Global, Module};
+use crate::ir::module::{ExportKind, Function, Global, GlobalId, GlobalKind, Module};
 use crate::ir::ops::{BinaryOp, UnaryOp};
 use crate::ir::{Literal, Type};
 use crate::passes::Pass;
@@ -32,8 +32,8 @@ impl Pass for LegalizeJSInterface {
         let mut tasks = Vec::new();
 
         for (i, export) in module.exports.iter().enumerate() {
-            if export.kind == ExportKind::Function {
-                if let Some(func) = module.functions.get(export.index as usize) {
+            if let ExportKind::Function(func_index) = export.kind {
+                if let Some(func) = module.functions.get(func_index as usize) {
                     let has_i64_param = func.params == Type::I64; // Simple check for now
                     let has_i64_result = func.results == Type::I64;
 
@@ -43,7 +43,7 @@ impl Pass for LegalizeJSInterface {
                         }
                         tasks.push(ExportTask {
                             export_index: i,
-                            func_index: export.index,
+                            func_index,
                             _name: export.name.clone(),
                             has_i64_param,
                             has_i64_result,
@@ -58,29 +58,25 @@ impl Pass for LegalizeJSInterface {
         }
 
         // 2. Add tempRet0 global if needed
-        let mut temp_ret0_index = None;
+        let mut temp_ret0_id = None;
         if needs_temp_ret0 {
             // Check if it already exists
-            if let Some((idx, _)) = module
-                .globals
-                .iter()
-                .enumerate()
-                .find(|(_, g)| g.name == "tempRet0")
-            {
-                temp_ret0_index = Some(idx as u32);
+            if let Some((id, _)) = module.get_global_by_name("tempRet0") {
+                temp_ret0_id = Some(id);
             } else {
-                let idx = module.globals.len() as u32;
                 let init = module.allocator.alloc(Expression {
                     type_: Type::I32,
                     kind: ExpressionKind::Const(Literal::I32(0)),
                 });
-                module.add_global(Global {
+                let id = module.add_global(Global {
                     name: "tempRet0".to_string(),
                     type_: Type::I32,
                     mutable: true,
-                    init: ExprRef::new(init),
+                    kind: GlobalKind::Local {
+                        init: ExprRef::new(init),
+                    },
                 });
-                temp_ret0_index = Some(idx);
+                temp_ret0_id = Some(id);
             }
         }
 
@@ -191,7 +187,7 @@ impl Pass for LegalizeJSInterface {
                 let set_global = allocator.alloc(Expression {
                     type_: Type::NONE,
                     kind: ExpressionKind::GlobalSet {
-                        index: temp_ret0_index.unwrap(),
+                        id: temp_ret0_id.unwrap(),
                         value: ExprRef::new(wrap_high),
                     },
                 });
@@ -248,7 +244,7 @@ impl Pass for LegalizeJSInterface {
 
             // Update the export to point to this new function
             let task = &tasks[i];
-            module.exports[task.export_index].index = new_idx;
+            module.exports[task.export_index].kind = ExportKind::Function(new_idx);
         }
     }
 }
@@ -289,13 +285,18 @@ mod tests {
         // Verify:
         // 1. Export should point to a new function
         let export = &module.exports[0];
-        assert_ne!(export.index, 0);
+        let wrapper_idx = match export.kind {
+            ExportKind::Function(idx) => idx,
+            _ => panic!("Expected function export"),
+        };
+        assert_ne!(wrapper_idx, 0);
 
         // 2. New function should return i32
-        let wrapper = &module.functions[export.index as usize];
+        let wrapper = &module.functions[wrapper_idx as usize];
         assert_eq!(wrapper.results, Type::I32);
 
         // 3. global tempRet0 should exist
-        assert!(module.get_global("tempRet0").is_some());
+        let g_id = module.globals.ids().find(|id| module.globals[*id].name == "tempRet0").expect("tempRet0 global not found");
+        assert!(module.get_global(g_id.cast()).is_some());
     }
 }

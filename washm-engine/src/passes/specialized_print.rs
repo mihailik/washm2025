@@ -1,5 +1,5 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{ExportKind, Module};
+use crate::ir::module::{ExportKind, ImportKind, Module};
 use crate::ir::visitor::ReadOnlyVisitor;
 use crate::passes::Pass;
 use std::collections::HashSet;
@@ -62,10 +62,11 @@ impl Pass for PrintFunctionMap {
         for (i, func) in module.functions.iter().enumerate() {
             let mut exports = Vec::new();
             for export in &module.exports {
-                if export.kind == ExportKind::Function
-                    && export.index == (module.imports.len() + i) as u32
-                {
-                    exports.push(&export.name);
+                if let ExportKind::Function(index) = export.kind {
+                    let num_func_imports = module.imports.iter().filter(|i| matches!(i.kind, crate::ir::module::ImportKind::Function(_, _))).count();
+                    if index == (num_func_imports + i) as u32 {
+                        exports.push(&export.name);
+                    }
                 }
             }
 

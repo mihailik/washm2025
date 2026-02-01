@@ -1,6 +1,6 @@
 use crate::analysis::usage::UsageTracker;
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{ExportKind, ImportKind, Module};
+use crate::ir::module::{ExportKind, GlobalKind, ImportKind, Module};
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
 use crate::passes::Pass;
@@ -28,11 +28,6 @@ impl Pass for RemoveUnusedModuleElements {
 
         let old_imports = std::mem::take(&mut module.imports);
 
-        // Track indices for remapping
-        let mut global_remap = HashMap::new();
-        let mut current_global_idx = 0;
-        let mut next_global_idx = 0;
-
         for import in old_imports {
             match import.kind {
                 ImportKind::Function(_, _) => {
@@ -42,14 +37,6 @@ impl Pass for RemoveUnusedModuleElements {
                         new_imports.push(import);
                     }
                     current_func_idx += 1;
-                }
-                ImportKind::Global(_, _) => {
-                    if tracker.globals.contains(&current_global_idx) {
-                        global_remap.insert(current_global_idx, next_global_idx);
-                        next_global_idx += 1;
-                        new_imports.push(import);
-                    }
-                    current_global_idx += 1;
                 }
                 ImportKind::Memory(..) => {
                     if tracker.memories {
@@ -74,18 +61,18 @@ impl Pass for RemoveUnusedModuleElements {
             current_func_idx += 1;
         }
         module.functions = new_functions;
-
-        // Globals (defined)
-        let old_globals = std::mem::take(&mut module.globals);
-        for global in old_globals {
-            if tracker.globals.contains(&current_global_idx) {
-                global_remap.insert(current_global_idx, next_global_idx);
-                next_global_idx += 1;
-                module.globals.push(global);
-            }
-            current_global_idx += 1;
-        }
         module.imports = new_imports;
+
+        // Globals (deallocate unused)
+        let to_remove: Vec<_> = module
+            .globals
+            .iter()
+            .filter(|(id, _)| !tracker.globals.contains(&id.cast()))
+            .map(|(id, _)| id)
+            .collect();
+        for id in to_remove {
+            module.globals.dealloc(id);
+        }
 
         // Memories & Tables
         if !tracker.memories {
@@ -148,25 +135,18 @@ impl Pass for RemoveUnusedModuleElements {
         // 2. Update references in the module
 
         // Exports
-        module.exports.retain_mut(|export| match export.kind {
-            ExportKind::Function => {
-                if let Some(&new_idx) = func_remap.get(&export.index) {
-                    export.index = new_idx;
+        module.exports.retain_mut(|export| match &mut export.kind {
+            ExportKind::Function(index) => {
+                if let Some(&new_idx) = func_remap.get(index) {
+                    *index = new_idx;
                     true
                 } else {
                     false
                 }
             }
-            ExportKind::Global => {
-                if let Some(&new_idx) = global_remap.get(&export.index) {
-                    export.index = new_idx;
-                    true
-                } else {
-                    false
-                }
-            }
-            ExportKind::Table => tracker.tables,
-            ExportKind::Memory => tracker.memories,
+            ExportKind::Global(id) => tracker.globals.contains(id),
+            ExportKind::Table(_) => tracker.tables,
+            ExportKind::Memory(_) => tracker.memories,
         });
 
         // Start
@@ -180,7 +160,6 @@ impl Pass for RemoveUnusedModuleElements {
 
         // Update all expressions in the module
         let mut updater = IndexUpdater {
-            global_remap: &global_remap,
             data_remap: &data_remap,
             elem_remap: &elem_remap,
             type_remap: &type_remap,
@@ -192,8 +171,10 @@ impl Pass for RemoveUnusedModuleElements {
             }
         }
 
-        for global in &mut module.globals {
-            updater.visit(&mut global.init);
+        for (_, global) in &mut module.globals {
+            if let GlobalKind::Local { init } = &mut global.kind {
+                updater.visit(init);
+            }
         }
 
         for elem in &mut module.elements {
@@ -215,7 +196,6 @@ impl Pass for RemoveUnusedModuleElements {
 }
 
 struct IndexUpdater<'a> {
-    global_remap: &'a HashMap<u32, u32>,
     data_remap: &'a HashMap<u32, u32>,
     elem_remap: &'a HashMap<u32, u32>,
     type_remap: &'a HashMap<u32, u32>,
@@ -229,10 +209,8 @@ impl<'a, 'b> Visitor<'b> for IndexUpdater<'a> {
         self.remap_type(&mut expr.type_);
 
         match &mut expr.kind {
-            ExpressionKind::GlobalGet { index } | ExpressionKind::GlobalSet { index, .. } => {
-                if let Some(&new_idx) = self.global_remap.get(index) {
-                    *index = new_idx;
-                }
+            ExpressionKind::GlobalGet { .. } | ExpressionKind::GlobalSet { .. } => {
+                // GlobalId is stable, no remapping needed!
             }
             ExpressionKind::MemoryInit { segment, .. } | ExpressionKind::DataDrop { segment } => {
                 if let Some(&new_idx) = self.data_remap.get(segment) {
@@ -303,7 +281,13 @@ mod tests {
         assert_eq!(module.functions[1].name, "called");
 
         // Check Export index updated
-        assert_eq!(module.exports[0].index, 0);
+        assert_eq!(
+            match module.exports[0].kind {
+                ExportKind::Function(idx) => idx,
+                _ => panic!("Expected Function export"),
+            },
+            0
+        );
     }
 
     #[test]
@@ -318,7 +302,7 @@ mod tests {
             name: "unused".to_string(),
             type_: Type::I32,
             mutable: false,
-            init: init0,
+            kind: GlobalKind::Local { init: init0 },
         };
         module.add_global(glob0);
 
@@ -328,10 +312,10 @@ mod tests {
             name: "exported".to_string(),
             type_: Type::I32,
             mutable: false,
-            init: init1,
+            kind: GlobalKind::Local { init: init1 },
         };
-        module.add_global(glob1);
-        module.export_global(1, "g".to_string());
+        let g1_id = module.add_global(glob1);
+        module.export_global(g1_id, "g".to_string());
 
         // Global 2: Used by Func 0 (which is exported)
         let init2 = builder.const_(Literal::I32(2));
@@ -339,12 +323,12 @@ mod tests {
             name: "used_by_code".to_string(),
             type_: Type::I32,
             mutable: false,
-            init: init2,
+            kind: GlobalKind::Local { init: init2 },
         };
-        module.add_global(glob2);
+        let g2_id = module.add_global(glob2);
 
         // Func using Global 2
-        let get = builder.global_get(2, Type::I32);
+        let get = builder.global_get(g2_id, Type::I32);
         let func = Function::new(
             "user".to_string(),
             Type::NONE,
@@ -360,19 +344,25 @@ mod tests {
 
         // Global 0 removed. 1 -> 0. 2 -> 1.
         assert_eq!(module.globals.len(), 2);
-        assert_eq!(module.globals[0].name, "exported");
-        assert_eq!(module.globals[1].name, "used_by_code");
+        let mut ids = module.globals.ids();
+        let g0_id = ids.next().unwrap();
+        let g1_id = ids.next().unwrap();
+        assert_eq!(module.globals[g0_id].name, "exported");
+        assert_eq!(module.globals[g1_id].name, "used_by_code");
 
         // Check Export index updated
         assert_eq!(
-            module.exports.iter().find(|e| e.name == "g").unwrap().index,
-            0
+            match module.exports.iter().find(|e| e.name == "g").unwrap().kind {
+                ExportKind::Global(id) => id,
+                _ => panic!("Expected Global export"),
+            },
+            g0_id.cast()
         );
 
         // Check Code index updated
         let body = module.functions[0].body.as_ref().unwrap();
-        if let ExpressionKind::GlobalGet { index } = &body.kind {
-            assert_eq!(*index, 1);
+        if let ExpressionKind::GlobalGet { id } = &body.kind {
+            assert_eq!(*id, g1_id.cast());
         } else {
             panic!("Expected GlobalGet");
         }
@@ -435,24 +425,31 @@ mod tests {
             kind: ImportKind::Function(Type::NONE, Type::NONE),
         });
 
-        // Import 1: Global (Unused)
-        module.add_import(crate::ir::module::Import {
-            module: "m".to_string(),
+        // Global 0 (Unused)
+        module.add_global(crate::ir::module::Global {
             name: "g_unused".to_string(),
-            kind: ImportKind::Global(Type::I32, false),
+            type_: crate::ir::Type::I32,
+            mutable: false,
+            kind: crate::ir::module::GlobalKind::Import {
+                module: "m".to_string(),
+                field: "g_unused".to_string(),
+            },
         });
 
-        // Import 2: Global (Used)
-        module.add_import(crate::ir::module::Import {
-            module: "m".to_string(),
+        // Global 1 (Used)
+        let g_used_id = module.add_global(crate::ir::module::Global {
             name: "g_used".to_string(),
-            kind: ImportKind::Global(Type::I32, false),
+            type_: crate::ir::Type::I32,
+            mutable: false,
+            kind: crate::ir::module::GlobalKind::Import {
+                module: "m".to_string(),
+                field: "g_used".to_string(),
+            },
         });
 
         // Add code that uses Function Import and Global Import
         let call = builder.call("f", BumpVec::new_in(&bump), Type::NONE, false);
-        let get = builder.global_get(1, Type::I32); // Global 1 is Import 2 (because Import 1 is removed, but we refer to old index 1)
-                                                    // Wait, current indices: Globals 0 is Import 1, Global 1 is Import 2.
+        let get = builder.global_get(g_used_id, Type::I32);
 
         let mut block_list = BumpVec::new_in(&bump);
         block_list.push(call);
@@ -473,8 +470,9 @@ mod tests {
         pass.run(&mut module);
 
         // Import 1 should be gone.
-        // new_imports: [Import 0 (f), Import 2 (g_used)]
-        assert_eq!(module.imports.len(), 2);
-        assert_eq!(module.imports[1].name, "g_used");
+        // new_imports: [Import 0 (f)]
+        // (Global imports are tracked in module.globals, not module.imports)
+        assert_eq!(module.imports.len(), 1);
+        assert_eq!(module.imports[0].name, "f");
     }
 }

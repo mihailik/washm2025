@@ -1,5 +1,5 @@
 use crate::ir::ops::{BinaryOp, UnaryOp};
-use crate::ir::{Literal, Type};
+use crate::ir::{Literal, Type, GlobalId};
 use bumpalo::collections::Vec as BumpVec;
 use bumpalo::Bump;
 use std::ops::{Deref, DerefMut};
@@ -74,10 +74,10 @@ pub enum ExpressionKind<'a> {
         value: ExprRef<'a>,
     },
     GlobalGet {
-        index: u32,
+        id: GlobalId,
     },
     GlobalSet {
-        index: u32,
+        id: GlobalId,
         value: ExprRef<'a>,
     },
     If {
@@ -824,14 +824,14 @@ impl<'a> IrBuilder<'a> {
         Expression::new(self.bump, ExpressionKind::LocalTee { index, value }, type_)
     }
 
-    pub fn global_get(&self, index: u32, type_: Type) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::GlobalGet { index }, type_)
+    pub fn global_get(&self, id: GlobalId, type_: Type) -> ExprRef<'a> {
+        Expression::new(self.bump, ExpressionKind::GlobalGet { id: id.cast() }, type_)
     }
 
-    pub fn global_set(&self, index: u32, value: ExprRef<'a>) -> ExprRef<'a> {
+    pub fn global_set(&self, id: GlobalId, value: ExprRef<'a>) -> ExprRef<'a> {
         Expression::new(
             self.bump,
-            ExpressionKind::GlobalSet { index, value },
+            ExpressionKind::GlobalSet { id: id.cast(), value },
             Type::NONE,
         )
     }
@@ -1513,9 +1513,9 @@ impl<'a> IrBuilder<'a> {
                 index: *index,
                 value: self.deep_clone(*value),
             },
-            ExpressionKind::GlobalGet { index } => ExpressionKind::GlobalGet { index: *index },
-            ExpressionKind::GlobalSet { index, value } => ExpressionKind::GlobalSet {
-                index: *index,
+            ExpressionKind::GlobalGet { id } => ExpressionKind::GlobalGet { id: *id },
+            ExpressionKind::GlobalSet { id, value } => ExpressionKind::GlobalSet {
+                id: *id,
                 value: self.deep_clone(*value),
             },
             ExpressionKind::If {

@@ -93,8 +93,8 @@ impl Pass for Inlining {
         // Identify functions used globally
         let mut used_globally = HashSet::new();
         for export in &module.exports {
-            if export.kind == ExportKind::Function {
-                if let Some(func) = module.functions.get(export.index as usize) {
+            if let ExportKind::Function(index) = export.kind {
+                if let Some(func) = module.functions.get(index as usize) {
                     used_globally.insert(func.name.clone());
                 }
             }

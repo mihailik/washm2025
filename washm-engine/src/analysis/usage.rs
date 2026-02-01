@@ -1,5 +1,5 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{ImportKind, Module};
+use crate::ir::module::{GlobalId, GlobalKind, ImportKind, Module};
 use crate::ir::visitor::ReadOnlyVisitor;
 use std::collections::{HashSet, VecDeque};
 
@@ -7,7 +7,7 @@ use std::collections::{HashSet, VecDeque};
 #[derive(Debug, Default)]
 pub struct UsageTracker {
     pub functions: HashSet<String>,
-    pub globals: HashSet<u32>,
+    pub globals: HashSet<GlobalId>,
     pub memories: bool,
     pub tables: bool,
     pub element_segments: HashSet<u32>,
@@ -15,7 +15,7 @@ pub struct UsageTracker {
     pub types: HashSet<u32>,
 
     pub(crate) func_queue: VecDeque<String>,
-    pub(crate) global_queue: VecDeque<u32>,
+    pub(crate) global_queue: VecDeque<GlobalId>,
 }
 
 impl UsageTracker {
@@ -27,16 +27,16 @@ impl UsageTracker {
         // Exports
         for export in &module.exports {
             match export.kind {
-                crate::ir::module::ExportKind::Function => {
-                    if let Some(name) = module_get_func_name(module, export.index) {
+                crate::ir::module::ExportKind::Function(index) => {
+                    if let Some(name) = module_get_func_name(module, index) {
                         tracker.mark_func(&name);
                     }
                 }
-                crate::ir::module::ExportKind::Global => {
-                    tracker.mark_global(export.index);
+                crate::ir::module::ExportKind::Global(id) => {
+                    tracker.mark_global(id);
                 }
-                crate::ir::module::ExportKind::Memory => tracker.memories = true,
-                crate::ir::module::ExportKind::Table => tracker.tables = true,
+                crate::ir::module::ExportKind::Memory(_) => tracker.memories = true,
+                crate::ir::module::ExportKind::Table(_) => tracker.tables = true,
             }
         }
 
@@ -63,12 +63,14 @@ impl UsageTracker {
                 }
             }
 
-            while let Some(global_idx) = tracker.global_queue.pop_front() {
-                if let Some(global) = module_get_global(module, global_idx) {
-                    let mut visitor = UsageVisitor {
-                        tracker: &mut tracker,
-                    };
-                    visitor.visit(global.init);
+            while let Some(global_id) = tracker.global_queue.pop_front() {
+                if let Some(global) = module.globals.get(global_id.cast()) {
+                    if let GlobalKind::Local { init } = global.kind {
+                        let mut visitor = UsageVisitor {
+                            tracker: &mut tracker,
+                        };
+                        visitor.visit(init);
+                    }
                 }
             }
         }
@@ -104,9 +106,9 @@ impl UsageTracker {
         }
     }
 
-    fn mark_global(&mut self, index: u32) {
-        if self.globals.insert(index) {
-            self.global_queue.push_back(index);
+    fn mark_global(&mut self, id: GlobalId) {
+        if self.globals.insert(id) {
+            self.global_queue.push_back(id);
         }
     }
 }
@@ -129,24 +131,6 @@ fn module_get_func_name(module: &Module, index: u32) -> Option<String> {
         .map(|f| f.name.clone())
 }
 
-fn module_get_global<'a, 'b>(
-    module: &'b Module<'a>,
-    index: u32,
-) -> Option<&'b crate::ir::module::Global<'a>> {
-    let mut current_idx = 0;
-    for import in &module.imports {
-        if let ImportKind::Global(_, _) = import.kind {
-            current_idx += 1;
-        }
-    }
-
-    if index < current_idx {
-        None
-    } else {
-        module.globals.get((index - current_idx) as usize)
-    }
-}
-
 struct UsageVisitor<'a> {
     tracker: &'a mut UsageTracker,
 }
@@ -157,8 +141,8 @@ impl<'a, 'b> ReadOnlyVisitor<'b> for UsageVisitor<'a> {
             ExpressionKind::Call { target, .. } => {
                 self.tracker.mark_func(target);
             }
-            ExpressionKind::GlobalGet { index } | ExpressionKind::GlobalSet { index, .. } => {
-                self.tracker.mark_global(*index);
+            ExpressionKind::GlobalGet { id } | ExpressionKind::GlobalSet { id, .. } => {
+                self.tracker.mark_global(*id);
             }
             ExpressionKind::Load { .. }
             | ExpressionKind::Store { .. }

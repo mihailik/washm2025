@@ -7,6 +7,7 @@ pub use literal::*;
 pub mod annotation;
 pub mod expression;
 pub mod module;
+pub use module::{GlobalId, FuncId, LocalId};
 pub mod ops;
 pub mod visitor;
 pub mod wasm_features;

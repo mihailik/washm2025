@@ -49,9 +49,12 @@ fn test_asyncify_binaryen_sleep_parity() {
         .exports
         .iter()
         .find(|e| {
-            e.name == "factorial-loop" && matches!(e.kind, washm::ir::module::ExportKind::Function)
+            e.name == "factorial-loop" && matches!(e.kind, washm::ir::module::ExportKind::Function(_))
         })
-        .map(|e| e.index)
+        .map(|e| match e.kind {
+            washm::ir::module::ExportKind::Function(idx) => idx,
+            _ => unreachable!(),
+        })
         .expect("factorial-loop export missing");
 
     let num_func_imports = module
@@ -164,7 +167,7 @@ fn test_asyncify_binaryen_suite_parity() {
                     ir_module
                         .globals
                         .iter()
-                        .any(|g| g.name == "__asyncify_state"),
+                        .any(|g| g.1.name == "__asyncify_state"),
                     "{} missing state global",
                     file_name
                 );
@@ -250,11 +253,11 @@ fn verify_asyncify_module(module: &Module) {
 
     // 1. Check globals
     assert!(
-        module.globals.iter().any(|g| g.name == ASYNCIFY_STATE),
+        module.globals.iter().any(|g| g.1.name == ASYNCIFY_STATE),
         "Missing __asyncify_state"
     );
     assert!(
-        module.globals.iter().any(|g| g.name == ASYNCIFY_DATA),
+        module.globals.iter().any(|g| g.1.name == ASYNCIFY_DATA),
         "Missing __asyncify_data"
     );
 

@@ -1,5 +1,5 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::Module;
+use crate::ir::module::{Module, GlobalKind};
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
 use std::collections::HashMap;
@@ -40,7 +40,7 @@ impl Pass for MinifyNames {
         }
 
         // 2. Minify global names
-        for global in &mut module.globals {
+        for (_, global) in &mut module.globals {
             let old_name = global.name.clone();
             let new_name = get_next_name(&mut next_id);
             name_map.insert(old_name, new_name.clone());
@@ -88,8 +88,10 @@ impl Pass for MinifyNames {
             }
         }
 
-        for global in &mut module.globals {
-            updater.visit(&mut global.init);
+        for (_, global) in &mut module.globals {
+            if let crate::ir::module::GlobalKind::Local { init } = &mut global.kind {
+                updater.visit(init);
+            }
         }
     }
 }
@@ -193,7 +195,7 @@ impl Pass for StripNames {
                 name.clear();
             }
         }
-        for global in &mut module.globals {
+        for (_, global) in &mut module.globals {
             global.name = String::new();
         }
         module.annotations.clear();

@@ -1,5 +1,5 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
-use crate::ir::module::{Global, Module};
+use crate::ir::module::{Global, GlobalKind, Module, GlobalId};
 use crate::ir::visitor::Visitor;
 use crate::ir::{Literal, Type};
 use crate::passes::Pass;
@@ -18,20 +18,20 @@ impl Pass for I64ToI32Lowering {
         let global_name = "i64_to_i32_high_bits".to_string();
         let global_init = Expression::const_expr(module.allocator, Literal::I32(0), Type::I32);
 
-        let global = Global {
+        let global_id = module.add_global(Global {
             name: global_name,
             type_: Type::I32,
             mutable: true,
-            init: global_init,
-        };
-        module.add_global(global);
-        let global_index = (module.globals.len() - 1) as u32;
+            kind: GlobalKind::Local {
+                init: global_init,
+            },
+        });
 
         for func in &mut module.functions {
             if let Some(body) = &mut func.body {
                 let mut visitor = I64LoweringVisitor {
                     allocator: module.allocator,
-                    global_index,
+                    global_id,
                 };
                 visitor.visit(body);
             }
@@ -41,7 +41,7 @@ impl Pass for I64ToI32Lowering {
 
 struct I64LoweringVisitor<'a> {
     allocator: &'a Bump,
-    global_index: u32,
+    global_id: GlobalId,
 }
 
 impl<'a> Visitor<'a> for I64LoweringVisitor<'a> {
@@ -56,7 +56,7 @@ impl<'a> Visitor<'a> for I64LoweringVisitor<'a> {
             let set_global = Expression::new(
                 self.allocator,
                 ExpressionKind::GlobalSet {
-                    index: self.global_index,
+                    id: self.global_id,
                     value: const_high,
                 },
                 Type::NONE,
@@ -116,8 +116,8 @@ mod tests {
             ExpressionKind::Block { ref list, .. } => {
                 assert_eq!(list.len(), 2);
                 match list[0].kind {
-                    ExpressionKind::GlobalSet { index, ref value } => {
-                        assert_eq!(index, 0); // First global
+                    ExpressionKind::GlobalSet { id, ref value } => {
+                        assert_eq!(id, module.globals.ids().next().unwrap().cast()); // First global
                         match value.kind {
                             ExpressionKind::Const(Literal::I32(v)) => {
                                 assert_eq!(v, (val >> 32) as i32);

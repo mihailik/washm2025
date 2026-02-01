@@ -19,6 +19,7 @@ pub struct BinaryReader<'a> {
     next_label_id: u32,
     last_op_was_else: bool,
     import_names: Vec<String>,
+    global_ids: Vec<crate::ir::GlobalId>,
 }
 
 #[derive(Debug)]
@@ -32,6 +33,7 @@ pub enum ParseError {
     InvalidUtf8,
     InvalidExportKind,
     InvalidImportKind,
+    InvalidIndex(&'static str, u32),
     Io(io::Error),
     Wasmparser(wasmparser::BinaryReaderError),
     LabelNotFound(String),
@@ -61,6 +63,7 @@ impl<'a> BinaryReader<'a> {
             next_label_id: 0,
             last_op_was_else: false,
             import_names: Vec::new(),
+            global_ids: Vec::new(),
         }
     }
 
@@ -229,10 +232,19 @@ impl<'a> BinaryReader<'a> {
                                     initial: memory_type.initial as u32,
                                     maximum: memory_type.maximum.map(|m| m as u32),
                                 }),
-                                TypeRef::Global(global_type) => ImportKind::Global(
-                                    Self::valtype_to_type(global_type.content_type),
-                                    global_type.mutable,
-                                ),
+                                TypeRef::Global(global_type) => {
+                                    let id = module.add_global(crate::ir::module::Global {
+                                        name: field_name.to_string(),
+                                        type_: Self::valtype_to_type(global_type.content_type),
+                                        mutable: global_type.mutable,
+                                        kind: crate::ir::module::GlobalKind::Import {
+                                            module: module_name.to_string(),
+                                            field: field_name.to_string(),
+                                        },
+                                    });
+                                    unsafe { (*this).global_ids.push(id) };
+                                    return Ok(());
+                                }
                                 _ => return Ok(()),
                             };
 
@@ -302,28 +314,37 @@ impl<'a> BinaryReader<'a> {
                         }?;
                         let name = format!("global_{}", i);
 
-                        module.globals.push(crate::ir::module::Global {
+                        let id = module.add_global(crate::ir::module::Global {
                             name,
                             type_,
                             mutable,
-                            init: init.ok_or(ParseError::UnexpectedEof)?,
+                            kind: crate::ir::module::GlobalKind::Local {
+                                init: init.ok_or(ParseError::UnexpectedEof)?,
+                            },
                         });
+                        self.global_ids.push(id);
                     }
                 }
                 Payload::ExportSection(reader) => {
                     for export in reader {
                         let export = export?;
                         let kind = match export.kind {
-                            wasmparser::ExternalKind::Func => ExportKind::Function,
-                            wasmparser::ExternalKind::Table => ExportKind::Table,
-                            wasmparser::ExternalKind::Memory => ExportKind::Memory,
-                            wasmparser::ExternalKind::Global => ExportKind::Global,
+                            wasmparser::ExternalKind::Func => {
+                                ExportKind::Function(export.index)
+                            }
+                            wasmparser::ExternalKind::Table => ExportKind::Table(export.index),
+                            wasmparser::ExternalKind::Memory => ExportKind::Memory(export.index),
+                            wasmparser::ExternalKind::Global => {
+                                let id = self.global_ids.get(export.index as usize).copied().ok_or(
+                                    ParseError::InvalidIndex("global export", export.index),
+                                )?;
+                                ExportKind::Global(id)
+                            }
                             _ => continue,
                         };
                         module.exports.push(Export {
                             name: export.name.to_string(),
                             kind,
-                            index: export.index,
                         });
                     }
                 }
@@ -724,11 +745,13 @@ impl<'a> BinaryReader<'a> {
                     stack.push(builder.local_tee(local_index, value, value_type));
                 }
                 Operator::GlobalGet { global_index } => {
-                    stack.push(builder.global_get(global_index, Type::I32)); // TODO: track actual type
+                    let id = self.global_ids.get(global_index as usize).copied().ok_or(ParseError::InvalidSection)?;
+                    stack.push(builder.global_get(id, Type::I32)); // TODO: track actual type
                 }
                 Operator::GlobalSet { global_index } => {
+                    let id = self.global_ids.get(global_index as usize).copied().ok_or(ParseError::InvalidSection)?;
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.global_set(global_index, value));
+                    stack.push(builder.global_set(id, value));
                 }
                 Operator::I32Load { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;

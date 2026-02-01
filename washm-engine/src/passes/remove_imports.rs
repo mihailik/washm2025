@@ -97,9 +97,9 @@ impl Pass for RemoveImports {
         }
 
         module.exports.retain_mut(|export| {
-            if export.kind == crate::ir::module::ExportKind::Function {
-                if let Some(&new_idx) = func_remap.get(&export.index) {
-                    export.index = new_idx;
+            if let crate::ir::module::ExportKind::Function(idx) = &mut export.kind {
+                if let Some(&new_idx) = func_remap.get(idx) {
+                    *idx = new_idx;
                     true
                 } else {
                     false

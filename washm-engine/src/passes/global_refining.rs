@@ -31,15 +31,17 @@ impl Pass for GlobalRefining {
         }
 
         // Also scan global initializers themselves
-        for (i, global) in module.globals.iter().enumerate() {
-            analyzer.note_assignment(i as u32, global.init.type_);
+        for (id, global) in module.globals.iter() {
+            if let Some(init) = global.kind_to_init() {
+                analyzer.note_assignment(id.cast(), init.type_);
+            }
         }
 
         let inferred_types = analyzer.assigned_types;
 
         // Update globals
-        for (i, global) in module.globals.iter_mut().enumerate() {
-            if let Some(Some(inferred)) = inferred_types.get(&(i as u32)) {
+        for (id, global) in module.globals.iter_mut() {
+            if let Some(Some(inferred)) = inferred_types.get(&id.cast()) {
                 if *inferred != global.type_ && inferred.is_subtype_of(global.type_) {
                     global.type_ = *inferred;
                 }
@@ -49,12 +51,12 @@ impl Pass for GlobalRefining {
 }
 
 struct GlobalAnalyzer {
-    assigned_types: HashMap<u32, Option<Type>>,
+    assigned_types: HashMap<crate::ir::GlobalId, Option<Type>>,
 }
 
 impl GlobalAnalyzer {
-    fn note_assignment(&mut self, index: u32, type_: Type) {
-        let entry = self.assigned_types.entry(index).or_insert(None);
+    fn note_assignment(&mut self, id: crate::ir::GlobalId, type_: Type) {
+        let entry = self.assigned_types.entry(id).or_insert(None);
         if let Some(val) = entry {
             *val = Type::get_lub(*val, type_);
         } else {
@@ -65,8 +67,8 @@ impl GlobalAnalyzer {
 
 impl<'a> Visitor<'a> for GlobalAnalyzer {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if let ExpressionKind::GlobalSet { index, value } = &mut expr.kind {
-            self.note_assignment(*index, value.type_);
+        if let ExpressionKind::GlobalSet { id, value } = &mut expr.kind {
+            self.note_assignment(*id, value.type_);
             self.visit(value);
         } else {
             self.visit_children(expr);
@@ -80,6 +82,7 @@ mod tests {
     use crate::ir::expression::{Expression, ExpressionKind};
     use crate::ir::module::{Global, Module};
     use crate::ir::{Literal, Type};
+    use crate::ir::module::GlobalKind;
     use bumpalo::Bump;
 
     #[test]
@@ -91,15 +94,15 @@ mod tests {
             type_: Type::I32,
         });
 
-        let global = Global {
+        let mut module = Module::new(&bump);
+        module.add_global(Global {
             name: "g0".to_string(),
             type_: Type::I32,
             mutable: true,
-            init: ExprRef::new(init),
-        };
-
-        let mut module = Module::new(&bump);
-        module.globals.push(global);
+            kind: GlobalKind::Local {
+                init: ExprRef::new(init),
+            },
+        });
 
         let mut pass = GlobalRefining;
         pass.run(&mut module);

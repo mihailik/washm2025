@@ -782,7 +782,8 @@ mod tests {
     fn test_analyzer_global_get() {
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
-        let global_get = builder.global_get(0, Type::I32);
+        let g0_id = unsafe { std::mem::transmute(0u64) };
+        let global_get = builder.global_get(g0_id, Type::I32);
 
         let effect = EffectAnalyzer::analyze(global_get);
         assert!(effect.reads_global());
@@ -794,7 +795,8 @@ mod tests {
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
         let value = builder.const_(Literal::I32(42));
-        let global_set = builder.global_set(0, value);
+        let g0_id = unsafe { std::mem::transmute(0u64) };
+        let global_set = builder.global_set(g0_id, value);
 
         let effect = EffectAnalyzer::analyze(global_set);
         assert!(effect.writes_global());
@@ -872,7 +874,8 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         let condition = builder.const_(Literal::I32(1));
-        let true_branch = builder.global_set(0, builder.const_(Literal::I32(1)));
+        let g0_id = unsafe { std::mem::transmute(0u64) };
+        let true_branch = builder.global_set(g0_id, builder.const_(Literal::I32(1)));
         let false_branch = builder.local_set(0, builder.const_(Literal::I32(2)));
 
         let if_expr = builder.if_(condition, true_branch, Some(false_branch), Type::I32);
@@ -1010,7 +1013,8 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         let condition = builder.const_(Literal::I32(1));
-        let if_true = builder.global_get(0, Type::I32);
+        let g0_id = unsafe { std::mem::transmute(0u64) };
+        let if_true = builder.global_get(g0_id, Type::I32);
         let if_false = builder.local_get(1, Type::I32);
         let select = builder.select(condition, if_true, if_false, Type::I32);
 
@@ -1129,7 +1133,8 @@ mod tests {
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
 
-        let left = builder.global_get(0, Type::I32);
+        let g0_id = unsafe { std::mem::transmute(0u64) };
+        let left = builder.global_get(g0_id, Type::I32);
         let operands = bumpalo::vec![in &bump;];
         let right = builder.call("foo", operands, Type::I32, false);
         let binary = builder.binary(crate::ir::ops::BinaryOp::AddInt32, left, right, Type::I32);
@@ -1311,11 +1316,12 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // Read global 0
-        let global_get = builder.global_get(0, Type::I32);
+        let g0_id = unsafe { std::mem::transmute(0u64) };
+        let global_get = builder.global_get(g0_id, Type::I32);
 
         // Write to global 0
         let value = builder.const_(Literal::I32(42));
-        let global_set = builder.global_set(0, value);
+        let global_set = builder.global_set(g0_id, value);
 
         let read_effect = EffectAnalyzer::analyze(global_get);
         let write_effect = EffectAnalyzer::analyze(global_set);
@@ -1339,7 +1345,8 @@ mod tests {
         let local_set = builder.local_set(0, builder.const_(Literal::I32(10)));
 
         // GlobalSet (writes globals, doesn't trap if value is pure)
-        let global_set = builder.global_set(1, builder.const_(Literal::I32(20)));
+        let g1_id = unsafe { std::mem::transmute(1u64) };
+        let global_set = builder.global_set(g1_id, builder.const_(Literal::I32(20)));
 
         let local_effect = EffectAnalyzer::analyze(local_set);
         let global_effect = EffectAnalyzer::analyze(global_set);
@@ -1465,7 +1472,8 @@ mod tests {
         let load = builder.load(4, false, 0, 4, builder.const_(Literal::I32(0)), Type::I32);
 
         // Second: global write
-        let global_set = builder.global_set(1, builder.const_(Literal::I32(42)));
+        let g1_id = unsafe { std::mem::transmute(1u64) };
+        let global_set = builder.global_set(g1_id, builder.const_(Literal::I32(42)));
 
         // Third: local write
         let local_set = builder.local_set(2, builder.const_(Literal::I32(99)));
@@ -1659,7 +1667,8 @@ mod tests {
         let set_effect = EffectAnalyzer::analyze(set1);
 
         // GlobalGet (reads global, doesn't trap)
-        let global_get = builder.global_get(1, Type::I32);
+        let g1_id = unsafe { std::mem::transmute(1u64) };
+        let global_get = builder.global_get(g1_id, Type::I32);
         let global_effect = EffectAnalyzer::analyze(global_get);
 
         // Second LocalSet

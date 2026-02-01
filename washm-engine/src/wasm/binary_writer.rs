@@ -164,6 +164,23 @@ impl BinaryWriter {
         // Use types from module if available, otherwise infer from functions/imports
         let mut type_map: Vec<(Vec<Type>, Vec<Type>)> = Vec::new();
 
+        let mut global_map = std::collections::HashMap::new();
+        let mut global_idx = 0;
+
+        // Construct global map (imports first, then locals)
+        for (id, global) in module.globals.iter() {
+            if let crate::ir::module::GlobalKind::Import { .. } = global.kind {
+                global_map.insert(id.cast(), global_idx);
+                global_idx += 1;
+            }
+        }
+        for (id, global) in module.globals.iter() {
+            if let crate::ir::module::GlobalKind::Local { .. } = global.kind {
+                global_map.insert(id.cast(), global_idx);
+                global_idx += 1;
+            }
+        }
+
         // First, use any explicit types from module.types
         for func_type in &module.types {
             let params_vec = Self::expand_type(func_type.params);
@@ -214,7 +231,7 @@ impl BinaryWriter {
         }
 
         // 2. Import Section
-        if !module.imports.is_empty() {
+        if !module.imports.is_empty() || module.globals.iter().any(|(_, g)| matches!(g.kind, crate::ir::module::GlobalKind::Import { .. })) {
             let mut imports = ImportSection::new();
             for import in &module.imports {
                 let kind = match &import.kind {
@@ -241,15 +258,23 @@ impl BinaryWriter {
                         shared: false,
                         page_size_log2: None,
                     }),
-                    ImportKind::Global(val_type, mutable) => {
-                        wasm_encoder::EntityType::Global(wasm_encoder::GlobalType {
-                            val_type: Self::to_val_type(*val_type),
-                            mutable: *mutable,
-                            shared: false,
-                        })
-                    }
                 };
                 imports.import(&import.module, &import.name, kind);
+            }
+
+            // Add imported globals from arena
+            for (_, global) in module.globals.iter() {
+                if let crate::ir::module::GlobalKind::Import { module: m, field } = &global.kind {
+                    imports.import(
+                        m,
+                        field,
+                        wasm_encoder::EntityType::Global(wasm_encoder::GlobalType {
+                            val_type: Self::to_val_type(global.type_),
+                            mutable: global.mutable,
+                            shared: false,
+                        }),
+                    );
+                }
             }
             encoder.section(&imports);
         }
@@ -290,26 +315,29 @@ impl BinaryWriter {
         }
 
         // 6. Global Section
-        if !module.globals.is_empty() {
+        if module.globals.iter().any(|(_, g)| matches!(g.kind, crate::ir::module::GlobalKind::Local { .. })) {
             let mut globals = GlobalSection::new();
-            for global in &module.globals {
-                let mut init_expr_encoder = ConstExprEncoder::new();
-                Self::write_instructions(
-                    &mut init_expr_encoder,
-                    global.init,
-                    &mut vec![],
-                    &std::collections::HashMap::new(),
-                    &type_map,
-                )?;
-                let init_expr = init_expr_encoder.finish();
-                globals.global(
-                    wasm_encoder::GlobalType {
-                        val_type: Self::to_val_type(global.type_),
-                        mutable: global.mutable,
-                        shared: false,
-                    },
-                    &init_expr,
-                );
+            for (_, global) in module.globals.iter() {
+                if let crate::ir::module::GlobalKind::Local { init } = &global.kind {
+                    let mut init_expr_encoder = ConstExprEncoder::new();
+                    Self::write_instructions(
+                        &mut init_expr_encoder,
+                        *init,
+                        &mut vec![],
+                        &std::collections::HashMap::new(),
+                        &global_map,
+                        &type_map,
+                    )?;
+                    let init_expr = init_expr_encoder.finish();
+                    globals.global(
+                        wasm_encoder::GlobalType {
+                            val_type: Self::to_val_type(global.type_),
+                            mutable: global.mutable,
+                            shared: false,
+                        },
+                        &init_expr,
+                    );
+                }
             }
             encoder.section(&globals);
         }
@@ -318,13 +346,16 @@ impl BinaryWriter {
         if !module.exports.is_empty() {
             let mut exports = ExportSection::new();
             for export in &module.exports {
-                let kind = match export.kind {
-                    crate::ir::module::ExportKind::Function => ExportKind::Func,
-                    crate::ir::module::ExportKind::Table => ExportKind::Table,
-                    crate::ir::module::ExportKind::Memory => ExportKind::Memory,
-                    crate::ir::module::ExportKind::Global => ExportKind::Global,
+                let (kind, index) = match export.kind {
+                    crate::ir::module::ExportKind::Function(idx) => (ExportKind::Func, idx),
+                    crate::ir::module::ExportKind::Table(idx) => (ExportKind::Table, idx),
+                    crate::ir::module::ExportKind::Memory(idx) => (ExportKind::Memory, idx),
+                    crate::ir::module::ExportKind::Global(id) => (
+                        ExportKind::Global,
+                        *global_map.get(&id).expect("exported global must exist"),
+                    ),
                 };
-                exports.export(&export.name, kind, export.index);
+                exports.export(&export.name, kind, index);
             }
             encoder.section(&exports);
         }
@@ -346,6 +377,7 @@ impl BinaryWriter {
                     segment.offset,
                     &mut vec![],
                     &std::collections::HashMap::new(),
+                    &global_map,
                     &type_map,
                 )?;
                 let offset_expr = offset_expr_encoder.finish();
@@ -391,6 +423,7 @@ impl BinaryWriter {
                         body,
                         &mut label_stack,
                         &func_map,
+                        &global_map,
                         &type_map,
                     )?;
                 }
@@ -410,6 +443,7 @@ impl BinaryWriter {
                     segment.offset,
                     &mut vec![],
                     &std::collections::HashMap::new(),
+                    &global_map,
                     &type_map,
                 )?;
                 let offset_expr = offset_expr_encoder.finish();
@@ -430,6 +464,7 @@ impl BinaryWriter {
         expr_ref: ExprRef,
         label_stack: &mut Vec<Option<String>>,
         func_map: &std::collections::HashMap<&str, u32>,
+        global_map: &std::collections::HashMap<crate::ir::GlobalId, u32>,
         type_map: &[(Vec<Type>, Vec<Type>)],
     ) -> Result<()> {
         let expr = &*expr_ref;
@@ -457,23 +492,36 @@ impl BinaryWriter {
                 encoder.instruction(&Instruction::LocalGet(*index));
             }
             ExpressionKind::LocalSet { index, value } => {
-                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, global_map, type_map)?;
                 encoder.instruction(&Instruction::LocalSet(*index));
             }
             ExpressionKind::LocalTee { index, value } => {
-                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, global_map, type_map)?;
                 encoder.instruction(&Instruction::LocalTee(*index));
             }
-            ExpressionKind::GlobalGet { index } => {
-                encoder.instruction(&Instruction::GlobalGet(*index));
+            ExpressionKind::GlobalGet { id } => {
+                let idx = global_map.get(id).ok_or_else(|| {
+                    WriteError::UnsupportedFeature(format!("Global not found: {:?}", id))
+                })?;
+                encoder.instruction(&Instruction::GlobalGet(*idx));
             }
-            ExpressionKind::GlobalSet { index, value } => {
-                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
-                encoder.instruction(&Instruction::GlobalSet(*index));
+            ExpressionKind::GlobalSet { id, value } => {
+                Self::write_instructions(
+                    encoder,
+                    *value,
+                    label_stack,
+                    func_map,
+                    global_map,
+                    type_map,
+                )?;
+                let idx = global_map.get(id).ok_or_else(|| {
+                    WriteError::UnsupportedFeature(format!("Global not found: {:?}", id))
+                })?;
+                encoder.instruction(&Instruction::GlobalSet(*idx));
             }
             ExpressionKind::Binary { op, left, right } => {
-                Self::write_instructions(encoder, *left, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *right, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *left, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *right, label_stack, func_map, global_map, type_map)?;
 
                 let instr = match op {
                     BinaryOp::AddInt32 => Instruction::I32Add,
@@ -559,7 +607,7 @@ impl BinaryWriter {
                 encoder.instruction(&instr);
             }
             ExpressionKind::Unary { op, value } => {
-                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, global_map, type_map)?;
                 let instr = match op {
                     UnaryOp::EqZInt32 => Instruction::I32Eqz,
                     UnaryOp::EqZInt64 => Instruction::I64Eqz,
@@ -620,7 +668,7 @@ impl BinaryWriter {
                 label_stack.push(name.as_ref().map(|s| s.to_string()));
                 encoder.instruction(&Instruction::Block(Self::to_block_type(expr.type_)));
                 for &child in list {
-                    Self::write_instructions(encoder, child, label_stack, func_map, type_map)?;
+                    Self::write_instructions(encoder, child, label_stack, func_map, global_map, type_map)?;
                 }
                 encoder.instruction(&Instruction::End);
                 label_stack.pop();
@@ -628,7 +676,7 @@ impl BinaryWriter {
             ExpressionKind::Loop { name, body } => {
                 label_stack.push(name.as_ref().map(|s| s.to_string()));
                 encoder.instruction(&Instruction::Loop(Self::to_block_type(expr.type_)));
-                Self::write_instructions(encoder, *body, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *body, label_stack, func_map, global_map, type_map)?;
                 encoder.instruction(&Instruction::End);
                 label_stack.pop();
             }
@@ -637,13 +685,13 @@ impl BinaryWriter {
                 if_true,
                 if_false,
             } => {
-                Self::write_instructions(encoder, *condition, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *condition, label_stack, func_map, global_map, type_map)?;
                 label_stack.push(None);
                 encoder.instruction(&Instruction::If(Self::to_block_type(expr.type_)));
-                Self::write_instructions(encoder, *if_true, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *if_true, label_stack, func_map, global_map, type_map)?;
                 if let Some(f) = if_false {
                     encoder.instruction(&Instruction::Else);
-                    Self::write_instructions(encoder, *f, label_stack, func_map, type_map)?;
+                    Self::write_instructions(encoder, *f, label_stack, func_map, global_map, type_map)?;
                 }
                 encoder.instruction(&Instruction::End);
                 label_stack.pop();
@@ -654,11 +702,11 @@ impl BinaryWriter {
                 value,
             } => {
                 if let Some(v) = value {
-                    Self::write_instructions(encoder, *v, label_stack, func_map, type_map)?;
+                    Self::write_instructions(encoder, *v, label_stack, func_map, global_map, type_map)?;
                 }
                 let depth = Self::find_label_depth(label_stack, name)?;
                 if let Some(c) = condition {
-                    Self::write_instructions(encoder, *c, label_stack, func_map, type_map)?;
+                    Self::write_instructions(encoder, *c, label_stack, func_map, global_map, type_map)?;
                     encoder.instruction(&Instruction::BrIf(depth));
                 } else {
                     encoder.instruction(&Instruction::Br(depth));
@@ -666,7 +714,7 @@ impl BinaryWriter {
             }
             ExpressionKind::Return { value } => {
                 if let Some(v) = value {
-                    Self::write_instructions(encoder, *v, label_stack, func_map, type_map)?;
+                    Self::write_instructions(encoder, *v, label_stack, func_map, global_map, type_map)?;
                 }
                 encoder.instruction(&Instruction::Return);
             }
@@ -674,7 +722,7 @@ impl BinaryWriter {
                 encoder.instruction(&Instruction::Unreachable);
             }
             ExpressionKind::Drop { value } => {
-                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, global_map, type_map)?;
                 encoder.instruction(&Instruction::Drop);
             }
             ExpressionKind::Select {
@@ -682,9 +730,9 @@ impl BinaryWriter {
                 if_true,
                 if_false,
             } => {
-                Self::write_instructions(encoder, *if_true, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *if_false, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *condition, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *if_true, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *if_false, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *condition, label_stack, func_map, global_map, type_map)?;
                 encoder.instruction(&Instruction::Select);
             }
             ExpressionKind::Load {
@@ -694,7 +742,7 @@ impl BinaryWriter {
                 align,
                 ptr,
             } => {
-                Self::write_instructions(encoder, *ptr, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *ptr, label_stack, func_map, global_map, type_map)?;
                 let memarg = MemArg {
                     offset: *offset as u64,
                     align: *align,
@@ -726,8 +774,8 @@ impl BinaryWriter {
                 ptr,
                 value,
             } => {
-                Self::write_instructions(encoder, *ptr, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *ptr, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, global_map, type_map)?;
                 let memarg = MemArg {
                     offset: *offset as u64,
                     align: *align,
@@ -753,7 +801,14 @@ impl BinaryWriter {
                 is_return,
             } => {
                 for &op in operands {
-                    Self::write_instructions(encoder, op, label_stack, func_map, type_map)?;
+                    Self::write_instructions(
+                        encoder,
+                        op,
+                        label_stack,
+                        func_map,
+                        global_map,
+                        type_map,
+                    )?;
                 }
                 let idx = func_map.get(target).ok_or_else(|| {
                     WriteError::UnsupportedFeature(format!("Function not found: {}", target))
@@ -774,9 +829,23 @@ impl BinaryWriter {
                 value,
             } => {
                 if let Some(v) = value {
-                    Self::write_instructions(encoder, *v, label_stack, func_map, type_map)?;
+                    Self::write_instructions(
+                        encoder,
+                        *v,
+                        label_stack,
+                        func_map,
+                        global_map,
+                        type_map,
+                    )?;
                 }
-                Self::write_instructions(encoder, *condition, label_stack, func_map, type_map)?;
+                Self::write_instructions(
+                    encoder,
+                    *condition,
+                    label_stack,
+                    func_map,
+                    global_map,
+                    type_map,
+                )?;
                 let mut targets = Vec::new();
                 for name in names {
                     targets.push(Self::find_label_depth(label_stack, name)?);
@@ -788,7 +857,14 @@ impl BinaryWriter {
                 encoder.instruction(&Instruction::MemorySize(0));
             }
             ExpressionKind::MemoryGrow { delta } => {
-                Self::write_instructions(encoder, *delta, label_stack, func_map, type_map)?;
+                Self::write_instructions(
+                    encoder,
+                    *delta,
+                    label_stack,
+                    func_map,
+                    global_map,
+                    type_map,
+                )?;
                 encoder.instruction(&Instruction::MemoryGrow(0));
             }
             ExpressionKind::CallIndirect {
@@ -798,9 +874,23 @@ impl BinaryWriter {
                 table,
             } => {
                 for &op in operands {
-                    Self::write_instructions(encoder, op, label_stack, func_map, type_map)?;
+                    Self::write_instructions(
+                        encoder,
+                        op,
+                        label_stack,
+                        func_map,
+                        global_map,
+                        type_map,
+                    )?;
                 }
-                Self::write_instructions(encoder, *target, label_stack, func_map, type_map)?;
+                Self::write_instructions(
+                    encoder,
+                    *target,
+                    label_stack,
+                    func_map,
+                    global_map,
+                    type_map,
+                )?;
 
                 let sig = if type_.is_signature() {
                     let s = crate::ir::type_store::lookup_signature(*type_).ok_or_else(|| {
@@ -826,7 +916,7 @@ impl BinaryWriter {
                 encoder.instruction(&Instruction::RefNull(reftype.heap_type));
             }
             ExpressionKind::RefIsNull { value } => {
-                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, global_map, type_map)?;
                 encoder.instruction(&Instruction::RefIsNull);
             }
             ExpressionKind::RefFunc { func } => {
@@ -836,20 +926,20 @@ impl BinaryWriter {
                 encoder.instruction(&Instruction::RefFunc(*idx));
             }
             ExpressionKind::RefEq { left, right } => {
-                Self::write_instructions(encoder, *left, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *right, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *left, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *right, label_stack, func_map, global_map, type_map)?;
                 encoder.instruction(&Instruction::RefEq);
             }
             ExpressionKind::MemoryFill { dest, value, size } => {
-                Self::write_instructions(encoder, *dest, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *size, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *dest, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *size, label_stack, func_map, global_map, type_map)?;
                 encoder.instruction(&Instruction::MemoryFill(0));
             }
             ExpressionKind::MemoryCopy { dest, src, size } => {
-                Self::write_instructions(encoder, *dest, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *src, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *size, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *dest, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *src, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *size, label_stack, func_map, global_map, type_map)?;
                 encoder.instruction(&Instruction::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
@@ -861,9 +951,9 @@ impl BinaryWriter {
                 offset,
                 size,
             } => {
-                Self::write_instructions(encoder, *dest, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *offset, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *size, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *dest, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *offset, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *size, label_stack, func_map, global_map, type_map)?;
                 encoder.instruction(&Instruction::MemoryInit {
                     mem: 0,
                     data_index: *segment,
@@ -873,7 +963,7 @@ impl BinaryWriter {
                 encoder.instruction(&Instruction::DataDrop(*segment));
             }
             ExpressionKind::TableGet { table, index } => {
-                Self::write_instructions(encoder, *index, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *index, label_stack, func_map, global_map, type_map)?;
                 let table_idx = table.parse::<u32>().unwrap_or(0);
                 encoder.instruction(&Instruction::TableGet(table_idx));
             }
@@ -882,8 +972,8 @@ impl BinaryWriter {
                 index,
                 value,
             } => {
-                Self::write_instructions(encoder, *index, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *index, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, global_map, type_map)?;
                 let table_idx = table.parse::<u32>().unwrap_or(0);
                 encoder.instruction(&Instruction::TableSet(table_idx));
             }
@@ -896,8 +986,8 @@ impl BinaryWriter {
                 delta,
                 value,
             } => {
-                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *delta, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *delta, label_stack, func_map, global_map, type_map)?;
                 let table_idx = table.parse::<u32>().unwrap_or(0);
                 encoder.instruction(&Instruction::TableGrow(table_idx));
             }
@@ -907,9 +997,9 @@ impl BinaryWriter {
                 value,
                 size,
             } => {
-                Self::write_instructions(encoder, *dest, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *size, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *dest, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *size, label_stack, func_map, global_map, type_map)?;
                 let table_idx = table.parse::<u32>().unwrap_or(0);
                 encoder.instruction(&Instruction::TableFill(table_idx));
             }
@@ -920,9 +1010,9 @@ impl BinaryWriter {
                 src,
                 size,
             } => {
-                Self::write_instructions(encoder, *dest, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *src, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *size, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *dest, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *src, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *size, label_stack, func_map, global_map, type_map)?;
                 let dst_idx = dest_table.parse::<u32>().unwrap_or(0);
                 let src_idx = src_table.parse::<u32>().unwrap_or(0);
                 encoder.instruction(&Instruction::TableCopy {
@@ -937,9 +1027,9 @@ impl BinaryWriter {
                 offset,
                 size,
             } => {
-                Self::write_instructions(encoder, *dest, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *offset, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *size, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *dest, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *offset, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *size, label_stack, func_map, global_map, type_map)?;
                 let table_idx = table.parse::<u32>().unwrap_or(0);
                 encoder.instruction(&Instruction::TableInit {
                     table: table_idx,
@@ -956,8 +1046,8 @@ impl BinaryWriter {
                 ptr,
                 value,
             } => {
-                Self::write_instructions(encoder, *ptr, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *value, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *ptr, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *value, label_stack, func_map, global_map, type_map)?;
                 let arg = MemArg {
                     offset: *offset as u64,
                     align: match *bytes {
@@ -1052,9 +1142,9 @@ impl BinaryWriter {
                 expected,
                 replacement,
             } => {
-                Self::write_instructions(encoder, *ptr, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *expected, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *replacement, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *ptr, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *expected, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *replacement, label_stack, func_map, global_map, type_map)?;
                 let arg = MemArg {
                     offset: *offset as u64,
                     align: match *bytes {
@@ -1084,9 +1174,9 @@ impl BinaryWriter {
                 timeout,
                 expected_type,
             } => {
-                Self::write_instructions(encoder, *ptr, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *expected, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *timeout, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *ptr, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *expected, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *timeout, label_stack, func_map, global_map, type_map)?;
                 let arg = MemArg {
                     offset: 0,
                     align: if *expected_type == Type::I32 { 2 } else { 3 },
@@ -1104,8 +1194,8 @@ impl BinaryWriter {
                 }
             }
             ExpressionKind::AtomicNotify { ptr, count } => {
-                Self::write_instructions(encoder, *ptr, label_stack, func_map, type_map)?;
-                Self::write_instructions(encoder, *count, label_stack, func_map, type_map)?;
+                Self::write_instructions(encoder, *ptr, label_stack, func_map, global_map, type_map)?;
+                Self::write_instructions(encoder, *count, label_stack, func_map, global_map, type_map)?;
                 encoder.instruction(&Instruction::MemoryAtomicNotify(MemArg {
                     offset: 0,
                     align: 2,
@@ -1722,8 +1812,7 @@ mod tests {
         assert_eq!(module2.exports.len(), 1);
         let export = &module2.exports[0];
         assert_eq!(export.name, "answer");
-        assert_eq!(export.kind, ExportKind::Function);
-        assert_eq!(export.index, 0);
+        assert_eq!(export.kind, ExportKind::Function(0));
 
         println!("Export section test passed!");
     }
@@ -1752,7 +1841,7 @@ mod tests {
 
         // Export both function and memory
         module.export_function(0, "read".to_string());
-        module.add_export("mem".to_string(), ExportKind::Memory, 0);
+        module.add_export("mem".to_string(), ExportKind::Memory(0));
 
         // Write and read back
         let mut writer = BinaryWriter::new();
@@ -1772,12 +1861,10 @@ mod tests {
         assert_eq!(module2.exports.len(), 2);
 
         let func_export = module2.exports.iter().find(|e| e.name == "read").unwrap();
-        assert_eq!(func_export.kind, ExportKind::Function);
-        assert_eq!(func_export.index, 0);
+        assert_eq!(func_export.kind, ExportKind::Function(0));
 
         let mem_export = module2.exports.iter().find(|e| e.name == "mem").unwrap();
-        assert_eq!(mem_export.kind, ExportKind::Memory);
-        assert_eq!(mem_export.index, 0);
+        assert_eq!(mem_export.kind, ExportKind::Memory(0));
 
         println!("Memory and exports combined test passed!");
     }
@@ -1835,7 +1922,7 @@ mod tests {
         module.export_function(0, "get42".to_string());
         module.export_function(1, "store_value".to_string());
         module.export_function(2, "load_value".to_string());
-        module.add_export("memory".to_string(), ExportKind::Memory, 0);
+        module.add_export("memory".to_string(), ExportKind::Memory(0));
 
         // Write to file
         let mut writer = BinaryWriter::new();
@@ -2088,7 +2175,7 @@ mod tests {
         module.export_function(0, "double".to_string());
         module.export_function(1, "increment".to_string());
         module.export_function(2, "process".to_string());
-        module.add_export("memory".to_string(), ExportKind::Memory, 0);
+        module.add_export("memory".to_string(), ExportKind::Memory(0));
 
         // Write to file
         let mut writer = BinaryWriter::new();
@@ -2141,32 +2228,32 @@ mod tests {
         // 1. Define global: mut i32 g0 = 100
         let builder = IrBuilder::new(&bump);
         let init0 = builder.const_(Literal::I32(100)); // Fixed
-        module.add_global(crate::ir::module::Global {
+        let g0_id = module.add_global(crate::ir::module::Global {
             name: "g0".to_string(),
             type_: Type::I32,
             mutable: true,
-            init: init0,
+            kind: crate::ir::module::GlobalKind::Local { init: init0 },
         });
 
         // 2. Define global: const f32 g1 = 3.14
         let builder2 = IrBuilder::new(&bump);
         let init1 = builder2.const_(Literal::F32(2.5)); // Fixed
-        module.add_global(crate::ir::module::Global {
+        let g1_id = module.add_global(crate::ir::module::Global {
             name: "g1".to_string(),
             type_: Type::F32,
             mutable: false,
-            init: init1,
+            kind: crate::ir::module::GlobalKind::Local { init: init1 },
         });
 
         // 3. Define function that uses globals
         let builder3 = IrBuilder::new(&bump);
 
-        let get_g0 = builder3.global_get(0, Type::I32);
+        let get_g0 = builder3.global_get(g0_id, Type::I32);
         let const_1 = builder3.const_(Literal::I32(1)); // Fixed
         let add = builder3.binary(BinaryOp::AddInt32, get_g0, const_1, Type::I32); // Fixed
-        let set_g0 = builder3.global_set(0, add); // g0 = g0 + 1
+        let set_g0 = builder3.global_set(g0_id, add); // g0 = g0 + 1
 
-        let get_g1 = builder3.global_get(1, Type::F32);
+        let get_g1 = builder3.global_get(g1_id, Type::F32);
         let drop_g1 = builder3.drop(get_g1); // Fixed
 
         let body = builder3.block(
@@ -2201,12 +2288,15 @@ mod tests {
 
         // Checks
         assert_eq!(module2.globals.len(), 2);
+        let mut ids = module2.globals.ids();
+        let g0_id = ids.next().unwrap();
+        let g1_id = ids.next().unwrap();
 
-        let g0 = &module2.globals[0];
+        let g0 = &module2.globals[g0_id];
         assert_eq!(g0.type_, Type::I32);
         assert!(g0.mutable);
 
-        let g1 = &module2.globals[1];
+        let g1 = &module2.globals[g1_id];
         assert_eq!(g1.type_, Type::F32);
         assert!(!g1.mutable);
 

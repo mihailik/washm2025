@@ -72,9 +72,9 @@ impl Pass for ReorderFunctions {
         // 3. Update all references to function indices
         // Exports
         for export in &mut module.exports {
-            if export.kind == ExportKind::Function {
-                if let Some(&new_idx) = old_to_new.get(&export.index) {
-                    export.index = new_idx;
+            if let ExportKind::Function(idx) = &mut export.kind {
+                if let Some(&new_idx) = old_to_new.get(idx) {
+                    *idx = new_idx;
                 }
             }
         }

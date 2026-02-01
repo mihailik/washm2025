@@ -45,13 +45,10 @@ impl Pass for ReorderTypes {
                     *params = self.remap_type(*params, &remap);
                     *results = self.remap_type(*results, &remap);
                 }
-                crate::ir::module::ImportKind::Global(ty, _) => {
-                    *ty = self.remap_type(*ty, &remap);
-                }
                 crate::ir::module::ImportKind::Table(ty, _, _) => {
                     *ty = self.remap_type(*ty, &remap);
                 }
-                _ => {}
+                crate::ir::module::ImportKind::Memory(_) => {}
             }
         }
 
@@ -76,14 +73,14 @@ impl Pass for ReorderTypes {
             }
         }
 
-        for global in &mut module.globals {
+        for (_, global) in &mut module.globals {
             global.type_ = self.remap_type(global.type_, &remap);
-            if let Some(mut init) = Some(global.init) {
+            if let crate::ir::module::GlobalKind::Local { ref mut init } = global.kind {
                 let mut updater = TypeUpdater {
                     remap: &remap,
                     pass: self,
                 };
-                updater.visit(&mut init);
+                updater.visit(init);
             }
         }
     }
