@@ -1,5 +1,5 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{GlobalKind, Module, TableKind};
+use crate::ir::module::{GlobalKind, Module};
 use crate::ir::visitor::ReadOnlyVisitor;
 use std::collections::HashMap;
 
@@ -24,7 +24,7 @@ impl ModuleStats {
 
         // Count references in functions (including imports)
         for (_, func) in &module.functions {
-            if let Some(import) = &func.import {
+            if let Some(_import) = &func.import {
                 stats.increment_type(func.params);
                 stats.increment_type(func.results);
             } else {

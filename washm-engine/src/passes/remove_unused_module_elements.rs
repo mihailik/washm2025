@@ -1,8 +1,7 @@
 use crate::analysis::usage::UsageTracker;
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{ExportKind, GlobalKind, Module, TableKind};
+use crate::ir::module::{ExportKind, Module};
 use crate::ir::visitor::Visitor;
-use crate::ir::FuncId;
 use crate::ir::Type;
 use crate::passes::Pass;
 use std::collections::HashMap;
@@ -144,7 +143,7 @@ impl<'a> IndexUpdater<'a> {
 mod tests {
     use super::*;
     use crate::ir::expression::IrBuilder;
-    use crate::ir::module::{Function, Global, Module};
+    use crate::ir::module::{Function, Global, GlobalKind, Module};
     use crate::ir::FuncId;
     use crate::ir::{Literal, Type};
     use bumpalo::collections::Vec as BumpVec;

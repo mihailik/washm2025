@@ -1,11 +1,9 @@
 use super::*;
 use crate::analysis::validation::Validator;
-use crate::ir::annotation::AnnotationStore;
 use crate::ir::expression::*;
 use crate::ir::module::*;
 use crate::ir::ops::*;
 use crate::ir::visitor::Visitor;
-use crate::ir::wasm_features::FeatureSet;
 use bumpalo::collections::Vec as BumpVec;
 use bumpalo::Bump;
 
@@ -246,7 +244,7 @@ fn test_module_construction() {
     // fn add_one(x: i32) -> i32
     let local_get = builder.local_get(0, Type::I32);
     let const_1 = builder.const_(Literal::I32(1));
-    let add = builder.binary(BinaryOp::AddInt32, local_get, const_1, Type::I32);
+    let _add = builder.binary(BinaryOp::AddInt32, local_get, const_1, Type::I32);
 
     let func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
     let bump = bumpalo::Bump::new();
@@ -267,7 +265,7 @@ fn test_module_construction() {
 
 #[test]
 fn test_export_validation() {
-    use crate::ir::module::{Export, ExportKind, Global, MemoryLimits};
+    use crate::ir::module::{ExportKind, Global, MemoryLimits};
 
     let bump = Bump::new();
     let builder = IrBuilder::new(&bump);
@@ -534,7 +532,7 @@ fn test_imports_roundtrip() {
 
 #[test]
 fn test_import_validation() {
-    use crate::ir::module::{Global, Import, ImportKind};
+    use crate::ir::module::Global;
 
     let bump = Bump::new();
     let builder = IrBuilder::new(&bump);

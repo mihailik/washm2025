@@ -1,11 +1,11 @@
 use bumpalo::Bump;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use washm::ir::module::Module;
 use washm::passes::asyncify::{Asyncify, AsyncifyConfig};
 use washm::passes::Pass;
 use washm::wasm::binary_reader::BinaryReader;
-use wast::parser::{self, ParseBuffer};
+use wast::parser::ParseBuffer;
 use wast::Wast;
 
 #[test]
@@ -180,6 +180,7 @@ fn test_asyncify_binaryen_suite_parity() {
     }
 }
 
+#[allow(dead_code)]
 fn verify_liveness1(func: &washm::ir::module::Function) {
     use washm::ir::expression::ExpressionKind;
     use washm::ir::Literal;

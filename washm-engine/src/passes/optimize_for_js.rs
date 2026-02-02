@@ -1,7 +1,6 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
-use crate::ir::FuncId;
 use crate::ir::Literal;
 use crate::passes::Pass;
 

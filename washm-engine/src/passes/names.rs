@@ -1,5 +1,5 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{GlobalKind, Module};
+use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
 use std::collections::HashMap;

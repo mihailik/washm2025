@@ -1,7 +1,6 @@
 use crate::analysis::effects::{Effect, EffectAnalyzer};
-use crate::collections::id_arena::Id;
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
-use crate::ir::module::{MemoryId, Module};
+use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
 use crate::passes::Pass;
@@ -377,6 +376,7 @@ fn has_side_effects_in_value(expr: &Expression) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collections::Id;
     use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
     use crate::ir::module::Function;
     use crate::ir::{Literal, Type};

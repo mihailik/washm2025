@@ -2,7 +2,6 @@ use crate::analysis::effects::EffectAnalyzer;
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::Function;
 use crate::ir::visitor::Visitor;
-use crate::ir::Type;
 use std::collections::HashMap;
 
 /// Local variable ID

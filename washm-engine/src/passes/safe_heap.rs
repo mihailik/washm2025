@@ -87,7 +87,7 @@ impl<'a> SafeHeapRewriter<'a> {
                 align,
                 bytes,
                 signed,
-                memory,
+                ..
             } => {
                 let ptr_expr = *ptr; // The original pointer expression
                 let signed_val = *signed;
@@ -136,7 +136,7 @@ impl<'a> SafeHeapRewriter<'a> {
                 offset,
                 align,
                 bytes,
-                memory,
+                ..
             } => {
                 let ptr_expr = *ptr;
                 let value_expr = *value;
@@ -373,7 +373,7 @@ impl<'a> SafeHeapRewriter<'a> {
                 self.visit_expr(expected);
                 self.visit_expr(timeout);
             }
-            ExpressionKind::AtomicNotify { ptr, count, memory } => {
+            ExpressionKind::AtomicNotify { ptr, count, .. } => {
                 self.visit_expr(ptr);
                 self.visit_expr(count);
             }

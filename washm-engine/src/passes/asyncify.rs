@@ -3,7 +3,7 @@ use crate::analysis::liveness::Liveness;
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
 use crate::ir::module::{Function, Global, GlobalKind, Memory, MemoryKind, MemoryLimits, Module};
 use crate::ir::visitor::{ReadOnlyVisitor, Visitor};
-use crate::ir::{FuncId, GlobalId, Literal, MemoryId, TableId, Type};
+use crate::ir::{FuncId, Literal, Type};
 use crate::passes::flatten::Flatten;
 use crate::passes::re_finalize::ReFinalize;
 use crate::passes::Pass;
@@ -290,7 +290,6 @@ impl Pass for Asyncify {
                         module.allocator,
                         module.features,
                         &module.functions,
-                        &module.globals,
                         &analyzer,
                         state_id,
                         base_local_index,
@@ -343,7 +342,7 @@ impl ModuleAnalyzer {
         let mut is_top_most_runtime = HashSet::new();
         let mut is_bottom_most_runtime = HashSet::new();
 
-        for (id, func) in &module.functions {
+        for func in module.functions.values() {
             let mut analyzer = FunctionStateAnalyzer {
                 module,
                 config,
@@ -506,7 +505,6 @@ impl<'a, 'b> ReadOnlyVisitor<'a> for FunctionStateAnalyzer<'a, 'b> {
 pub struct AsyncifyFlow<'a, 'b> {
     functions:
         &'a crate::collections::id_arena::IdArena<crate::ir::module::FuncMarker, Function<'b>>,
-    globals: &'a crate::collections::id_arena::IdArena<crate::ir::module::GlobalMarker, Global<'b>>,
     analyzer: &'a ModuleAnalyzer,
     builder: IrBuilder<'b>,
     state_id: crate::ir::GlobalId,
@@ -528,7 +526,6 @@ impl<'a, 'b> AsyncifyFlow<'a, 'b> {
             module.allocator,
             module.features,
             &module.functions,
-            &module.globals,
             analyzer,
             state_id,
             base_local_index,
@@ -542,17 +539,12 @@ impl<'a, 'b> AsyncifyFlow<'a, 'b> {
             crate::ir::module::FuncMarker,
             Function<'b>,
         >,
-        globals: &'a crate::collections::id_arena::IdArena<
-            crate::ir::module::GlobalMarker,
-            Global<'b>,
-        >,
         analyzer: &'a ModuleAnalyzer,
         state_id: crate::ir::GlobalId,
         base_local_index: u32,
     ) -> Self {
         Self {
             functions,
-            globals,
             analyzer,
             builder: IrBuilder::new(allocator),
             state_id,
@@ -842,7 +834,6 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
             .module
             .get_global_by_name(ASYNCIFY_DATA)
             .expect("Asyncify data global not found");
-        let pointer_type = self.pointer_type;
         let memory_id = self.memory_id;
 
         {
@@ -906,7 +897,6 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
             }
         }
 
-        let state_id = self.state_id;
         let pointer_type = self.pointer_type;
         // memory_id is already defined at the start of run()
 

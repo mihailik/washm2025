@@ -217,7 +217,7 @@ impl<'a> Visitor<'a> for CSETransformer<'a> {
                     self.visit_expression(expected);
                     self.visit_expression(timeout);
                 }
-                ExpressionKind::AtomicNotify { ptr, count, memory } => {
+                ExpressionKind::AtomicNotify { ptr, count, .. } => {
                     self.visit_expression(ptr);
                     self.visit_expression(count);
                 }
@@ -279,21 +279,14 @@ impl<'a> Visitor<'a> for CSETransformer<'a> {
                     self.visit_expression(size);
                 }
                 ExpressionKind::MemoryCopy {
-                    dest,
-                    src,
-                    size,
-                    dest_memory,
-                    src_memory,
+                    dest, src, size, ..
                 } => {
                     self.visit_expression(dest);
                     self.visit_expression(src);
                     self.visit_expression(size);
                 }
                 ExpressionKind::MemoryFill {
-                    dest,
-                    value,
-                    size,
-                    memory,
+                    dest, value, size, ..
                 } => {
                     self.visit_expression(dest);
                     self.visit_expression(value);

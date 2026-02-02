@@ -1,7 +1,6 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
-use crate::ir::module::{ExportKind, Function, Global, GlobalId, GlobalKind, Module};
+use crate::ir::module::{ExportKind, Function, Global, GlobalKind, Module};
 use crate::ir::ops::{BinaryOp, UnaryOp};
-use crate::ir::FuncId;
 use crate::ir::{Literal, Type};
 use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;

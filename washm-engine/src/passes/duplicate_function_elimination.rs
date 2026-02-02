@@ -137,7 +137,7 @@ mod tests {
 
         let mut module = Module::new(&bump);
         let id1 = module.add_function(func1);
-        let id2 = module.add_function(func2);
+        let _id2 = module.add_function(func2);
         let id3 = module.add_function(func3);
 
         let mut pass = DuplicateFunctionElimination;

@@ -386,7 +386,7 @@ impl<'a> Module<'a> {
 
         match &import.kind {
             ImportKind::Function(params, results) => {
-                let func_id = self.functions.push(Function {
+                self.functions.push(Function {
                     name: import.name.clone(),
                     params: *params,
                     results: *results,

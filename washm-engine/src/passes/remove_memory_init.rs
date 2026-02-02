@@ -1,5 +1,4 @@
-use crate::collections::id_arena::Id;
-use crate::ir::module::{MemoryId, Module};
+use crate::ir::module::Module;
 use crate::passes::Pass;
 
 pub struct RemoveMemoryInit;
@@ -42,6 +41,7 @@ impl Pass for RemoveMemoryInit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collections::Id;
     use crate::ir::expression::Expression;
     use crate::ir::module::{DataSegment, Function, Module};
     use crate::ir::{Literal, Type};

@@ -89,13 +89,13 @@ impl Pass for Inlining {
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         let call_graph = CallGraph::build(module);
-        let allocator = module.allocator;
+        let _allocator = module.allocator;
 
         // Identify functions used globally
         let mut used_globally = HashSet::new();
         for export in &module.exports {
             if let ExportKind::Function(id) = export.kind {
-                if let Some(func) = module.functions.get(id) {
+                if let Some(_) = module.functions.get(id) {
                     used_globally.insert(id);
                 }
             }
@@ -143,7 +143,7 @@ impl Pass for Inlining {
             let mut body = module.functions[id].body_mut().take().unwrap();
             let mut vars = std::mem::take(module.functions[id].vars_mut());
             let params = module.functions[id].params;
-            let name = module.functions[id].name.clone();
+            let _name = module.functions[id].name.clone();
 
             let mut inliner = Inliner {
                 function_info: &function_info,
@@ -345,15 +345,13 @@ mod tests {
         );
 
         let mut module = Module::new(&bump);
-        let callee_id = module.add_function(callee);
+        let _callee_id = module.add_function(callee);
         let caller_id = module.add_function(caller);
 
         let mut inlining = Inlining::new();
         inlining.run(&mut module);
 
-        let caller_body = module.functions[caller_id]
-            .body()
-            .unwrap();
+        let caller_body = module.functions[caller_id].body().unwrap();
 
         // Expect:
         // (block

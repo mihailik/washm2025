@@ -1,5 +1,4 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
 
@@ -46,7 +45,6 @@ impl<'a> Visitor<'a> for ReFinalizeVisitor {
 
                     // Let's assume standard behavior: type of block is type of last expression,
                     // unless earlier expression is Unreachable.
-                    let mut type_ = Type::NONE;
                     let mut saw_unreachable = false;
                     for child in list.iter() {
                         if child.type_ == Type::UNREACHABLE {
@@ -83,7 +81,7 @@ impl<'a> Visitor<'a> for ReFinalizeVisitor {
             ExpressionKind::Loop { body, .. } => unsafe {
                 (*expr.as_ptr()).type_ = body.type_;
             },
-            ExpressionKind::Break { value, .. } => unsafe {
+            ExpressionKind::Break { .. } => unsafe {
                 (*expr.as_ptr()).type_ = Type::UNREACHABLE;
             },
             ExpressionKind::Return { .. } => unsafe {

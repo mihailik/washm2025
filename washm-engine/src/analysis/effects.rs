@@ -7,8 +7,6 @@
 // ## Design Philosophy
 //
 // In Rust, we leverage the type system to make effect analysis more precise
-use crate::collections::Id;
-use crate::ir::{FuncId, GlobalId, MemoryId, TableId};
 // and harder to misuse than the C++ counterpart. Effects are represented as
 // bitflags, allowing efficient composition and querying.
 //
@@ -597,8 +595,9 @@ impl EffectAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collections::Id;
     use crate::ir::expression::{ExprRef, IrBuilder};
-    use crate::ir::{Literal, Type};
+    use crate::ir::{FuncId, GlobalId, Literal, MemoryId, Type};
     use bumpalo::Bump;
 
     #[test]

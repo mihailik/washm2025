@@ -245,15 +245,24 @@ impl<M, T> IdArena<M, T> {
 
     /// Iterate over all occupied items and their IDs.
     pub fn iter(&self) -> impl Iterator<Item = (Id<M>, &T)> {
-        self.items
-            .iter()
-            .enumerate()
-            .filter_map(|(i, entry)| match entry {
-                Entry::Occupied { value, generation } => {
-                    Some((Id::from_raw_parts(i as u32, *generation), value))
-                }
-                _ => None,
-            })
+        self.items.iter().enumerate().filter_map(|(i, entry)| {
+            if let Entry::Occupied { value, generation } = entry {
+                Some((Id::from_raw_parts(i as u32, *generation), value))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Iterate over all occupied items.
+    pub fn values(&self) -> impl Iterator<Item = &T> {
+        self.items.iter().filter_map(|entry| {
+            if let Entry::Occupied { value, .. } = entry {
+                Some(value)
+            } else {
+                None
+            }
+        })
     }
 
     /// Iterate over all occupied items and their IDs mutably.

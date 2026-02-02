@@ -1,4 +1,4 @@
-use crate::analysis::cfg::{BasicBlockA, ControlFlowGraph};
+use crate::analysis::cfg::ControlFlowGraph;
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::Function;
 use crate::ir::visitor::ReadOnlyVisitor;

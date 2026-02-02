@@ -1,7 +1,6 @@
 use crate::ir::expression::{ExpressionKind, IrBuilder};
 use crate::ir::module::Module;
 use crate::ir::ops::BinaryOp;
-use crate::ir::FuncId;
 use crate::ir::Type;
 use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;

@@ -1,5 +1,4 @@
 use crate::ir::module::Module;
-use crate::ir::FuncId;
 use crate::passes::Pass;
 
 pub struct Memory64Lowering;

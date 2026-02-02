@@ -1,7 +1,6 @@
 use crate::analysis::effects::EffectAnalyzer;
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::Module;
-use crate::ir::FuncId;
 use crate::ir::{Literal, Type};
 use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
@@ -215,7 +214,6 @@ mod tests {
     use super::*;
     use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
     use crate::ir::module::Function;
-    use crate::ir::FuncId;
     use crate::ir::{Literal, Type};
     use bumpalo::collections::Vec as BumpVec;
     use bumpalo::Bump;

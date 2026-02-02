@@ -1,7 +1,7 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::{ExportKind, Function, Module};
 use crate::ir::visitor::ReadOnlyVisitor;
-use crate::ir::{FuncId, MemoryId, TableId, Type};
+use crate::ir::Type;
 use std::collections::HashSet;
 
 pub struct Validator<'a, 'm> {
@@ -257,7 +257,7 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
                     self.fail(&format!("Call target not found: {:?}", target));
                 }
             }
-            ExpressionKind::CallIndirect { table, type_, .. } => {
+            ExpressionKind::CallIndirect { table, .. } => {
                 // Here 'type_' in CallIndirect is the Type (signature) itself,
                 // but we should check if it's a valid signature in the module if possible.
                 // However, the IR 'type_' is the actual Type object.

@@ -1,7 +1,6 @@
 use crate::ir::expression::{Expression, ExpressionKind, IrBuilder};
 use crate::ir::module::{Function, Module};
 use crate::ir::Type;
-use crate::ir::{FuncId, TableId};
 use crate::passes::Pass;
 
 use bumpalo::collections::Vec as BumpVec;
@@ -134,8 +133,8 @@ mod tests {
     use super::*;
     use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
     use crate::ir::module::{ElementSegment, Function};
+    use crate::ir::TableId;
     use crate::ir::Type;
-    use crate::ir::{FuncId, TableId};
     use bumpalo::collections::Vec as BumpVec;
     use bumpalo::Bump;
 

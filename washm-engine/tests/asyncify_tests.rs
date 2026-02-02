@@ -1,7 +1,6 @@
 use bumpalo::Bump;
 use washm::passes::asyncify::{Asyncify, AsyncifyConfig};
 use washm::passes::Pass;
-use washm::wasm::binary_writer::BinaryWriter;
 
 fn run_asyncify(wat: &str, imports: Vec<&str>) -> String {
     let allocator = Bump::new();

@@ -1,7 +1,7 @@
 use crate::analysis::stats::ModuleStats;
 use crate::collections::IdArena;
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{ExportKind, FuncId, FuncMarker, Module};
+use crate::ir::module::{ExportKind, FuncId, Module};
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
 use std::collections::HashMap;

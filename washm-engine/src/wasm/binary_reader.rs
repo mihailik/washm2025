@@ -1,7 +1,6 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind, IrBuilder};
 use crate::ir::module::{
-    DataSegment, ElementSegment, Export, ExportKind, FuncId, Function, GlobalId, MemoryId,
-    MemoryLimits, Module, TableId, TableLimits,
+    DataSegment, ElementSegment, Export, ExportKind, Function, MemoryLimits, Module, TableLimits,
 };
 use crate::ir::{HeapType, Literal, Type};
 use bumpalo::collections::Vec as BumpVec;
@@ -177,9 +176,6 @@ impl<'a> BinaryReader<'a> {
     pub fn parse_module(&mut self) -> Result<Module<'a>> {
         let mut module = Module::new(self.bump);
         let mut function_section = Vec::new();
-        let mut memory_section: Option<Vec<wasmparser::MemoryType>> = None;
-        let mut table_section: Option<Vec<wasmparser::TableType>> = None;
-        let mut start_section: Option<u32> = None;
         let mut code_section = Vec::new();
 
         let this = self as *mut Self;
@@ -374,7 +370,8 @@ impl<'a> BinaryReader<'a> {
                         let mutable = global.ty.mutable;
 
                         let init = unsafe {
-                            (*this).parse_expression(global.init_expr.get_operators_reader(), &module)
+                            (*this)
+                                .parse_expression(global.init_expr.get_operators_reader(), &module)
                         }?;
                         let name = format!("global_{}", i);
 
@@ -443,7 +440,8 @@ impl<'a> BinaryReader<'a> {
                             wasmparser::ElementKind::Active {
                                 ref offset_expr, ..
                             } => unsafe {
-                                (*this).parse_expression(offset_expr.get_operators_reader(), &module)
+                                (*this)
+                                    .parse_expression(offset_expr.get_operators_reader(), &module)
                             }?,
                             _ => None,
                         };
@@ -497,13 +495,14 @@ impl<'a> BinaryReader<'a> {
                     code_section.push((locals, expr));
                 }
                 Payload::DataSection(reader) => {
-                    for (i, data) in reader.into_iter().enumerate() {
+                    for data in reader {
                         let data = data?;
                         let offset = match data.kind {
                             wasmparser::DataKind::Active {
                                 ref offset_expr, ..
                             } => unsafe {
-                                (*this).parse_expression(offset_expr.get_operators_reader(), &module)
+                                (*this)
+                                    .parse_expression(offset_expr.get_operators_reader(), &module)
                             }?,
                             _ => None,
                         };
@@ -2513,7 +2512,7 @@ impl<'a> BinaryReader<'a> {
                     // TODO: refine type
                 }
                 Operator::StructGet {
-                    struct_type_index,
+                    struct_type_index: _,
                     field_index,
                 } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2526,7 +2525,7 @@ impl<'a> BinaryReader<'a> {
                     )); // TODO: refine types
                 }
                 Operator::StructSet {
-                    struct_type_index,
+                    struct_type_index: _,
                     field_index,
                 } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2538,11 +2537,15 @@ impl<'a> BinaryReader<'a> {
                         value,
                     ));
                 }
-                Operator::ArrayNew { array_type_index } => {
+                Operator::ArrayNew {
+                    array_type_index: _,
+                } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     stack.push(builder.array_new(Type::new(HeapType::ARRAY, true), size, None));
                 }
-                Operator::ArrayGet { array_type_index } => {
+                Operator::ArrayGet {
+                    array_type_index: _,
+                } => {
                     let index = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     stack.push(builder.array_get(
@@ -2553,7 +2556,9 @@ impl<'a> BinaryReader<'a> {
                         Type::ANYREF,
                     ));
                 }
-                Operator::ArraySet { array_type_index } => {
+                Operator::ArraySet {
+                    array_type_index: _,
+                } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let index = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2568,12 +2573,12 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     stack.push(builder.array_len(ptr));
                 }
-                Operator::RefTestNonNull { hty } | Operator::RefTestNullable { hty } => {
+                Operator::RefTestNonNull { hty: _ } | Operator::RefTestNullable { hty: _ } => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     stack.push(builder.ref_test(crate::ir::ops::RefTestOp::Ref, val, Type::ANYREF));
                     // TODO
                 }
-                Operator::RefCastNonNull { hty } | Operator::RefCastNullable { hty } => {
+                Operator::RefCastNonNull { hty: _ } | Operator::RefCastNullable { hty: _ } => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     stack.push(builder.ref_cast(
                         crate::ir::ops::RefCastOp::Cast,

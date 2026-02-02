@@ -266,12 +266,9 @@ impl BinaryWriter {
                         Self::expand_type(func.params),
                         Self::expand_type(func.results),
                     );
-                    type_map
-                        .iter()
-                        .position(|t| *t == sig)
-                        .ok_or_else(|| {
-                            WriteError::InternalError("Signature not found in type map".to_string())
-                        })? as u32
+                    type_map.iter().position(|t| *t == sig).ok_or_else(|| {
+                        WriteError::InternalError("Signature not found in type map".to_string())
+                    })? as u32
                 };
                 func_type_indices.push(idx);
             }
@@ -1899,9 +1896,7 @@ mod tests {
     use super::*;
     use crate::ir::expression::{Expression, ExpressionKind, IrBuilder};
     use crate::ir::module::ExportKind;
-    use crate::ir::module::{
-        Function, Global, GlobalKind, Memory, MemoryKind, MemoryLimits, Module,
-    };
+    use crate::ir::module::{Function, Memory, MemoryKind, MemoryLimits, Module};
     use crate::ir::ops::BinaryOp;
     use crate::ir::Literal;
     use crate::wasm::binary_reader::BinaryReader;
@@ -3036,7 +3031,7 @@ mod tests {
         let g0_id = ids.next().unwrap();
         let g1_id = ids.next().unwrap();
 
-        let g0 = &module2.globals[g0_id];
+        let _g0 = &module2.globals[g0_id];
         let g1 = &module2.globals[g1_id];
         assert_eq!(g1.type_, Type::F32);
         assert!(!g1.mutable);

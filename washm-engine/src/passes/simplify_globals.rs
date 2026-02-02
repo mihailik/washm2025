@@ -1,7 +1,6 @@
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
 use crate::ir::module::{ExportKind, Module};
 use crate::ir::visitor::Visitor;
-use crate::ir::FuncId;
 use crate::ir::Literal;
 use crate::passes::Pass;
 use std::collections::{HashMap, HashSet};
