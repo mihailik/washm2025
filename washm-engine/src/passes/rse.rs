@@ -51,7 +51,7 @@ mod tests {
         let bump = Bump::new();
 
         let val = Expression::const_expr(&bump, Literal::I32(42), Type::I32);
-        let set = Expression::local_set(&bump, 0, val);
+        let set = Expression::local_set(&bump, 0.into(), val);
 
         let func = Function::new(
             "test".to_string(),
@@ -77,8 +77,8 @@ mod tests {
         let bump = Bump::new();
 
         let val = Expression::const_expr(&bump, Literal::I32(10), Type::I32);
-        let set = Expression::local_set(&bump, 0, val);
-        let get = Expression::local_get(&bump, 0, Type::I32);
+        let set = Expression::local_set(&bump, 0.into(), val);
+        let get = Expression::local_get(&bump, 0.into(), Type::I32);
 
         let mut list = bumpalo::collections::Vec::new_in(&bump);
         list.push(set);

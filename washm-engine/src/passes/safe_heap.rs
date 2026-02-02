@@ -25,32 +25,18 @@ impl Pass for SafeHeap {
                 continue;
             }
 
-            // Calculate param count (Assuming MVP/single-value for now as Type iteration is not exposed)
-            let param_count = if func.params == Type::NONE {
-                0
-            } else {
-                func.params.tuple_len()
-            };
-
-            let ptr_local_idx = func.vars().len() as u32 + param_count as u32;
-            func.vars_mut().push(Type::I32); // ptr
-
-            // Value locals: i32, i64, f32, f64. V128 not supported in this simple pass yet.
-            let val_i32_idx = ptr_local_idx + 1;
-            func.vars_mut().push(Type::I32);
-            let val_i64_idx = val_i32_idx + 1;
-            func.vars_mut().push(Type::I64);
-            let val_f32_idx = val_i64_idx + 1;
-            func.vars_mut().push(Type::F32);
-            let val_f64_idx = val_f32_idx + 1;
-            func.vars_mut().push(Type::F64);
+            let ptr_local = func.add_var(Type::I32);
+            let val_i32 = func.add_var(Type::I32);
+            let val_i64 = func.add_var(Type::I64);
+            let val_f32 = func.add_var(Type::F32);
+            let val_f64 = func.add_var(Type::F64);
 
             let mut rewriter = SafeHeapRewriter {
-                ptr_local: ptr_local_idx,
-                val_i32: val_i32_idx,
-                val_i64: val_i64_idx,
-                val_f32: val_f32_idx,
-                val_f64: val_f64_idx,
+                ptr_local,
+                val_i32,
+                val_i64,
+                val_f32,
+                val_f64,
                 memory,
                 allocator: module.allocator,
             };
@@ -63,11 +49,11 @@ impl Pass for SafeHeap {
 }
 
 struct SafeHeapRewriter<'a> {
-    ptr_local: u32,
-    val_i32: u32,
-    val_i64: u32,
-    val_f32: u32,
-    val_f64: u32,
+    ptr_local: crate::ir::LocalId,
+    val_i32: crate::ir::LocalId,
+    val_i64: crate::ir::LocalId,
+    val_f32: crate::ir::LocalId,
+    val_f64: crate::ir::LocalId,
     memory: crate::ir::MemoryId,
     allocator: &'a bumpalo::Bump,
 }
@@ -94,9 +80,7 @@ impl<'a> SafeHeapRewriter<'a> {
 
                 // Construct new Load using local
                 let local_get_ptr = self.allocator.alloc(Expression {
-                    kind: ExpressionKind::LocalGet {
-                        index: self.ptr_local,
-                    },
+                    kind: ExpressionKind::LocalGet { id: self.ptr_local },
                     type_: Type::I32,
                 });
 
@@ -116,7 +100,7 @@ impl<'a> SafeHeapRewriter<'a> {
 
                 let local_set_ptr = self.allocator.alloc(Expression {
                     kind: ExpressionKind::LocalSet {
-                        index: self.ptr_local,
+                        id: self.ptr_local,
                         value: ptr_expr,
                     },
                     type_: Type::NONE,
@@ -142,7 +126,7 @@ impl<'a> SafeHeapRewriter<'a> {
                 let value_expr = *value;
                 let value_type = value_expr.type_;
 
-                let val_local_idx = match value_type {
+                let val_local_id = match value_type {
                     Type::I32 => self.val_i32,
                     Type::I64 => self.val_i64,
                     Type::F32 => self.val_f32,
@@ -155,7 +139,7 @@ impl<'a> SafeHeapRewriter<'a> {
                 // 1. local.set  (ptr)
                 let local_set_ptr = self.allocator.alloc(Expression {
                     kind: ExpressionKind::LocalSet {
-                        index: self.ptr_local,
+                        id: self.ptr_local,
                         value: ptr_expr,
                     },
                     type_: Type::NONE,
@@ -165,7 +149,7 @@ impl<'a> SafeHeapRewriter<'a> {
                 // 2. local.set  (value)
                 let local_set_val = self.allocator.alloc(Expression {
                     kind: ExpressionKind::LocalSet {
-                        index: val_local_idx,
+                        id: val_local_id,
                         value: value_expr,
                     },
                     type_: Type::NONE,
@@ -177,15 +161,11 @@ impl<'a> SafeHeapRewriter<'a> {
 
                 // 4. store
                 let get_ptr = self.allocator.alloc(Expression {
-                    kind: ExpressionKind::LocalGet {
-                        index: self.ptr_local,
-                    },
+                    kind: ExpressionKind::LocalGet { id: self.ptr_local },
                     type_: Type::I32,
                 });
                 let get_val = self.allocator.alloc(Expression {
-                    kind: ExpressionKind::LocalGet {
-                        index: val_local_idx,
-                    },
+                    kind: ExpressionKind::LocalGet { id: val_local_id },
                     type_: value_type,
                 });
 
@@ -214,9 +194,7 @@ impl<'a> SafeHeapRewriter<'a> {
         // if (ptr + offset + bytes > mem_size * 64k) unreachable
 
         let get_ptr = self.allocator.alloc(Expression {
-            kind: ExpressionKind::LocalGet {
-                index: self.ptr_local,
-            },
+            kind: ExpressionKind::LocalGet { id: self.ptr_local },
             type_: Type::I32,
         });
 

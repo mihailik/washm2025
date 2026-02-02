@@ -1,7 +1,4 @@
-﻿use std::io;
-use std::sync::Arc;
-
-#[cfg(target_arch = "wasm32")]
+﻿#[cfg(target_arch = "wasm32")]
 #[macro_use]
 #[path = "../target/vendor/brush-core/src/lib.rs"]
 pub mod brush_core;

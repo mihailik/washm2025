@@ -1,16 +1,14 @@
 use crate::analysis::cfg::{BlockId, ControlFlowGraph};
 use crate::analysis::dominators::DominanceTree;
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::Function;
+use crate::ir::module::{Function, LocalId};
 use std::collections::{HashMap, HashSet};
-
-pub type LocalId = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefA<'a> {
     Instruction(ExprRef<'a>),
     Phi(BlockId, LocalId),
-    Param(u32),
+    Param(LocalId),
 }
 
 #[derive(Debug)]
@@ -66,12 +64,12 @@ impl<'a> SSABuilder<'a> {
         let mut stacks: HashMap<LocalId, Vec<DefA<'a>>> = HashMap::new();
 
         // 0. Initialize stacks with params
-        let param_types = func.params.tuple_elements();
-        for i in 0..param_types.len() {
+        for id in &func.param_ids {
+            let local_id = *id;
             stacks
-                .entry(i as u32)
+                .entry(local_id)
                 .or_default()
-                .push(DefA::Param(i as u32));
+                .push(DefA::Param(local_id));
         }
 
         self.rename_block(cfg.entry, cfg, dom, &mut stacks);
@@ -96,7 +94,7 @@ impl<'a> SSABuilder<'a> {
         }
 
         // Instructions
-        if let Some(block) = cfg.blocks.get(block_id as usize) {
+        if let Some(block) = cfg.blocks.get(block_id) {
             for expr in &block.contents {
                 self.visit_expr_for_rename(*expr, stacks, &mut pushes);
             }
@@ -140,19 +138,18 @@ impl<'a> SSABuilder<'a> {
         pushes: &mut HashMap<LocalId, usize>,
     ) {
         match &expr.kind {
-            ExpressionKind::LocalGet { index } => {
-                if let Some(stack) = stacks.get(index) {
+            ExpressionKind::LocalGet { id } => {
+                if let Some(stack) = stacks.get(id) {
                     if let Some(def) = stack.last() {
                         self.use_def.insert(expr, *def);
                     }
                 }
             }
-            ExpressionKind::LocalSet { index, value }
-            | ExpressionKind::LocalTee { index, value } => {
+            ExpressionKind::LocalSet { id, value } | ExpressionKind::LocalTee { id, value } => {
                 self.visit_expr_for_rename(*value, stacks, pushes);
                 let def = DefA::Instruction(expr);
-                stacks.entry(*index).or_default().push(def);
-                *pushes.entry(*index).or_default() += 1;
+                stacks.entry(*id).or_default().push(def);
+                *pushes.entry(*id).or_default() += 1;
             }
             ExpressionKind::Block { list, .. } => {
                 for child in list.iter() {
@@ -199,18 +196,17 @@ impl<'a> SSABuilder<'a> {
         let mut defs: HashMap<LocalId, HashSet<BlockId>> = HashMap::new();
 
         // Entry block defines all params
-        let param_count = func.params.tuple_len();
-        for i in 0..param_count {
-            defs.entry(i as u32).or_default().insert(cfg.entry);
+        for &id in &func.param_ids {
+            defs.entry(id).or_default().insert(cfg.entry);
         }
 
         // Scan CFG to find defs
-        for block in &cfg.blocks {
+        for (id, block) in cfg.blocks.iter() {
             for expr in &block.contents {
                 match &expr.kind {
-                    ExpressionKind::LocalSet { index, .. }
-                    | ExpressionKind::LocalTee { index, .. } => {
-                        defs.entry(*index).or_default().insert(block.id);
+                    ExpressionKind::LocalSet { id: local_id, .. }
+                    | ExpressionKind::LocalTee { id: local_id, .. } => {
+                        defs.entry(*local_id).or_default().insert(id);
                     }
                     _ => {}
                 }
@@ -318,10 +314,10 @@ mod tests {
         // DF(4) = {5}
         // So Phi should be in 5.
 
-        let phis = ssa.phi_nodes.get(&5);
+        let phis = ssa.phi_nodes.get(&BlockId::from_u32(5));
         assert!(phis.is_some());
         assert_eq!(phis.unwrap().len(), 1);
-        assert_eq!(phis.unwrap()[0].result_local, 0);
+        assert_eq!(phis.unwrap()[0].result_local, 0.into());
     }
 
     #[test]
@@ -367,7 +363,7 @@ mod tests {
         let mut phi_found = false;
         for phis in ssa.phi_nodes.values() {
             for phi in phis {
-                if phi.result_local == 0 {
+                if phi.result_local == 0.into() {
                     phi_found = true;
                     assert_eq!(phi.incoming.len(), 2);
 

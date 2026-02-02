@@ -72,76 +72,62 @@ impl ConstHoisting {
         func: &mut crate::ir::module::Function<'a>,
         allocator: &'a bumpalo::Bump,
     ) {
-        let param_count = func.params.tuple_len();
-        let vars_len = func.vars().len();
-
-        let mut candidates = Vec::new();
         let mut lit_to_local = HashMap::new();
+        let mut candidates = Vec::new();
 
-        if let Some(body) = func.body_mut() {
+        let counts = if let Some(body) = func.body_mut() {
             // 1. Scan
             let mut scanner = ConstScanner::new();
             scanner.visit(body);
+            scanner.counts
+        } else {
+            return;
+        };
 
-            // 2. Identify candidates
-            let mut current_local_idx = (param_count + vars_len) as u32;
-
-            for (lit, count) in scanner.counts {
-                if count >= 2 {
-                    let ty = match lit.0 {
-                        Literal::I32(_) => Type::I32,
-                        Literal::I64(_) => Type::I64,
-                        Literal::F32(_) => Type::F32,
-                        Literal::F64(_) => Type::F64,
-                        _ => continue,
-                    };
-
-                    lit_to_local.insert(lit.clone(), current_local_idx);
-                    candidates.push((lit.0, ty));
-                    current_local_idx += 1;
-                }
-            }
-
-            if candidates.is_empty() {
-                return;
-            }
-
-            // 3. Rewrite body and collect types for new locals
-            let mut ty_list = Vec::new();
-            let builder = IrBuilder::new(allocator);
-            if let Some(body) = func.body_mut() {
-                // We don't borrow func.vars_mut() here, but we borrow body mutably.
-                let mut rewriter = ConstRewriter {
-                    lit_to_local: &lit_to_local,
-                    builder,
-                    replaced_count: 0,
+        // 2. Identify candidates and add locals
+        for (lit, count) in counts {
+            if count >= 2 {
+                let ty = match lit.0 {
+                    Literal::I32(_) => Type::I32,
+                    Literal::I64(_) => Type::I64,
+                    Literal::F32(_) => Type::F32,
+                    Literal::F64(_) => Type::F64,
+                    _ => continue,
                 };
-                rewriter.visit(body);
 
-                for (_, ty) in &candidates {
-                    ty_list.push(*ty);
-                }
+                // Add new var to function and get its stable ID
+                let new_id = func.add_var(ty);
+                lit_to_local.insert(lit.clone(), new_id);
+                candidates.push((lit.0, ty, new_id));
+            }
+        }
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        if let Some(body) = func.body_mut() {
+            // 3. Rewrite body
+            let builder = IrBuilder::new(allocator);
+            let mut rewriter = ConstRewriter {
+                lit_to_local: &lit_to_local,
+                builder,
+                replaced_count: 0,
+            };
+            rewriter.visit(body);
+
+            // 4. Prepend initialization
+            let mut new_list = BumpVec::new_in(allocator);
+            for (lit, _, local_id) in candidates {
+                let const_expr = builder.const_(lit);
+                let set_expr = builder.local_set(local_id, const_expr);
+                new_list.push(set_expr);
             }
 
-            // Now append the types to vars_mut
-            func.vars_mut().extend(ty_list);
+            new_list.push(*body);
 
-            if let Some(body) = func.body_mut() {
-                // 5. Prepend initialization
-                let mut new_list = BumpVec::new_in(allocator);
-                for (lit, _) in candidates {
-                    let wrapped = HashableLiteral(lit);
-                    let local_idx = *lit_to_local.get(&wrapped).unwrap();
-                    let const_expr = builder.const_(lit);
-                    let set_expr = builder.local_set(local_idx, const_expr);
-                    new_list.push(set_expr);
-                }
-
-                new_list.push(*body);
-
-                let new_block = builder.block(None, new_list, body.type_);
-                *body = new_block;
-            }
+            let new_block = builder.block(None, new_list, body.type_);
+            *body = new_block;
         }
     }
 }
@@ -168,7 +154,7 @@ impl<'a> Visitor<'a> for ConstScanner {
 }
 
 struct ConstRewriter<'a, 'b> {
-    lit_to_local: &'b HashMap<HashableLiteral, u32>,
+    lit_to_local: &'b HashMap<HashableLiteral, crate::ir::LocalId>,
     builder: IrBuilder<'a>,
     replaced_count: usize,
 }
@@ -176,7 +162,7 @@ struct ConstRewriter<'a, 'b> {
 impl<'a, 'b> Visitor<'a> for ConstRewriter<'a, 'b> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
         if let ExpressionKind::Const(lit) = &expr.kind {
-            if let Some(&local_idx) = self.lit_to_local.get(&HashableLiteral(*lit)) {
+            if let Some(&local_id) = self.lit_to_local.get(&HashableLiteral(*lit)) {
                 // Replace with local.get
                 // Type should match literal type
                 let ty = match lit {
@@ -186,7 +172,7 @@ impl<'a, 'b> Visitor<'a> for ConstRewriter<'a, 'b> {
                     Literal::F64(_) => Type::F64,
                     _ => Type::NONE,
                 };
-                *expr = self.builder.local_get(local_idx, ty);
+                *expr = self.builder.local_get(local_id, ty);
                 self.replaced_count += 1;
             }
         }
@@ -235,8 +221,8 @@ mod tests {
             ExpressionKind::Block { list, .. } => {
                 assert_eq!(list.len(), 2);
                 // Check initialization
-                if let ExpressionKind::LocalSet { index, value } = &list[0].kind {
-                    assert_eq!(*index, 0);
+                if let ExpressionKind::LocalSet { id, value } = &list[0].kind {
+                    assert_eq!(id.index(), 0);
                     assert!(matches!(
                         value.kind,
                         ExpressionKind::Const(Literal::I32(42))
@@ -247,19 +233,21 @@ mod tests {
 
                 // Check body replacement
                 if let ExpressionKind::Binary { left, right, .. } = &list[1].kind {
-                    assert!(matches!(
-                        left.kind,
-                        ExpressionKind::LocalGet { index: 0, .. }
-                    ));
-                    assert!(matches!(
-                        right.kind,
-                        ExpressionKind::LocalGet { index: 0, .. }
-                    ));
+                    if let ExpressionKind::LocalGet { id, .. } = &left.kind {
+                        assert_eq!(id.index(), 0);
+                    } else {
+                        panic!("Expected LocalGet for left");
+                    }
+                    if let ExpressionKind::LocalGet { id, .. } = &right.kind {
+                        assert_eq!(id.index(), 0);
+                    } else {
+                        panic!("Expected LocalGet for right");
+                    }
                 } else {
                     panic!("Expected Binary Add");
                 }
 
-                assert_eq!(func.vars().len(), 1); // Added 1 local
+                assert_eq!(func.locals.len() - func.num_params(), 1); // Added 1 local
             }
             _ => panic!("Expected Block wrapper"),
         }

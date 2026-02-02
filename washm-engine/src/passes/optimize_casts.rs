@@ -114,7 +114,7 @@ impl<'a, 'b> Visitor<'a> for OptimizeCastsVisitor<'a, 'b> {
 mod tests {
     use super::*;
     use crate::ir::expression::{ExpressionKind, IrBuilder};
-    use crate::ir::Type;
+    use crate::ir::{LocalId, Type};
     use bumpalo::Bump;
 
     #[test]
@@ -136,10 +136,11 @@ mod tests {
         let mut expr_ref = wrap;
         visitor.visit(&mut expr_ref);
 
-        assert!(matches!(
-            expr_ref.kind,
-            ExpressionKind::LocalGet { index: 0, .. }
-        ));
+        if let ExpressionKind::LocalGet { id, .. } = &expr_ref.kind {
+            assert_eq!(id.index(), 0);
+        } else {
+            panic!("Expected LocalGet");
+        }
     }
 
     #[test]
@@ -148,7 +149,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // demote(promote(local.get 0)) -> local.get 0
-        let x = builder.local_get(0, Type::F32);
+        let x = builder.local_get(LocalId::from(0), Type::F32);
         let promote = builder.unary(UnaryOp::PromoteFloat32, x, Type::F64);
         let demote = builder.unary(UnaryOp::DemoteFloat64, promote, Type::F32);
 
@@ -161,9 +162,10 @@ mod tests {
 
         visitor.visit(&mut expr_ref);
 
-        assert!(matches!(
-            expr_ref.kind,
-            ExpressionKind::LocalGet { index: 0, .. }
-        ));
+        if let ExpressionKind::LocalGet { id, .. } = &expr_ref.kind {
+            assert_eq!(id.index(), 0);
+        } else {
+            panic!("Expected LocalGet");
+        }
     }
 }

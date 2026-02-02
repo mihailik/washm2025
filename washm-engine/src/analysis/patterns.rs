@@ -196,8 +196,8 @@ impl Pattern {
                     match (&existing.kind, &expr.kind) {
                         (ExpressionKind::Const(a), ExpressionKind::Const(b)) => a == b,
                         (
-                            ExpressionKind::LocalGet { index: a },
-                            ExpressionKind::LocalGet { index: b },
+                            ExpressionKind::LocalGet { id: a },
+                            ExpressionKind::LocalGet { id: b },
                         ) => a == b,
                         _ => false,
                     }

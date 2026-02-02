@@ -41,14 +41,14 @@ struct UnteeTransformer<'a> {
 
 impl<'a> Visitor<'a> for UnteeTransformer<'a> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if let ExpressionKind::LocalTee { index, value } = &expr.kind {
-            let local_index = *index;
+        if let ExpressionKind::LocalTee { id, value } = &expr.kind {
+            let local_id = *id;
             let tee_value = *value;
             let tee_type = expr.type_;
 
             // Create: (block (local.set $x value) (local.get $x))
-            let set = Expression::local_set(self.allocator, local_index, tee_value);
-            let get = Expression::local_get(self.allocator, local_index, tee_type);
+            let set = Expression::local_set(self.allocator, local_id, tee_value);
+            let get = Expression::local_get(self.allocator, local_id, tee_type);
 
             let mut list = BumpVec::new_in(self.allocator);
             list.push(set);
@@ -73,7 +73,7 @@ mod tests {
 
         // Create: (local.tee $0 (i32.const 42))
         let const_val = Expression::const_expr(&bump, Literal::I32(42), Type::I32);
-        let tee = Expression::local_tee(&bump, 0, const_val, Type::I32);
+        let tee = Expression::local_tee(&bump, 0.into(), const_val, Type::I32);
 
         let func = Function::new(
             "test".to_string(),
@@ -98,15 +98,15 @@ mod tests {
             assert_eq!(list.len(), 2, "Expected block with 2 instructions");
 
             // First should be local.set
-            if let ExpressionKind::LocalSet { index, .. } = &list[0].kind {
-                assert_eq!(*index, 0);
+            if let ExpressionKind::LocalSet { id, .. } = &list[0].kind {
+                assert_eq!(id.index(), 0);
             } else {
                 panic!("Expected LocalSet, got {:?}", list[0].kind);
             }
 
             // Second should be local.get
-            if let ExpressionKind::LocalGet { index } = &list[1].kind {
-                assert_eq!(*index, 0);
+            if let ExpressionKind::LocalGet { id } = &list[1].kind {
+                assert_eq!(id.index(), 0);
             } else {
                 panic!("Expected LocalGet, got {:?}", list[1].kind);
             }
@@ -120,7 +120,7 @@ mod tests {
         let bump = Bump::new();
 
         // Create: (local.get $0)
-        let get = Expression::local_get(&bump, 0, Type::I32);
+        let get = Expression::local_get(&bump, 0.into(), Type::I32);
 
         let func = Function::new(
             "test".to_string(),
@@ -148,7 +148,7 @@ mod tests {
 
         // Create: (local.tee $0 (i64.const 100))
         let const_val = Expression::const_expr(&bump, Literal::I64(100), Type::I64);
-        let tee = Expression::local_tee(&bump, 0, const_val, Type::I64);
+        let tee = Expression::local_tee(&bump, 0.into(), const_val, Type::I64);
 
         let func = Function::new(
             "test".to_string(),

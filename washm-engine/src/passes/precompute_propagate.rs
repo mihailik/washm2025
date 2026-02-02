@@ -36,11 +36,11 @@ impl Pass for PrecomputePropagate {
 struct PrecomputePropagateVisitor<'a, 'b> {
     evaluator: &'b Evaluator<'a>,
     /// Known values for locals in the current control flow scope
-    /// Map from Local Index -> Literal
+    /// Map from Local ID -> Literal
     /// Note: This is a very simplified version that doesn't handle control flow merges properly yet.
     /// For a robust implementation, we need dataflow analysis.
     /// For this iteration, we will only propagate within straight-line code and invalidate on control flow.
-    known_locals: HashMap<u32, Literal>,
+    known_locals: HashMap<crate::ir::LocalId, Literal>,
     made_changes: bool,
 }
 
@@ -81,19 +81,18 @@ impl<'a, 'b> Visitor<'a> for PrecomputePropagateVisitor<'a, 'b> {
 
         // Post-order processing
         match &expr.kind {
-            ExpressionKind::LocalSet { index, value }
-            | ExpressionKind::LocalTee { index, value } => {
+            ExpressionKind::LocalSet { id, value } | ExpressionKind::LocalTee { id, value } => {
                 // If value is a constant, record it
                 if let ExpressionKind::Const(lit) = &value.kind {
-                    self.known_locals.insert(*index, *lit);
+                    self.known_locals.insert(*id, *lit);
                 } else {
                     // Otherwise, we don't know this local anymore
-                    self.known_locals.remove(index);
+                    self.known_locals.remove(id);
                 }
             }
-            ExpressionKind::LocalGet { index, .. } => {
+            ExpressionKind::LocalGet { id, .. } => {
                 // If we know the value, replace with constant
-                if let Some(lit) = self.known_locals.get(index) {
+                if let Some(lit) = self.known_locals.get(id) {
                     expr.kind = ExpressionKind::Const(*lit);
                     self.made_changes = true;
                 }

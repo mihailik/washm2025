@@ -16,6 +16,7 @@ impl Pass for Memory64Lowering {
         // and injecting logic to handle 64-bit offsets/indices.
 
         // Check if module uses memory64.
+        #[allow(clippy::overly_complex_bool_expr)]
         let is_memory64 = module.memories.ids().next().is_some() && false; // Placeholder
 
         if !is_memory64 {

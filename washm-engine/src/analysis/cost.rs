@@ -133,8 +133,8 @@ impl CostCalculator {
 
         let mut shrink = true;
         for (i, op) in operands.iter().enumerate() {
-            if let ExpressionKind::LocalGet { index } = &op.kind {
-                if *index != i as u32 {
+            if let ExpressionKind::LocalGet { id } = &op.kind {
+                if id.index() != i as u32 {
                     shrink = false;
                     break;
                 }

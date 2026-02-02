@@ -82,15 +82,15 @@ struct BlockBreak<'a> {
     /// The break expression (br, br_if)
     br: *mut Expression<'a>,
     /// Sinkables at the point of the break
-    sinkables: HashMap<u32, SinkableInfo<'a>>,
+    sinkables: HashMap<crate::ir::LocalId, SinkableInfo<'a>>,
 }
 
 /// Context for a single function optimization
 struct FunctionContext<'a> {
     /// Map from local index to sinkable info
-    sinkables: HashMap<u32, SinkableInfo<'a>>,
+    sinkables: HashMap<crate::ir::LocalId, SinkableInfo<'a>>,
     /// Count of local.get operations per local
-    get_counts: HashMap<u32, usize>,
+    get_counts: HashMap<crate::ir::LocalId, usize>,
     /// Whether this is the first optimization cycle
     first_cycle: bool,
     /// Options
@@ -102,7 +102,7 @@ struct FunctionContext<'a> {
     /// Blocks that cannot produce return values
     unoptimizable_blocks: std::collections::HashSet<String>,
     /// Stack of sinkables for if-else branches
-    if_stack: Vec<HashMap<u32, SinkableInfo<'a>>>,
+    if_stack: Vec<HashMap<crate::ir::LocalId, SinkableInfo<'a>>>,
     /// Whether we need a refinalize
     refinalize: bool,
 }
@@ -125,10 +125,10 @@ impl<'a> FunctionContext<'a> {
 
     /// Check if a local.set can be sunk
     fn can_sink(&mut self, set: &Expression) -> bool {
-        if let ExpressionKind::LocalSet { index, .. } = &set.kind {
+        if let ExpressionKind::LocalSet { id, .. } = &set.kind {
             // If in first cycle or not allowing tees, cannot sink if >1 use
             // (would require creating a tee)
-            let use_count = self.get_counts.get(index).copied().unwrap_or(0);
+            let use_count = self.get_counts.get(id).copied().unwrap_or(0);
             if use_count > 1 {
                 if !self.allow_tee {
                     return false;
@@ -226,19 +226,18 @@ impl SimplifyLocals {
         depth: usize,
     ) {
         // Handle LocalGet
-        let get_index = if let ExpressionKind::LocalGet { index } = &expr.kind {
-            Some(*index)
+        let get_id = if let ExpressionKind::LocalGet { id } = &expr.kind {
+            Some(*id)
         } else {
             None
         };
-        if let Some(index) = get_index {
+        if let Some(id) = get_id {
             // Sinking logic
-            if let Some(info) = ctx.sinkables.remove(&index) {
+            if let Some(info) = ctx.sinkables.remove(&id) {
                 unsafe {
                     let set_kind = &mut (*info.set.as_ptr()).kind;
                     if let ExpressionKind::LocalSet { value, .. } = set_kind {
-                        if ctx.first_cycle || ctx.get_counts.get(&index).copied().unwrap_or(0) == 1
-                        {
+                        if ctx.first_cycle || ctx.get_counts.get(&id).copied().unwrap_or(0) == 1 {
                             // Single use: Replace Get with Value
                             if value.type_ != expr.type_ {
                                 ctx.refinalize = true;
@@ -246,10 +245,7 @@ impl SimplifyLocals {
                             *expr = *value;
                         } else {
                             // Multiple uses: Replace Get with LocalTee
-                            expr.kind = ExpressionKind::LocalTee {
-                                index,
-                                value: *value,
-                            };
+                            expr.kind = ExpressionKind::LocalTee { id, value: *value };
                         }
 
                         // Nop out the Set at its original location
@@ -269,13 +265,13 @@ impl SimplifyLocals {
         }
 
         // Handle LocalSet
-        let set_index = if let ExpressionKind::LocalSet { index, .. } = &expr.kind {
-            Some(*index)
+        let set_id = if let ExpressionKind::LocalSet { id, .. } = &expr.kind {
+            Some(*id)
         } else {
             None
         };
 
-        if let Some(index) = set_index {
+        if let Some(id) = set_id {
             {
                 if let ExpressionKind::LocalSet { value, .. } = &mut expr.kind {
                     self.optimize_function(value, ctx, allocator, depth + 1);
@@ -287,7 +283,7 @@ impl SimplifyLocals {
 
             if ctx.can_sink(&*expr) {
                 ctx.sinkables.insert(
-                    index,
+                    id,
                     SinkableInfo {
                         set: *expr,
                         ptr: expr.as_ptr(),
@@ -295,19 +291,19 @@ impl SimplifyLocals {
                     },
                 );
             } else if ctx.first_cycle && ctx.allow_tee {
-                let use_count = ctx.get_counts.get(&index).copied().unwrap_or(0);
+                let use_count = ctx.get_counts.get(&id).copied().unwrap_or(0);
                 if use_count > 1 {
                     self.another_cycle = true;
                 }
             }
             return;
         }
-        let tee_vals = if let ExpressionKind::LocalTee { index, .. } = &expr.kind {
-            Some(*index)
+        let tee_ids = if let ExpressionKind::LocalTee { id, .. } = &expr.kind {
+            Some(*id)
         } else {
             None
         };
-        if tee_vals.is_some() {
+        if tee_ids.is_some() {
             if let ExpressionKind::LocalTee { value, .. } = &mut expr.kind {
                 self.optimize_function(value, ctx, allocator, depth + 1);
             }
@@ -461,13 +457,13 @@ impl SimplifyLocals {
             let mut result = None;
             if let ExpressionKind::Block { list, .. } = &mut expr.kind {
                 if let Some(last) = list.last_mut() {
-                    if let ExpressionKind::LocalSet { index, .. } = &last.kind {
-                        result = Some((*index, *last));
+                    if let ExpressionKind::LocalSet { id, .. } = &last.kind {
+                        result = Some((*id, *last));
                     }
                 }
             }
 
-            if let Some((index, last_set)) = result {
+            if let Some((id, last_set)) = result {
                 let value = if let ExpressionKind::LocalSet { value, .. } = &last_set.kind {
                     *value
                 } else {
@@ -487,7 +483,7 @@ impl SimplifyLocals {
                 }
 
                 expr.kind = ExpressionKind::LocalSet {
-                    index,
+                    id,
                     value: last_set,
                 };
                 self.another_cycle = true;
@@ -498,22 +494,22 @@ impl SimplifyLocals {
         let breaks = breaks.unwrap();
 
         // Find a local set that is present in all breaks and the current sinkables (if any)
-        let mut shared_index = None;
-        for &index in ctx.sinkables.keys() {
+        let mut shared_id = None;
+        for &id in ctx.sinkables.keys() {
             let mut in_all = true;
             for brk in breaks {
-                if !brk.sinkables.contains_key(&index) {
+                if !brk.sinkables.contains_key(&id) {
                     in_all = false;
                     break;
                 }
             }
             if in_all {
-                shared_index = Some(index);
+                shared_id = Some(id);
                 break;
             }
         }
 
-        let shared_index = match shared_index {
+        let shared_id = match shared_id {
             Some(i) => i,
             None => return,
         };
@@ -526,7 +522,7 @@ impl SimplifyLocals {
                     ..
                 } = &(*brk.br).kind
                 {
-                    let set_info = brk.sinkables.get(&shared_index).unwrap();
+                    let set_info = brk.sinkables.get(&shared_id).unwrap();
                     let cond_effects = EffectAnalyzer::analyze(*cond);
                     if cond_effects.interferes_with(set_info.effects) {
                         return;
@@ -541,7 +537,7 @@ impl SimplifyLocals {
         }
 
         // 1. End of block
-        let set_info = ctx.sinkables.remove(&shared_index).unwrap();
+        let set_info = ctx.sinkables.remove(&shared_id).unwrap();
         let block_val = if let ExpressionKind::LocalSet { value, .. } = &set_info.set.kind {
             *value
         } else {
@@ -558,7 +554,7 @@ impl SimplifyLocals {
         // 2. Each break
         for brk in breaks {
             unsafe {
-                let info = brk.sinkables.get(&shared_index).unwrap();
+                let info = brk.sinkables.get(&shared_id).unwrap();
                 let set = info.set;
                 if let ExpressionKind::Break {
                     condition, value, ..
@@ -570,7 +566,7 @@ impl SimplifyLocals {
                             // Convert Set to Tee
                             let set_raw_ptr = set.as_ptr();
                             (*set_raw_ptr).kind = ExpressionKind::LocalTee {
-                                index: shared_index,
+                                id: shared_id,
                                 value: *val,
                             };
                             let info_ptr_ref = &mut *info.ptr;
@@ -595,7 +591,7 @@ impl SimplifyLocals {
         let new_block_expr = Expression::new(allocator, old_kind, old_type);
 
         expr.kind = ExpressionKind::LocalSet {
-            index: shared_index,
+            id: shared_id,
             value: new_block_expr,
         };
         ctx.sinkables.clear();
@@ -633,7 +629,7 @@ impl SimplifyLocals {
         expr: &mut ExprRef<'a>,
         ctx: &mut FunctionContext<'a>,
         allocator: &'a bumpalo::Bump,
-        mut if_true_sinkables: HashMap<u32, SinkableInfo<'a>>,
+        mut if_true_sinkables: HashMap<crate::ir::LocalId, SinkableInfo<'a>>,
     ) {
         if expr.type_ != crate::ir::Type::NONE {
             return;
@@ -649,26 +645,26 @@ impl SimplifyLocals {
         };
         let mut if_false = *if_false;
 
-        let mut good_index = None;
+        let mut good_id = None;
         if if_true.type_ == crate::ir::Type::UNREACHABLE {
             if !ctx.sinkables.is_empty() {
-                good_index = Some(*ctx.sinkables.keys().next().unwrap());
+                good_id = Some(*ctx.sinkables.keys().next().unwrap());
             }
         } else if if_false.type_ == crate::ir::Type::UNREACHABLE {
             if !if_true_sinkables.is_empty() {
-                good_index = Some(*if_true_sinkables.keys().next().unwrap());
+                good_id = Some(*if_true_sinkables.keys().next().unwrap());
             }
         } else {
-            // Shared index
-            for &index in if_true_sinkables.keys() {
-                if ctx.sinkables.contains_key(&index) {
-                    good_index = Some(index);
+            // Shared ID
+            for &id in if_true_sinkables.keys() {
+                if ctx.sinkables.contains_key(&id) {
+                    good_id = Some(id);
                     break;
                 }
             }
         }
 
-        let good_index = match good_index {
+        let good_id = match good_id {
             Some(i) => i,
             None => return,
         };
@@ -676,11 +672,11 @@ impl SimplifyLocals {
         let mut optimized = false;
         let true_type = if_true.type_;
         if true_type != crate::ir::Type::UNREACHABLE {
-            let info = if_true_sinkables.remove(&good_index).unwrap();
+            let info = if_true_sinkables.remove(&good_id).unwrap();
 
             let mut is_whole_branch = false;
-            if let ExpressionKind::LocalSet { index, value } = &mut if_true.kind {
-                if *index == good_index {
+            if let ExpressionKind::LocalSet { id, value } = &mut if_true.kind {
+                if *id == good_id {
                     let mut old_value = *value;
                     if_true.kind = std::mem::replace(&mut old_value.kind, ExpressionKind::Nop);
                     if_true.type_ = old_value.type_;
@@ -718,11 +714,11 @@ impl SimplifyLocals {
 
         let false_type = if_false.type_;
         if false_type != crate::ir::Type::UNREACHABLE {
-            let info = ctx.sinkables.remove(&good_index).unwrap();
+            let info = ctx.sinkables.remove(&good_id).unwrap();
 
             let mut is_whole_branch = false;
-            if let ExpressionKind::LocalSet { index, value } = &mut if_false.kind {
-                if *index == good_index {
+            if let ExpressionKind::LocalSet { id, value } = &mut if_false.kind {
+                if *id == good_id {
                     let mut old_value = *value;
                     if_false.kind = std::mem::replace(&mut old_value.kind, ExpressionKind::Nop);
                     if_false.type_ = old_value.type_;
@@ -768,7 +764,7 @@ impl SimplifyLocals {
         let new_if = Expression::new(allocator, old_kind, old_type);
 
         expr.kind = ExpressionKind::LocalSet {
-            index: good_index,
+            id: good_id,
             value: new_if,
         };
         expr.finalize();
@@ -781,7 +777,7 @@ impl SimplifyLocals {
         expr: &mut ExprRef<'a>,
         _ctx: &mut FunctionContext<'a>,
         allocator: &'a bumpalo::Bump,
-        mut if_true_sinkables: HashMap<u32, SinkableInfo<'a>>,
+        mut if_true_sinkables: HashMap<crate::ir::LocalId, SinkableInfo<'a>>,
     ) {
         if expr.type_ != crate::ir::Type::NONE {
             return;
@@ -801,14 +797,14 @@ impl SimplifyLocals {
         }
 
         // Speculative: add local.get to else branch to enable sinking
-        let good_index = *if_true_sinkables.keys().next().unwrap();
-        let info = if_true_sinkables.remove(&good_index).unwrap();
+        let good_id = *if_true_sinkables.keys().next().unwrap();
+        let info = if_true_sinkables.remove(&good_id).unwrap();
 
         if let ExpressionKind::LocalSet { value, .. } = &info.set.kind {
             let value = *value;
             let mut is_whole_branch = false;
-            if let ExpressionKind::LocalSet { index, value: val } = &mut if_true.kind {
-                if *index == good_index {
+            if let ExpressionKind::LocalSet { id, value: val } = &mut if_true.kind {
+                if *id == good_id {
                     let mut old_val = *val;
                     if_true.kind = std::mem::replace(&mut old_val.kind, ExpressionKind::Nop);
                     if_true.type_ = old_val.type_;
@@ -838,7 +834,7 @@ impl SimplifyLocals {
             }
             // Speculative: Add the missing else with a local.get
             let local_type = if_true.type_; // Use the type of the value being sunk
-            let get = Expression::local_get(allocator, good_index, local_type);
+            let get = Expression::local_get(allocator, good_id, local_type);
 
             if let ExpressionKind::If { if_false, .. } = &mut expr.kind {
                 *if_false = Some(get);
@@ -856,7 +852,7 @@ impl SimplifyLocals {
             let new_if = Expression::new(allocator, old_kind, old_type);
 
             expr.kind = ExpressionKind::LocalSet {
-                index: good_index,
+                id: good_id,
                 value: new_if,
             };
             expr.finalize();
@@ -884,14 +880,14 @@ impl SimplifyLocals {
             return;
         }
 
-        let good_index = *ctx.sinkables.keys().next().unwrap();
-        let set_info = ctx.sinkables.remove(&good_index).unwrap();
+        let good_id = *ctx.sinkables.keys().next().unwrap();
+        let set_info = ctx.sinkables.remove(&good_id).unwrap();
 
         if let ExpressionKind::Loop { body, .. } = &mut expr.kind {
             let mut optimized = false;
 
-            if let ExpressionKind::LocalSet { index, value } = &mut body.kind {
-                if *index == good_index {
+            if let ExpressionKind::LocalSet { id, value } = &mut body.kind {
+                if *id == good_id {
                     let mut old_value = *value;
                     body.kind = std::mem::replace(&mut old_value.kind, ExpressionKind::Nop);
                     body.type_ = old_value.type_;
@@ -918,7 +914,7 @@ impl SimplifyLocals {
                 let new_loop = Expression::new(allocator, old_kind, old_type);
 
                 expr.kind = ExpressionKind::LocalSet {
-                    index: good_index,
+                    id: good_id,
                     value: new_loop,
                 };
                 expr.finalize();
@@ -930,17 +926,10 @@ impl SimplifyLocals {
     fn visit_drop_post<'a>(&mut self, expr: &mut ExprRef<'a>, _ctx: &mut FunctionContext<'a>) {
         // Collapse drop-tee into set (drop (local.tee) -> local.set)
         if let ExpressionKind::Drop { value } = &mut expr.kind {
-            if let ExpressionKind::LocalTee {
-                index,
-                value: tee_val,
-            } = &value.kind
-            {
-                let index = *index;
+            if let ExpressionKind::LocalTee { id, value: tee_val } = &value.kind {
+                let id = *id;
                 let tee_val = *tee_val;
-                expr.kind = ExpressionKind::LocalSet {
-                    index,
-                    value: tee_val,
-                };
+                expr.kind = ExpressionKind::LocalSet { id, value: tee_val };
                 self.another_cycle = true;
             }
         }
@@ -948,10 +937,10 @@ impl SimplifyLocals {
 }
 
 /// Count local.get operations in an expression tree
-fn count_gets(expr: &Expression, counts: &mut HashMap<u32, usize>) {
+fn count_gets(expr: &Expression, counts: &mut HashMap<crate::ir::LocalId, usize>) {
     match &expr.kind {
-        ExpressionKind::LocalGet { index } => {
-            *counts.entry(*index).or_insert(0) += 1;
+        ExpressionKind::LocalGet { id } => {
+            *counts.entry(*id).or_insert(0) += 1;
         }
         _ => {
             visit_children_ref(expr, |child| count_gets(child, counts));
@@ -1518,7 +1507,7 @@ where
 mod tests {
     use super::*;
     use crate::ir::expression::IrBuilder;
-    use crate::ir::{Literal, Type};
+    use crate::ir::{Literal, LocalId, Type};
     use bumpalo::collections::Vec as BumpVec;
     use bumpalo::Bump;
 
@@ -1641,8 +1630,8 @@ mod tests {
         let body = module.functions[test_id]
             .body()
             .expect("Function should have a body");
-        if let ExpressionKind::LocalSet { index, value } = &body.kind {
-            assert_eq!((*index as usize), 0);
+        if let ExpressionKind::LocalSet { id, value } = &body.kind {
+            assert_eq!(id.index() as usize, 0);
             assert!(matches!(value.kind, ExpressionKind::If { .. }));
         } else {
             panic!("Expected LocalSet, got {:?}", body.kind);
@@ -1656,7 +1645,7 @@ mod tests {
         let mut module = Module::new(&bump);
 
         let mut list = BumpVec::new_in(&bump);
-        list.push(builder.local_set(0, builder.const_(Literal::I32(1))));
+        list.push(builder.local_set(LocalId::from(0), builder.const_(Literal::I32(1))));
         let block = builder.block(Some("label"), list, Type::NONE);
 
         let test_id = module.add_function(crate::ir::module::Function::new(
@@ -1671,8 +1660,8 @@ mod tests {
         pass.run(&mut module);
 
         let body = module.functions[test_id].body().unwrap();
-        if let ExpressionKind::LocalSet { index, value: _ } = &body.kind {
-            assert_eq!((*index as usize), 0);
+        if let ExpressionKind::LocalSet { id, value: _ } = &body.kind {
+            assert_eq!(id.index() as usize, 0);
         } else {
             panic!("Expected LocalSet, got {:?}", body.kind);
         }
@@ -1684,9 +1673,9 @@ mod tests {
         let builder = IrBuilder::new(&bump);
         let mut module = Module::new(&bump);
 
-        let condition = builder.local_get(1, Type::I32);
+        let condition = builder.local_get(LocalId::from(1), Type::I32);
         let mut true_list = BumpVec::new_in(&bump);
-        true_list.push(builder.local_set(0, builder.const_(Literal::I32(1))));
+        true_list.push(builder.local_set(LocalId::from(0), builder.const_(Literal::I32(1))));
         let if_true = builder.block(None, true_list, Type::NONE);
 
         let if_expr = builder.if_(condition, if_true, None, Type::NONE);
@@ -1703,8 +1692,8 @@ mod tests {
         pass.run(&mut module);
 
         let body = module.functions[test_id].body().unwrap();
-        if let ExpressionKind::LocalSet { index, value } = &body.kind {
-            assert_eq!((*index as usize), 0);
+        if let ExpressionKind::LocalSet { id, value } = &body.kind {
+            assert_eq!(id.index() as usize, 0);
             if let ExpressionKind::If { if_false, .. } = &value.kind {
                 assert!(if_false.is_some());
             } else {
@@ -1722,7 +1711,7 @@ mod tests {
         let mut module = Module::new(&bump);
 
         let mut list = BumpVec::new_in(&bump);
-        list.push(builder.local_set(0, builder.const_(Literal::I32(1))));
+        list.push(builder.local_set(LocalId::from(0), builder.const_(Literal::I32(1))));
         let block = builder.block(None, list, Type::NONE);
         let loop_expr = builder.loop_(Some("label"), block, Type::NONE);
 
@@ -1738,8 +1727,8 @@ mod tests {
         pass.run(&mut module);
 
         let body = module.functions[test_id].body().unwrap();
-        if let ExpressionKind::LocalSet { index, value } = &body.kind {
-            assert_eq!((*index as usize), 0);
+        if let ExpressionKind::LocalSet { id, value } = &body.kind {
+            assert_eq!(id.index() as usize, 0);
             assert!(matches!(value.kind, ExpressionKind::Loop { .. }));
         } else {
             panic!("Expected LocalSet, got {:?}", body.kind);

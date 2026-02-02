@@ -13,7 +13,9 @@ impl Pass for StripDebug {
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         // Clear all debug names
         for (_, func) in &mut module.functions {
-            func.local_names_mut().clear();
+            for (_, local) in func.locals_mut().iter_mut() {
+                local.name.clear();
+            }
         }
 
         // Clear all annotations (includes locations, local names, etc.)

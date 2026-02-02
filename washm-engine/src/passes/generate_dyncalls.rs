@@ -17,7 +17,7 @@ impl Pass for GenerateDynCalls {
         // Collect required signatures from Table elements
         let mut signatures: HashSet<(Type, Type)> = HashSet::new();
 
-        for segment in &module.elements {
+        for (_, segment) in &module.elements {
             for &func_idx in &segment.func_indices {
                 if let Some(func) = module.functions.get(func_idx) {
                     // Currently we only support functions with NO parameters (Type::NONE)
@@ -107,6 +107,7 @@ fn create_dyncall_wrapper<'a>(
 
     // The signature type for CallIndirect must be interned (params, results)
     let sig_type = crate::ir::type_store::intern_signature(params, results);
+    let type_id = crate::ir::module::TypeId::from_u32(sig_type.signature_id().unwrap());
 
     let body = Expression::new(
         bump,
@@ -114,7 +115,7 @@ fn create_dyncall_wrapper<'a>(
             table,
             target,
             operands,
-            type_: sig_type,
+            type_id,
         },
         results,
     );

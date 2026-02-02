@@ -1,5 +1,7 @@
 use crate::ir::ops::{BinaryOp, UnaryOp};
-use crate::ir::{FuncId, GlobalId, Literal, MemoryId, TableId, Type};
+use crate::ir::{
+    DataId, ElementId, FuncId, GlobalId, Literal, LocalId, MemoryId, TableId, Type, TypeId,
+};
 use bumpalo::collections::Vec as BumpVec;
 use bumpalo::Bump;
 use std::ops::{Deref, DerefMut};
@@ -63,14 +65,14 @@ pub enum ExpressionKind<'a> {
         is_return: bool,
     },
     LocalGet {
-        index: u32,
+        id: LocalId,
     },
     LocalSet {
-        index: u32,
+        id: LocalId,
         value: ExprRef<'a>,
     },
     LocalTee {
-        index: u32,
+        id: LocalId,
         value: ExprRef<'a>,
     },
     GlobalGet {
@@ -133,7 +135,7 @@ pub enum ExpressionKind<'a> {
         table: TableId,
         target: ExprRef<'a>, // Function index
         operands: BumpVec<'a, ExprRef<'a>>,
-        type_: Type, // Signature
+        type_id: TypeId, // Signature ID
     },
     MemoryGrow {
         memory: MemoryId,
@@ -230,23 +232,23 @@ pub enum ExpressionKind<'a> {
     },
     TableInit {
         table: TableId,
-        segment: u32,
+        segment: ElementId,
         dest: ExprRef<'a>,
         offset: ExprRef<'a>,
         size: ExprRef<'a>,
     },
     ElemDrop {
-        segment: u32,
+        segment: ElementId,
     },
     MemoryInit {
         memory: MemoryId,
-        segment: u32,
+        segment: DataId,
         dest: ExprRef<'a>,
         offset: ExprRef<'a>,
         size: ExprRef<'a>,
     },
     DataDrop {
-        segment: u32,
+        segment: DataId,
     },
     MemoryCopy {
         dest_memory: MemoryId,
@@ -715,25 +717,25 @@ impl<'a> Expression<'a> {
     }
 
     /// Create local.set
-    pub fn local_set(bump: &'a Bump, index: u32, value: ExprRef<'a>) -> ExprRef<'a> {
+    pub fn local_set(bump: &'a Bump, id: LocalId, value: ExprRef<'a>) -> ExprRef<'a> {
         ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::LocalSet { index, value },
+            kind: ExpressionKind::LocalSet { id, value },
             type_: Type::NONE,
         }))
     }
 
     /// Create local.get
-    pub fn local_get(bump: &'a Bump, index: u32, ty: Type) -> ExprRef<'a> {
+    pub fn local_get(bump: &'a Bump, id: LocalId, ty: Type) -> ExprRef<'a> {
         ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::LocalGet { index },
+            kind: ExpressionKind::LocalGet { id },
             type_: ty,
         }))
     }
 
     /// Create local.tee
-    pub fn local_tee(bump: &'a Bump, index: u32, value: ExprRef<'a>, ty: Type) -> ExprRef<'a> {
+    pub fn local_tee(bump: &'a Bump, id: LocalId, value: ExprRef<'a>, ty: Type) -> ExprRef<'a> {
         ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::LocalTee { index, value },
+            kind: ExpressionKind::LocalTee { id, value },
             type_: ty,
         }))
     }
@@ -809,7 +811,7 @@ impl<'a> IrBuilder<'a> {
         table: impl Into<TableId>,
         target: ExprRef<'a>,
         operands: BumpVec<'a, ExprRef<'a>>,
-        sig: Type,
+        type_id: TypeId,
         type_: Type,
     ) -> ExprRef<'a> {
         Expression::new(
@@ -818,26 +820,41 @@ impl<'a> IrBuilder<'a> {
                 table: table.into(),
                 target,
                 operands,
-                type_: sig,
+                type_id,
             },
             type_,
         )
     }
 
-    pub fn local_get(&self, index: u32, type_: Type) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::LocalGet { index }, type_)
+    pub fn local_get(&self, id: impl Into<LocalId>, type_: Type) -> ExprRef<'a> {
+        Expression::new(self.bump, ExpressionKind::LocalGet { id: id.into() }, type_)
     }
 
-    pub fn local_set(&self, index: u32, value: ExprRef<'a>) -> ExprRef<'a> {
+    pub fn local_set(&self, id: impl Into<LocalId>, value: ExprRef<'a>) -> ExprRef<'a> {
         Expression::new(
             self.bump,
-            ExpressionKind::LocalSet { index, value },
+            ExpressionKind::LocalSet {
+                id: id.into(),
+                value,
+            },
             Type::NONE,
         )
     }
 
-    pub fn local_tee(&self, index: u32, value: ExprRef<'a>, type_: Type) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::LocalTee { index, value }, type_)
+    pub fn local_tee(
+        &self,
+        id: impl Into<LocalId>,
+        value: ExprRef<'a>,
+        type_: Type,
+    ) -> ExprRef<'a> {
+        Expression::new(
+            self.bump,
+            ExpressionKind::LocalTee {
+                id: id.into(),
+                value,
+            },
+            type_,
+        )
     }
 
     pub fn global_get(&self, id: impl Into<GlobalId>, type_: Type) -> ExprRef<'a> {
@@ -918,6 +935,7 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn load(
         &self,
         memory: impl Into<MemoryId>,
@@ -1016,6 +1034,7 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn atomic_rmw(
         &self,
         memory: MemoryId,
@@ -1040,6 +1059,7 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn atomic_cmpxchg(
         &self,
         memory: MemoryId,
@@ -1105,7 +1125,7 @@ impl<'a> IrBuilder<'a> {
     pub fn memory_init(
         &self,
         memory: MemoryId,
-        segment: u32,
+        segment: DataId,
         dest: ExprRef<'a>,
         offset: ExprRef<'a>,
         size: ExprRef<'a>,
@@ -1123,7 +1143,7 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn data_drop(&self, segment: u32) -> ExprRef<'a> {
+    pub fn data_drop(&self, segment: DataId) -> ExprRef<'a> {
         Expression::new(self.bump, ExpressionKind::DataDrop { segment }, Type::NONE)
     }
 
@@ -1247,7 +1267,7 @@ impl<'a> IrBuilder<'a> {
     pub fn table_init(
         &self,
         table: TableId,
-        segment: u32,
+        segment: ElementId,
         dest: ExprRef<'a>,
         offset: ExprRef<'a>,
         size: ExprRef<'a>,
@@ -1265,7 +1285,7 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn elem_drop(&self, segment: u32) -> ExprRef<'a> {
+    pub fn elem_drop(&self, segment: ElementId) -> ExprRef<'a> {
         Expression::new(self.bump, ExpressionKind::ElemDrop { segment }, Type::NONE)
     }
 
@@ -1571,13 +1591,13 @@ impl<'a> IrBuilder<'a> {
                     is_return: *is_return,
                 }
             }
-            ExpressionKind::LocalGet { index } => ExpressionKind::LocalGet { index: *index },
-            ExpressionKind::LocalSet { index, value } => ExpressionKind::LocalSet {
-                index: *index,
+            ExpressionKind::LocalGet { id } => ExpressionKind::LocalGet { id: *id },
+            ExpressionKind::LocalSet { id, value } => ExpressionKind::LocalSet {
+                id: *id,
                 value: self.deep_clone(*value),
             },
-            ExpressionKind::LocalTee { index, value } => ExpressionKind::LocalTee {
-                index: *index,
+            ExpressionKind::LocalTee { id, value } => ExpressionKind::LocalTee {
+                id: *id,
                 value: self.deep_clone(*value),
             },
             ExpressionKind::GlobalGet { id } => ExpressionKind::GlobalGet { id: *id },
@@ -1669,7 +1689,7 @@ impl<'a> IrBuilder<'a> {
                 table,
                 target,
                 operands,
-                type_,
+                type_id,
             } => {
                 let mut new_operands = BumpVec::with_capacity_in(operands.len(), self.bump);
                 for op in operands.iter() {
@@ -1679,7 +1699,7 @@ impl<'a> IrBuilder<'a> {
                     table: *table,
                     target: self.deep_clone(*target),
                     operands: new_operands,
-                    type_: *type_,
+                    type_id: *type_id,
                 }
             }
             ExpressionKind::MemoryGrow { memory, delta } => ExpressionKind::MemoryGrow {
@@ -2094,11 +2114,11 @@ mod tests {
     fn test_expression_local_set() {
         let bump = Bump::new();
         let val = Expression::const_expr(&bump, Literal::I32(10), Type::I32);
-        let set = Expression::local_set(&bump, 0, val);
+        let set = Expression::local_set(&bump, 0.into(), val);
 
         assert!(matches!(
             set.kind,
-            ExpressionKind::LocalSet { index: 0, .. }
+            ExpressionKind::LocalSet { id, .. } if id.index() == 0
         ));
         assert_eq!(set.type_, Type::NONE);
     }
@@ -2106,9 +2126,9 @@ mod tests {
     #[test]
     fn test_expression_local_get() {
         let bump = Bump::new();
-        let get = Expression::local_get(&bump, 0, Type::I32);
+        let get = Expression::local_get(&bump, 0.into(), Type::I32);
 
-        assert!(matches!(get.kind, ExpressionKind::LocalGet { index: 0 }));
+        assert!(matches!(get.kind, ExpressionKind::LocalGet { id } if id.index() == 0));
         assert_eq!(get.type_, Type::I32);
     }
 
@@ -2116,11 +2136,11 @@ mod tests {
     fn test_expression_local_tee() {
         let bump = Bump::new();
         let val = Expression::const_expr(&bump, Literal::I32(5), Type::I32);
-        let tee = Expression::local_tee(&bump, 0, val, Type::I32);
+        let tee = Expression::local_tee(&bump, 0.into(), val, Type::I32);
 
         assert!(matches!(
             tee.kind,
-            ExpressionKind::LocalTee { index: 0, .. }
+            ExpressionKind::LocalTee { id, .. } if id.index() == 0
         ));
         assert_eq!(tee.type_, Type::I32);
     }
@@ -2131,8 +2151,8 @@ mod tests {
 
         // Build: (block (local.set $0 (i32.const 42)) (local.get $0))
         let const_val = Expression::const_expr(&bump, Literal::I32(42), Type::I32);
-        let set = Expression::local_set(&bump, 0, const_val);
-        let get = Expression::local_get(&bump, 0, Type::I32);
+        let set = Expression::local_set(&bump, 0.into(), const_val);
+        let get = Expression::local_get(&bump, 0.into(), Type::I32);
 
         let mut list = BumpVec::new_in(&bump);
         list.push(set);

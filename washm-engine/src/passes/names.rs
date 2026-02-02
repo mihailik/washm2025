@@ -74,9 +74,9 @@ impl Pass for MinifyNames {
             }
 
             // Minify local variable names
-            for name in func.local_names_mut() {
-                if !name.is_empty() {
-                    *name = get_next_name(&mut local_next_id);
+            for (_, local) in func.locals_mut().iter_mut() {
+                if !local.name.is_empty() {
+                    local.name = get_next_name(&mut local_next_id);
                 }
             }
         }
@@ -178,8 +178,8 @@ impl Pass for StripNames {
         // Clear all debug names
         for (_, func) in &mut module.functions {
             func.name = String::new();
-            for name in func.local_names_mut() {
-                name.clear();
+            for (_, local) in func.locals_mut().iter_mut() {
+                local.name.clear();
             }
         }
         for (_, global) in &mut module.globals {

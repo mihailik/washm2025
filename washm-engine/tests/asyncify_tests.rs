@@ -39,33 +39,27 @@ fn test_asyncify_simple_sleep() {
     let result = run_asyncify(wat, vec!["env.sleep"]);
     println!("{}", result);
 
-    // Check for Asyncify globals (indices 0 and 1, as BinaryWriter doesn't write name section yet)
+    // Check for Asyncify globals
     // global 0: asyncify_state
     // global 1: asyncify_data
-    assert!(result.contains("(global (;0;) (mut i32) i32.const 0)"));
-    assert!(result.contains("(global (;1;) (mut i32) i32.const 0)"));
+    assert!(result.contains("global $__asyncify_state"));
+    assert!(result.contains("global $__asyncify_data"));
 
     // Check for exported runtime helpers
     // We check for the export name, ignoring the function index/name match in detail since it varies
-    assert!(result.contains("(export \"asyncify_start_unwind\""));
-    assert!(result.contains("(export \"asyncify_stop_unwind\""));
-    assert!(result.contains("(export \"asyncify_start_rewind\""));
-    assert!(result.contains("(export \"asyncify_stop_rewind\""));
-    assert!(result.contains("(export \"asyncify_get_state\""));
+    assert!(result.contains("(export \"asyncify_start_unwind\" (func $asyncify_start_unwind))"));
+    assert!(result.contains("(export \"asyncify_stop_unwind\" (func $asyncify_stop_unwind))"));
+    assert!(result.contains("(export \"asyncify_start_rewind\" (func $asyncify_start_rewind))"));
+    assert!(result.contains("(export \"asyncify_stop_rewind\" (func $asyncify_stop_rewind))"));
+    assert!(result.contains("(export \"asyncify_get_state\" (func $asyncify_get_state))"));
 
     // Check for instrumentation in main
     // We expect state checks and rewinding logic
-    // global.get 0 is asyncify_state
-    // call 0 is the sleep function
 
-    assert!(result.contains("global.get 0"));
-    assert!(result.contains("call 0"));
+    assert!(result.contains("global.get $__asyncify_state"));
+    assert!(result.contains("call $sleep"));
     assert!(result.contains("if")); // Logic branches
 
-    /*
-    // Detailed checks disabled due to missing Name Section in BinaryWriter
-    assert!(result.contains("global.get $__asyncify_state"));
-    */
     assert!(result.contains("i32.const 2")); // Rewinding
     assert!(result.contains("i32.const 1")); // Unwinding
 }
@@ -106,7 +100,7 @@ fn test_asyncify_return_value_i32() {
     // We should try to `wat::parse_str` the RESULT to ensure it's valid WASM.
     wat::parse_str(&result).expect("Transformation produced invalid WASM");
 
-    assert!(result.contains("call 0"));
+    assert!(result.contains("call $sleep_ret"));
 }
 
 #[test]
@@ -143,7 +137,7 @@ fn test_asyncify_indirect_call() {
                                                        // Asyncify treats all indirect calls as potential async calls by default unless ignored.
 
     assert!(result.contains("call_indirect"));
-    assert!(result.contains("global.get 0"));
+    assert!(result.contains("global.get $__asyncify_state"));
     wat::parse_str(&result).expect("Transformation produced invalid WASM");
 }
 
@@ -264,7 +258,7 @@ fn test_asyncify_ignore_imports() {
     println!("{}", result);
 
     // Check main body
-    assert!(result.contains("call 0")); // Sleep call
+    assert!(result.contains("call $sleep")); // Sleep call
 
     // It should NOT contain the heavy instrumentation loop/if.
     // Since original code has no control flow, checking for "if" or "loop" is sufficient.

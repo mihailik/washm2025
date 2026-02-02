@@ -99,7 +99,7 @@ impl<'a, 'b> Visitor<'a> for AvoidReinterpretsVisitor<'a, 'b> {
 mod tests {
     use super::*;
     use crate::ir::expression::{ExpressionKind, IrBuilder};
-    use crate::ir::Type;
+    use crate::ir::{LocalId, Type};
     use bumpalo::Bump;
 
     #[test]
@@ -108,7 +108,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // i32.reinterpret_f32(f32.reinterpret_i32(local.get 0)) -> local.get 0
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let f = builder.unary(UnaryOp::ReinterpretInt32, x, Type::F32);
         let i = builder.unary(UnaryOp::ReinterpretFloat32, f, Type::I32);
 
@@ -121,9 +121,10 @@ mod tests {
 
         visitor.visit(&mut expr_ref);
 
-        assert!(matches!(
-            expr_ref.kind,
-            ExpressionKind::LocalGet { index: 0, .. }
-        ));
+        if let ExpressionKind::LocalGet { id, .. } = &expr_ref.kind {
+            assert_eq!(id.index(), 0);
+        } else {
+            panic!("Expected LocalGet, got {:?}", expr_ref.kind);
+        }
     }
 }

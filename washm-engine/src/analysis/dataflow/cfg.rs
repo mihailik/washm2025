@@ -1,5 +1,6 @@
 use crate::analysis::dataflow::liveness::{ActionKind, InterferenceGraph, LivenessAction};
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
+use crate::ir::LocalId;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
@@ -8,8 +9,8 @@ pub struct BasicBlock<'a> {
     pub preds: Vec<usize>,
     pub succs: Vec<usize>,
     pub actions: Vec<LivenessAction<'a>>,
-    pub live_in: HashSet<u32>,
-    pub live_out: HashSet<u32>,
+    pub live_in: HashSet<LocalId>,
+    pub live_out: HashSet<LocalId>,
 }
 
 impl<'a> BasicBlock<'a> {
@@ -78,10 +79,10 @@ impl<'a> ControlFlowGraph<'a> {
                 for action in self.blocks[i].actions.iter().rev() {
                     match action.kind {
                         ActionKind::Set => {
-                            current_live.remove(&action.index);
+                            current_live.remove(&action.id);
                         }
                         ActionKind::Get => {
-                            current_live.insert(action.index);
+                            current_live.insert(action.id);
                         }
                         _ => {}
                     }
@@ -112,11 +113,11 @@ impl<'a> ControlFlowGraph<'a> {
             for i in (0..block.actions.len()).rev() {
                 let action = &mut block.actions[i];
                 if action.is_get() {
-                    if !live.contains(&action.index) {
+                    if !live.contains(&action.id) {
                         ends_live_range[i] = true;
-                        live.insert(action.index);
+                        live.insert(action.id);
                     }
-                } else if action.is_set() && live.remove(&action.index) {
+                } else if action.is_set() && live.remove(&action.id) {
                     action.effective = true;
                 }
             }
@@ -131,7 +132,7 @@ impl<'a> ControlFlowGraph<'a> {
 
             for (i, _action) in block.actions.iter().enumerate() {
                 let action_ref = &block.actions[i]; // Immutable ref first
-                let index = action_ref.index;
+                let id = action_ref.id;
                 let is_get = action_ref.is_get();
                 let is_set = action_ref.is_set();
                 let effective = action_ref.effective;
@@ -139,7 +140,7 @@ impl<'a> ControlFlowGraph<'a> {
 
                 if is_get {
                     if ends_live_range[i] {
-                        live.remove(&index);
+                        live.remove(&id);
                     }
                     continue;
                 }
@@ -151,22 +152,22 @@ impl<'a> ControlFlowGraph<'a> {
                         next_value()
                     };
 
-                    current_values.insert(index, new_val);
+                    current_values.insert(id, new_val);
 
                     if !effective {
                         continue;
                     }
 
                     for &other in &live {
-                        if other != index {
+                        if other != id {
                             let other_val = current_values.get(&other).unwrap_or(&0);
                             if *other_val != new_val {
-                                graph.add(index, other);
+                                graph.add(id, other);
                             }
                         }
                     }
 
-                    live.insert(index);
+                    live.insert(id);
                 }
             }
         }
@@ -315,32 +316,32 @@ impl<'a> CFGBuilder<'a> {
                     self.current_block = dead;
                 }
             }
-            ExpressionKind::LocalGet { index } => {
+            ExpressionKind::LocalGet { id } => {
                 self.cfg.blocks[self.current_block]
                     .actions
-                    .push(LivenessAction::get(*index, expr_ptr));
+                    .push(LivenessAction::get(*id, expr_ptr));
             }
-            ExpressionKind::LocalSet { index, value } => {
-                let copy_from = if let ExpressionKind::LocalGet { index: src_idx } = &value.kind {
-                    Some(*src_idx)
+            ExpressionKind::LocalSet { id, value } => {
+                let copy_from = if let ExpressionKind::LocalGet { id: src_id } = &value.kind {
+                    Some(*src_id)
                 } else {
                     None
                 };
                 self.visit(value);
                 self.cfg.blocks[self.current_block]
                     .actions
-                    .push(LivenessAction::set(*index, expr_ptr, copy_from));
+                    .push(LivenessAction::set(*id, expr_ptr, copy_from));
             }
-            ExpressionKind::LocalTee { index, value } => {
-                let copy_from = if let ExpressionKind::LocalGet { index: src_idx } = &value.kind {
-                    Some(*src_idx)
+            ExpressionKind::LocalTee { id, value } => {
+                let copy_from = if let ExpressionKind::LocalGet { id: src_id } = &value.kind {
+                    Some(*src_id)
                 } else {
                     None
                 };
                 self.visit(value);
                 self.cfg.blocks[self.current_block]
                     .actions
-                    .push(LivenessAction::set(*index, expr_ptr, copy_from));
+                    .push(LivenessAction::set(*id, expr_ptr, copy_from));
             }
             ExpressionKind::Return { value } => {
                 if let Some(v) = value {

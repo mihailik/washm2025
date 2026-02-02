@@ -46,9 +46,7 @@ fn are_expressions_equal(a: &ExprRef, b: &ExprRef) -> bool {
     // Very basic equality check for constants
     match (&a.kind, &b.kind) {
         (ExpressionKind::Const(la), ExpressionKind::Const(lb)) => la == lb,
-        (ExpressionKind::LocalGet { index: ia }, ExpressionKind::LocalGet { index: ib }) => {
-            ia == ib
-        }
+        (ExpressionKind::LocalGet { id: ia }, ExpressionKind::LocalGet { id: ib }) => ia == ib,
         _ => false, // Fallback
     }
 }
@@ -349,7 +347,7 @@ mod tests {
     fn test_simplify_identity_eqz_eqz_eqz() {
         let bump = Bump::new();
         let x = ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::LocalGet { index: 0 },
+            kind: ExpressionKind::LocalGet { id: 0.into() },
             type_: Type::I32,
         }));
 

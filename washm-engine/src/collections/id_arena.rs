@@ -24,6 +24,20 @@ impl<T> PartialEq for Id<T> {
 
 impl<T> Eq for Id<T> {}
 
+impl<T> PartialOrd for Id<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for Id<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.index
+            .cmp(&other.index)
+            .then(self.generation.cmp(&other.generation))
+    }
+}
+
 impl<T> std::hash::Hash for Id<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.index.hash(state);
@@ -65,6 +79,10 @@ impl<T> Id<T> {
         }
     }
 
+    pub fn from_u32(index: u32) -> Self {
+        Self::from_raw_parts(index, 0)
+    }
+
     pub fn index(self) -> u32 {
         self.index
     }
@@ -98,6 +116,13 @@ impl<M, T> IdArena<M, T> {
     pub fn len(&self) -> usize {
         self.len
     }
+
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.free_head = None;
+        self.len = 0;
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -318,6 +343,10 @@ impl<M, T> IdArena<M, T> {
         } else {
             None
         }
+    }
+
+    pub fn remove_id(&mut self, id: Id<M>) -> Option<T> {
+        self.dealloc(id)
     }
 }
 

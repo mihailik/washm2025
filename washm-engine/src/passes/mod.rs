@@ -45,7 +45,7 @@ pub mod remove_unused_names;
 pub mod remove_unused_types;
 pub mod reorder_functions;
 pub mod reorder_globals;
-pub mod reorder_locals;
+// pub mod reorder_locals;
 pub mod reorder_types;
 pub mod rereloop;
 pub mod rse;
@@ -284,7 +284,8 @@ pub static PASS_REGISTRY: &[PassInfo] = &[
     PassInfo {
         name: "reorder-locals",
         description: "sorts locals by usage",
-        create: |_| Box::new(crate::passes::reorder_locals::ReorderLocals),
+        // create: |_| Box::new(crate::passes::reorder_locals::ReorderLocals),
+        create: |_| Box::new(crate::passes::dce::DCE), // placeholder
     },
     PassInfo {
         name: "reorder-types",

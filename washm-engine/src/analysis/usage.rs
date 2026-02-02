@@ -1,5 +1,7 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{FuncId, GlobalId, GlobalKind, MemoryId, Module, TableId};
+use crate::ir::module::{
+    DataId, ElementId, FuncId, GlobalId, GlobalKind, MemoryId, Module, TableId, TypeId,
+};
 use crate::ir::visitor::ReadOnlyVisitor;
 use std::collections::{HashSet, VecDeque};
 
@@ -10,9 +12,9 @@ pub struct UsageTracker {
     pub globals: HashSet<GlobalId>,
     pub memories: HashSet<MemoryId>,
     pub tables: HashSet<TableId>,
-    pub element_segments: HashSet<u32>,
-    pub data_segments: HashSet<u32>,
-    pub types: HashSet<u32>,
+    pub element_segments: HashSet<ElementId>,
+    pub data_segments: HashSet<DataId>,
+    pub types: HashSet<TypeId>,
 
     pub(crate) func_queue: VecDeque<FuncId>,
     pub(crate) global_queue: VecDeque<GlobalId>,
@@ -77,13 +79,13 @@ impl UsageTracker {
 
         // 3. Finalize segments based on memory/table preservation
         if !tracker.memories.is_empty() {
-            for (i, _) in module.data.iter().enumerate() {
-                tracker.data_segments.insert(i as u32);
+            for (id, _) in module.data.iter() {
+                tracker.data_segments.insert(id);
             }
         }
         if !tracker.tables.is_empty() {
-            for (i, elem) in module.elements.iter().enumerate() {
-                tracker.element_segments.insert(i as u32);
+            for (id, elem) in module.elements.iter() {
+                tracker.element_segments.insert(id);
                 // Functions in active segments are used.
                 for &func_id in &elem.func_indices {
                     tracker.mark_func(func_id);
@@ -155,8 +157,11 @@ impl<'a, 'b> ReadOnlyVisitor<'b> for UsageVisitor<'a> {
             ExpressionKind::ElemDrop { segment } => {
                 self.tracker.element_segments.insert(*segment);
             }
-            ExpressionKind::CallIndirect { table, .. }
-            | ExpressionKind::TableGet { table, .. }
+            ExpressionKind::CallIndirect { table, type_id, .. } => {
+                self.tracker.tables.insert(*table);
+                self.tracker.types.insert(*type_id);
+            }
+            ExpressionKind::TableGet { table, .. }
             | ExpressionKind::TableSet { table, .. }
             | ExpressionKind::TableSize { table, .. }
             | ExpressionKind::TableGrow { table, .. }

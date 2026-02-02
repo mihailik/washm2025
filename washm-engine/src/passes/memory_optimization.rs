@@ -308,9 +308,7 @@ fn are_pointers_equal(ptr1: &Expression, ptr2: &Expression) -> bool {
         (ExpressionKind::Const(l1), ExpressionKind::Const(l2)) => l1 == l2,
 
         // Same local
-        (ExpressionKind::LocalGet { index: i1 }, ExpressionKind::LocalGet { index: i2 }) => {
-            i1 == i2
-        }
+        (ExpressionKind::LocalGet { id: i1 }, ExpressionKind::LocalGet { id: i2 }) => i1 == i2,
 
         // Same global
         (ExpressionKind::GlobalGet { id: n1 }, ExpressionKind::GlobalGet { id: n2 }) => n1 == n2,
@@ -340,8 +338,8 @@ fn are_pointers_equal(ptr1: &Expression, ptr2: &Expression) -> bool {
 }
 
 fn are_local_sets_redundant(set1: &Expression, set2: &Expression) -> bool {
-    if let ExpressionKind::LocalSet { index: idx1, .. } = &set1.kind {
-        if let ExpressionKind::LocalSet { index: idx2, .. } = &set2.kind {
+    if let ExpressionKind::LocalSet { id: idx1, .. } = &set1.kind {
+        if let ExpressionKind::LocalSet { id: idx2, .. } = &set2.kind {
             return idx1 == idx2;
         }
     }
@@ -719,7 +717,7 @@ mod tests {
         }));
         let set1 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::LocalSet {
-                index: 0,
+                id: 0.into(),
                 value: val1,
             },
             type_: Type::NONE,
@@ -731,7 +729,7 @@ mod tests {
         }));
         let set2 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::LocalSet {
-                index: 0,
+                id: 0.into(),
                 value: val2,
             },
             type_: Type::NONE,
@@ -1042,7 +1040,7 @@ mod tests {
         }));
         let set1 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::LocalSet {
-                index: 0,
+                id: 0.into(),
                 value: val1,
             },
             type_: Type::NONE,
@@ -1054,7 +1052,7 @@ mod tests {
         }));
         let set2 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::LocalSet {
-                index: 1,
+                id: 1.into(),
                 value: val2,
             },
             type_: Type::NONE,

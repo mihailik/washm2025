@@ -1,5 +1,6 @@
 use super::*;
 use crate::analysis::validation::Validator;
+use crate::collections::id_arena::IdArena;
 use crate::ir::expression::*;
 use crate::ir::module::*;
 use crate::ir::ops::*;
@@ -496,7 +497,6 @@ fn test_imports_roundtrip() {
     let mut reader = BinaryReader::new(&read_bump, bytes);
     let read_module = reader.parse_module().expect("parse failed");
 
-    assert_eq!(read_module.imports.len(), 0);
     assert_eq!(read_module.functions.len(), 1);
     assert_eq!(read_module.globals.len(), 1);
     assert_eq!(read_module.memories.len(), 1);
@@ -1397,8 +1397,6 @@ fn test_type_section_with_imports() {
     // Should have the explicit types
     assert_eq!(parsed.types.len(), 2, "Should have 2 types");
 
-    // Imports should be parsed
-    assert_eq!(parsed.imports.len(), 0);
     assert_eq!(parsed.functions.len(), 2);
 }
 
@@ -1461,7 +1459,7 @@ fn test_function_section_explicit_type_indices() {
     let body1 = builder.const_(Literal::I32(42));
     let func1 = Function::with_type_idx(
         "f0".to_string(),
-        0,
+        0.into(),
         Type::I32,
         Type::I32,
         vec![],
@@ -1472,7 +1470,7 @@ fn test_function_section_explicit_type_indices() {
     let body2 = builder.const_(Literal::F64(std::f64::consts::PI));
     let func2 = Function::with_type_idx(
         "f1".to_string(),
-        1,
+        1.into(),
         Type::F64,
         Type::F64,
         vec![],
@@ -1483,7 +1481,7 @@ fn test_function_section_explicit_type_indices() {
     let body3 = builder.const_(Literal::I64(99));
     let func3 = Function::with_type_idx(
         "f2".to_string(),
-        2,
+        2.into(),
         Type::NONE,
         Type::I64,
         vec![],
@@ -1503,15 +1501,15 @@ fn test_function_section_explicit_type_indices() {
     // Verify type indices are preserved
     assert_eq!(
         parsed.functions[FuncId::from_raw_parts(0, 0)].type_idx,
-        Some(0)
+        Some(0.into())
     );
     assert_eq!(
         parsed.functions[FuncId::from_raw_parts(1, 0)].type_idx,
-        Some(1)
+        Some(1.into())
     );
     assert_eq!(
         parsed.functions[FuncId::from_raw_parts(2, 0)].type_idx,
-        Some(2)
+        Some(2.into())
     );
 }
 
@@ -1533,7 +1531,7 @@ fn test_function_section_mixed_type_specification() {
     let body1 = builder.const_(Literal::I32(1));
     let func1 = Function::with_type_idx(
         "explicit".to_string(),
-        0,
+        0.into(),
         Type::I32,
         Type::I32,
         vec![],
@@ -1638,7 +1636,7 @@ fn test_function_section_validation_type_idx_bounds() {
         let body = builder.const_(Literal::I32(42));
         let func = Function::with_type_idx(
             "valid".to_string(),
-            0,
+            0.into(),
             Type::I32,
             Type::I32,
             vec![],
@@ -1660,7 +1658,7 @@ fn test_function_section_validation_type_idx_bounds() {
         let body = builder.const_(Literal::I32(42));
         let func = Function::with_type_idx(
             "oob".to_string(),
-            99, // Out of bounds
+            99.into(), // Out of bounds
             Type::I32,
             Type::I32,
             vec![],
@@ -1683,7 +1681,7 @@ fn test_function_section_validation_type_idx_bounds() {
         let body = builder.const_(Literal::F64(std::f64::consts::PI));
         let func = Function::with_type_idx(
             "mismatch".to_string(),
-            0,
+            0.into(),
             Type::F64, // Doesn't match type 0
             Type::F64,
             vec![],
@@ -1876,7 +1874,7 @@ fn test_function_section_shared_type_indices() {
         let body = builder.const_(Literal::I32(i));
         let func = Function::with_type_idx(
             format!("shared_{}", i),
-            0,
+            0.into(),
             Type::I32,
             Type::I32,
             vec![],
@@ -1898,7 +1896,7 @@ fn test_function_section_shared_type_indices() {
     for (i, func) in parsed.functions.iter().enumerate() {
         assert_eq!(
             func.1.type_idx,
-            Some(0),
+            Some(0.into()),
             "Function {} should reference type 0",
             i
         );
@@ -1933,7 +1931,14 @@ fn test_function_section_type_ordering() {
         };
 
         let body = builder.const_(lit);
-        let func = Function::with_type_idx(format!("f{}", i), i, typ, typ, vec![], Some(body));
+        let func = Function::with_type_idx(
+            format!("f{}", i).into(),
+            i.into(),
+            typ,
+            typ,
+            vec![],
+            Some(body),
+        );
         module.add_function(func);
     }
 
@@ -1948,19 +1953,19 @@ fn test_function_section_type_ordering() {
     // Verify type indices are preserved (reverse order: 3, 2, 1, 0)
     assert_eq!(
         parsed.functions[FuncId::from_raw_parts(0, 0)].type_idx,
-        Some(3)
+        Some(3.into())
     );
     assert_eq!(
         parsed.functions[FuncId::from_raw_parts(1, 0)].type_idx,
-        Some(2)
+        Some(2.into())
     );
     assert_eq!(
         parsed.functions[FuncId::from_raw_parts(2, 0)].type_idx,
-        Some(1)
+        Some(1.into())
     );
     assert_eq!(
         parsed.functions[FuncId::from_raw_parts(3, 0)].type_idx,
-        Some(0)
+        Some(0.into())
     );
 }
 
@@ -1997,7 +2002,7 @@ fn test_function_section_with_imports() {
     let body1 = builder.const_(Literal::I32(1));
     let func1 = Function::with_type_idx(
         "local1".to_string(),
-        0,
+        0.into(),
         Type::I32,
         Type::I32,
         vec![],
@@ -2008,7 +2013,7 @@ fn test_function_section_with_imports() {
     let body2 = builder.const_(Literal::F64(2.0));
     let func2 = Function::with_type_idx(
         "local2".to_string(),
-        1,
+        1.into(),
         Type::F64,
         Type::F64,
         vec![],
@@ -2023,7 +2028,6 @@ fn test_function_section_with_imports() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     // Function space: imports come first, then defined functions
-    assert_eq!(parsed.imports.len(), 0);
     assert_eq!(parsed.functions.len(), 4);
     assert_eq!(parsed.types.len(), 2);
 }
@@ -2038,8 +2042,14 @@ fn test_function_section_no_body() {
     let mut module = Module::new(&bump);
     module.add_type(Type::I32, Type::I32);
 
-    let func =
-        Function::with_type_idx("no_body".to_string(), 0, Type::I32, Type::I32, vec![], None);
+    let func = Function::with_type_idx(
+        "no_body".to_string(),
+        0.into(),
+        Type::I32,
+        Type::I32,
+        vec![],
+        None,
+    );
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
@@ -2144,7 +2154,7 @@ fn test_function_section_type_inference_deduplication() {
     for (i, func) in parsed.functions.iter().enumerate() {
         assert_eq!(
             func.1.type_idx,
-            Some(0),
+            Some(0.into()),
             "Function {} should reference type 0",
             i
         );
@@ -2255,7 +2265,7 @@ fn test_function_section_large_type_index() {
     let body = builder.const_(Literal::F64(std::f64::consts::PI));
     let func = Function::with_type_idx(
         "f199".to_string(),
-        199,
+        199.into(),
         Type::F64,
         Type::F64,
         vec![],
@@ -2273,7 +2283,7 @@ fn test_function_section_large_type_index() {
     assert_eq!(parsed.functions.len(), 1);
     assert_eq!(
         parsed.functions[FuncId::from_raw_parts(0, 0)].type_idx,
-        Some(199)
+        Some(199.into())
     );
 }
 
@@ -2845,7 +2855,7 @@ fn test_validation_type_index_out_of_bounds() {
 
     // Add a function with invalid type_idx (no types defined)
     let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
-    func.type_idx = Some(99);
+    func.type_idx = Some(99.into());
     module.add_function(func);
 
     let validator = Validator::new(&module);
@@ -2870,7 +2880,7 @@ fn test_validation_type_signature_mismatch() {
 
     // Add function with mismatched signature
     let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
-    func.type_idx = Some(0);
+    func.type_idx = Some(0.into());
     module.add_function(func);
 
     let validator = Validator::new(&module);
@@ -3012,10 +3022,10 @@ fn test_roundtrip_mixed_function_types() {
         name: "test".to_string(),
         params: Type::I32,
         results: Type::I64,
-        vars: vec![],
+        locals: IdArena::new(),
+        param_ids: Vec::new(),
         body: None,
-        type_idx: Some(0),
-        local_names: vec![],
+        type_idx: Some(0.into()),
         import: None,
     }));
 
@@ -3187,7 +3197,6 @@ fn test_roundtrip_all_sections_together() {
 
     // Types may include inferred types from functions
     assert!(parsed.types.len() >= 2, "Expected at least 2 types");
-    assert_eq!(parsed.imports.len(), 0);
     assert_eq!(parsed.functions.len(), 2);
     assert_eq!(parsed.globals.len(), 1);
     assert!(!parsed.tables.is_empty());
@@ -3217,7 +3226,6 @@ fn test_import_function() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert_eq!(parsed.imports.len(), 0);
     assert_eq!(parsed.functions.len(), 1);
     let func = &parsed.functions[parsed.functions.ids().next().unwrap()];
     let import = func.import.as_ref().unwrap();
@@ -3249,7 +3257,6 @@ fn test_import_memory() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert_eq!(parsed.imports.len(), 0);
     assert_eq!(parsed.memories.len(), 1);
 }
 
@@ -3278,7 +3285,6 @@ fn test_import_global() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert_eq!(parsed.imports.len(), 0);
     assert_eq!(parsed.globals.len(), 1);
 }
 
@@ -3332,7 +3338,6 @@ fn test_multiple_imports_mixed() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert_eq!(parsed.imports.len(), 0);
     assert_eq!(parsed.functions.len(), 2);
     assert_eq!(parsed.globals.len(), 1);
     assert_eq!(parsed.memories.len(), 1);
@@ -3361,7 +3366,6 @@ fn test_import_many_functions() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert_eq!(parsed.imports.len(), 0);
     assert_eq!(parsed.functions.len(), 50);
 }
 

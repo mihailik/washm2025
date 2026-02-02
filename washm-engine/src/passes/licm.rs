@@ -2,7 +2,6 @@ use crate::analysis::effects::{Effect, EffectAnalyzer};
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
-use crate::ir::Type;
 use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
 use std::collections::HashSet;
@@ -19,10 +18,7 @@ impl Pass for LICM {
         let allocator = module.allocator();
         for (_, func) in &mut module.functions {
             if let Some(mut body) = func.body() {
-                let mut hoister = LoopInvariantHoister {
-                    allocator,
-                    vars: func.vars_mut(),
-                };
+                let mut hoister = LoopInvariantHoister { allocator, func };
                 hoister.visit(&mut body);
                 *func.body_mut() = Some(body);
             }
@@ -32,13 +28,13 @@ impl Pass for LICM {
 
 struct LoopInvariantHoister<'a, 'b> {
     allocator: &'a bumpalo::Bump,
-    vars: &'b mut Vec<Type>,
+    func: &'b mut crate::ir::module::Function<'a>,
 }
 
 #[derive(Default)]
 struct LoopInfo {
     effects: Effect,
-    modified_locals: HashSet<u32>,
+    modified_locals: HashSet<crate::ir::LocalId>,
 }
 
 impl<'a> Visitor<'a> for LoopInfo {
@@ -47,8 +43,8 @@ impl<'a> Visitor<'a> for LoopInfo {
         self.effects |= effect;
 
         match &expr.kind {
-            ExpressionKind::LocalSet { index, .. } | ExpressionKind::LocalTee { index, .. } => {
-                self.modified_locals.insert(*index);
+            ExpressionKind::LocalSet { id, .. } | ExpressionKind::LocalTee { id, .. } => {
+                self.modified_locals.insert(*id);
             }
             _ => {}
         }
@@ -58,13 +54,13 @@ impl<'a> Visitor<'a> for LoopInfo {
 
 #[derive(Default)]
 struct LocalReadCollector {
-    read_locals: HashSet<u32>,
+    read_locals: HashSet<crate::ir::LocalId>,
 }
 
 impl<'a> Visitor<'a> for LocalReadCollector {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if let ExpressionKind::LocalGet { index } = &expr.kind {
-            self.read_locals.insert(*index);
+        if let ExpressionKind::LocalGet { id } = &expr.kind {
+            self.read_locals.insert(*id);
         }
     }
 }
@@ -84,7 +80,7 @@ impl<'a, 'b> Visitor<'a> for LoopInvariantHoister<'a, 'b> {
                 allocator: self.allocator,
                 loop_info: &info,
                 hoists: BumpVec::new_in(self.allocator),
-                vars: self.vars,
+                func: self.func,
             };
             replacer.visit(body);
 
@@ -105,7 +101,7 @@ struct InvariantReplacer<'a, 'b, 'c> {
     allocator: &'a bumpalo::Bump,
     loop_info: &'b LoopInfo,
     hoists: BumpVec<'a, ExprRef<'a>>,
-    vars: &'c mut Vec<Type>,
+    func: &'c mut crate::ir::module::Function<'a>,
 }
 
 impl<'a, 'b, 'c> InvariantReplacer<'a, 'b, 'c> {
@@ -154,14 +150,13 @@ impl<'a, 'b, 'c> Visitor<'a> for InvariantReplacer<'a, 'b, 'c> {
         if self.is_invariant(*expr) && !self.is_trivial(*expr) {
             // Hoist it!
             let expr_type = expr.type_;
-            let local_index = self.vars.len() as u32;
-            self.vars.push(expr_type);
+            let local_id = self.func.add_var(expr_type);
 
             let hoisted_expr = *expr;
-            let set = Expression::local_set(self.allocator, local_index, hoisted_expr);
+            let set = Expression::local_set(self.allocator, local_id, hoisted_expr);
             self.hoists.push(set);
 
-            let get = Expression::local_get(self.allocator, local_index, expr_type);
+            let get = Expression::local_get(self.allocator, local_id, expr_type);
             *expr = get;
             return; // Don't visit children of hoisted expression
         }
@@ -234,8 +229,8 @@ mod tests {
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 2, "Should have hoisted one expression");
             // list[0] should be a local.set for the hoisted 'add'
-            if let ExpressionKind::LocalSet { index, .. } = &list[0].kind {
-                assert_eq!(*index, 3, "New local should be index 3");
+            if let ExpressionKind::LocalSet { id, .. } = &list[0].kind {
+                assert_eq!(id.index(), 3, "New local should be index 3");
             } else {
                 panic!(
                     "First item in block should be a local.set, got {:?}",

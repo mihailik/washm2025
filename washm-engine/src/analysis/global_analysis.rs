@@ -252,7 +252,7 @@ impl GlobalAnalysis {
         }
 
         // 3. Elements
-        for segment in module.elements.iter() {
+        for (_, segment) in module.elements.iter() {
             for &func_id in &segment.func_indices {
                 roots.insert(func_id);
             }
@@ -267,13 +267,10 @@ impl GlobalAnalysis {
                 visited.insert(func_id);
                 self.reachable_functions.insert(func_id);
 
-                let func = &module.functions[func_id];
-                if let Some(callees) = call_graph.calls.get(&func.name) {
-                    for callee_name in callees {
-                        if let Some((callee_id, _)) = module.get_function_by_name(callee_name) {
-                            if !visited.contains(&callee_id) {
-                                worklist.push(callee_id);
-                            }
+                if let Some(callees) = call_graph.calls.get(&func_id) {
+                    for &callee_id in callees {
+                        if !visited.contains(&callee_id) {
+                            worklist.push(callee_id);
                         }
                     }
                 }

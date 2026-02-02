@@ -2863,8 +2863,6 @@ impl<'a, 'b> Visitor<'a> for OptimizeInstructionsVisitor<'a, 'b> {
                 *expr = new_expr;
                 expr.finalize(); // Recompute type
 
-                // After replacing the current node, simplify the new subtree's children too.
-                self.visit_children(expr);
                 iterations += 1;
             } else {
                 break;
@@ -2877,7 +2875,7 @@ impl<'a, 'b> Visitor<'a> for OptimizeInstructionsVisitor<'a, 'b> {
 mod tests {
     use super::*;
     use crate::ir::expression::{ExpressionKind, IrBuilder};
-    use crate::ir::{Literal, Type};
+    use crate::ir::{Literal, LocalId, Type};
     use bumpalo::Bump;
 
     #[test]
@@ -2886,7 +2884,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // (local.get 0) + 0
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let zero = builder.const_(Literal::I32(0));
         let add = builder.binary(BinaryOp::AddInt32, x, zero, Type::I32);
 
@@ -2902,7 +2900,7 @@ mod tests {
         // Should be replaced by local.get 0
         assert!(matches!(
             expr_ref.kind,
-            ExpressionKind::LocalGet { index: 0, .. }
+            ExpressionKind::LocalGet { id, .. } if id.index() == 0
         ));
     }
 
@@ -2912,7 +2910,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 1 * (local.get 0)
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let one = builder.const_(Literal::I32(1));
         let mul = builder.binary(BinaryOp::MulInt32, one, x, Type::I32);
 
@@ -2927,7 +2925,7 @@ mod tests {
 
         assert!(matches!(
             expr_ref.kind,
-            ExpressionKind::LocalGet { index: 0, .. }
+            ExpressionKind::LocalGet { id, .. } if id.index() == 0
         ));
     }
 
@@ -2937,7 +2935,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // x * 0 -> 0
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let zero = builder.const_(Literal::I32(0));
         let mul = builder.binary(BinaryOp::MulInt32, x, zero, Type::I32);
 
@@ -2972,7 +2970,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // x & 0 -> 0
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let zero = builder.const_(Literal::I32(0));
         let and = builder.binary(BinaryOp::AndInt32, x, zero, Type::I32);
 
@@ -3007,7 +3005,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // x | x -> x
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let or = builder.binary(BinaryOp::OrInt32, x, x, Type::I32);
 
         let pass = OptimizeInstructions::new();
@@ -3021,7 +3019,7 @@ mod tests {
 
         assert!(matches!(
             expr_ref.kind,
-            ExpressionKind::LocalGet { index: 0, .. }
+            ExpressionKind::LocalGet { id, .. } if id.index() == 0
         ));
     }
 
@@ -3031,7 +3029,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // x ^ x -> 0
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let xor = builder.binary(BinaryOp::XorInt32, x, x, Type::I32);
 
         let pass = OptimizeInstructions::new();
@@ -3055,7 +3053,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // !!x -> x != 0
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let neg1 = builder.unary(UnaryOp::EqZInt32, x, Type::I32);
         let neg2 = builder.unary(UnaryOp::EqZInt32, neg1, Type::I32);
 
@@ -3082,7 +3080,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10 + x -> x + 10
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let c10 = builder.const_(Literal::I32(10));
         let add = builder.binary(BinaryOp::AddInt32, c10, x, Type::I32);
 
@@ -3099,7 +3097,7 @@ mod tests {
             assert_eq!(op, BinaryOp::AddInt32);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3116,7 +3114,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10 * x -> x * 10
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let c10 = builder.const_(Literal::I32(10));
         let mul = builder.binary(BinaryOp::MulInt32, c10, x, Type::I32);
 
@@ -3133,7 +3131,7 @@ mod tests {
             assert_eq!(op, BinaryOp::MulInt32);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3150,7 +3148,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10 & x -> x & 10
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let c10 = builder.const_(Literal::I32(10));
         let and = builder.binary(BinaryOp::AndInt32, c10, x, Type::I32);
 
@@ -3167,7 +3165,7 @@ mod tests {
             assert_eq!(op, BinaryOp::AndInt32);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3184,7 +3182,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10 | x -> x | 10
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let c10 = builder.const_(Literal::I32(10));
         let or = builder.binary(BinaryOp::OrInt32, c10, x, Type::I32);
 
@@ -3201,7 +3199,7 @@ mod tests {
             assert_eq!(op, BinaryOp::OrInt32);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3218,7 +3216,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10 ^ x -> x ^ 10
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let c10 = builder.const_(Literal::I32(10));
         let xor = builder.binary(BinaryOp::XorInt32, c10, x, Type::I32);
 
@@ -3235,7 +3233,7 @@ mod tests {
             assert_eq!(op, BinaryOp::XorInt32);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3252,7 +3250,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10 == x -> x == 10
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let c10 = builder.const_(Literal::I32(10));
         let eq = builder.binary(BinaryOp::EqInt32, c10, x, Type::I32);
 
@@ -3269,7 +3267,7 @@ mod tests {
             assert_eq!(op, BinaryOp::EqInt32);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3286,7 +3284,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10 != x -> x != 10
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let c10 = builder.const_(Literal::I32(10));
         let ne = builder.binary(BinaryOp::NeInt32, c10, x, Type::I32);
 
@@ -3303,7 +3301,7 @@ mod tests {
             assert_eq!(op, BinaryOp::NeInt32);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3320,7 +3318,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10L + x -> x + 10L
-        let x = builder.local_get(0, Type::I64);
+        let x = builder.local_get(LocalId::from(0), Type::I64);
         let c10 = builder.const_(Literal::I64(10));
         let add = builder.binary(BinaryOp::AddInt64, c10, x, Type::I64);
 
@@ -3337,7 +3335,7 @@ mod tests {
             assert_eq!(op, BinaryOp::AddInt64);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3354,7 +3352,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10L * x -> x * 10L
-        let x = builder.local_get(0, Type::I64);
+        let x = builder.local_get(LocalId::from(0), Type::I64);
         let c10 = builder.const_(Literal::I64(10));
         let mul = builder.binary(BinaryOp::MulInt64, c10, x, Type::I64);
 
@@ -3371,7 +3369,7 @@ mod tests {
             assert_eq!(op, BinaryOp::MulInt64);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3388,7 +3386,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10L & x -> x & 10L
-        let x = builder.local_get(0, Type::I64);
+        let x = builder.local_get(LocalId::from(0), Type::I64);
         let c10 = builder.const_(Literal::I64(10));
         let and = builder.binary(BinaryOp::AndInt64, c10, x, Type::I64);
 
@@ -3405,7 +3403,7 @@ mod tests {
             assert_eq!(op, BinaryOp::AndInt64);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3422,7 +3420,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10L | x -> x | 10L
-        let x = builder.local_get(0, Type::I64);
+        let x = builder.local_get(LocalId::from(0), Type::I64);
         let c10 = builder.const_(Literal::I64(10));
         let or = builder.binary(BinaryOp::OrInt64, c10, x, Type::I64);
 
@@ -3439,7 +3437,7 @@ mod tests {
             assert_eq!(op, BinaryOp::OrInt64);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3456,7 +3454,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10L ^ x -> x ^ 10L
-        let x = builder.local_get(0, Type::I64);
+        let x = builder.local_get(LocalId::from(0), Type::I64);
         let c10 = builder.const_(Literal::I64(10));
         let xor = builder.binary(BinaryOp::XorInt64, c10, x, Type::I64);
 
@@ -3473,7 +3471,7 @@ mod tests {
             assert_eq!(op, BinaryOp::XorInt64);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3490,7 +3488,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10L == x -> x == 10L
-        let x = builder.local_get(0, Type::I64);
+        let x = builder.local_get(LocalId::from(0), Type::I64);
         let c10 = builder.const_(Literal::I64(10));
         let eq = builder.binary(BinaryOp::EqInt64, c10, x, Type::I64);
 
@@ -3507,7 +3505,7 @@ mod tests {
             assert_eq!(op, BinaryOp::EqInt64);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3524,7 +3522,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // 10L != x -> x != 10L
-        let x = builder.local_get(0, Type::I64);
+        let x = builder.local_get(LocalId::from(0), Type::I64);
         let c10 = builder.const_(Literal::I64(10));
         let ne = builder.binary(BinaryOp::NeInt64, c10, x, Type::I64);
 
@@ -3541,7 +3539,7 @@ mod tests {
             assert_eq!(op, BinaryOp::NeInt64);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3558,7 +3556,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // x - 0 -> x
-        let x = builder.local_get(0, Type::I64);
+        let x = builder.local_get(LocalId::from(0), Type::I64);
         let zero = builder.const_(Literal::I64(0));
         let sub = builder.binary(BinaryOp::SubInt64, x, zero, Type::I64);
 
@@ -3573,7 +3571,7 @@ mod tests {
 
         assert!(matches!(
             expr_ref.kind,
-            ExpressionKind::LocalGet { index: 0, .. }
+            ExpressionKind::LocalGet { id, .. } if id.index() == 0
         ));
     }
 
@@ -3643,7 +3641,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // x * 4 -> x << 2
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let c4 = builder.const_(Literal::I32(4));
         let mul = builder.binary(BinaryOp::MulInt32, x, c4, Type::I32);
 
@@ -3670,7 +3668,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // x == 0 -> eqz(x)
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let zero = builder.const_(Literal::I32(0));
         let eq = builder.binary(BinaryOp::EqInt32, x, zero, Type::I32);
 
@@ -3698,7 +3696,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // (x + 10) + 20 -> x + 30
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let c10 = builder.const_(Literal::I32(10));
         let c20 = builder.const_(Literal::I32(20));
         let inner_add = builder.binary(BinaryOp::AddInt32, x, c10, Type::I32);
@@ -3717,7 +3715,7 @@ mod tests {
             assert_eq!(op, BinaryOp::AddInt32);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
                 right.kind,
@@ -3734,7 +3732,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // (x << 2) << 3 -> x << 5
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let c2 = builder.const_(Literal::I32(2));
         let c3 = builder.const_(Literal::I32(3));
         let inner_shl = builder.binary(BinaryOp::ShlInt32, x, c2, Type::I32);
@@ -3753,7 +3751,7 @@ mod tests {
             assert_eq!(op, BinaryOp::ShlInt32);
             assert!(matches!(
                 left.kind,
-                ExpressionKind::LocalGet { index: 0, .. }
+                ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(right.kind, ExpressionKind::Const(Literal::I32(5))));
         } else {
@@ -3767,7 +3765,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // x - x -> 0
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let sub = builder.binary(BinaryOp::SubInt32, x, x, Type::I32);
 
         let pass = OptimizeInstructions::new();

@@ -27,21 +27,21 @@ impl DominanceTree {
         // Here we use iterative algorithm
 
         // Initial state: dom(entry) = {entry}, others = all
-        let all_nodes: HashSet<BlockId> = blocks.iter().map(|b| b.id).collect();
+        let all_nodes: HashSet<BlockId> = blocks.iter().map(|(id, _)| id).collect();
         let mut dom_sets: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
 
         dom_sets.insert(cfg.entry, [cfg.entry].iter().cloned().collect());
-        for b in blocks {
-            if b.id != cfg.entry {
-                dom_sets.insert(b.id, all_nodes.clone());
+        for (id, _) in blocks.iter() {
+            if id != cfg.entry {
+                dom_sets.insert(id, all_nodes.clone());
             }
         }
 
         let mut changed = true;
         while changed {
             changed = false;
-            for b in blocks {
-                if b.id == cfg.entry {
+            for (id, b) in blocks.iter() {
+                if id == cfg.entry {
                     continue;
                 }
 
@@ -49,11 +49,6 @@ impl DominanceTree {
                 let mut new_dom = all_nodes.clone(); // Start with all
 
                 if b.preds.is_empty() {
-                    // Unreachable from entry?
-                    // Should be handled, but intersect of empty is empty (or universe?)
-                    // In data flow, intersection over empty set is usually universe (Top).
-                    // But if it has no preds and is not entry, it's unreachable.
-                    // We skip unreachable blocks in dominance calculation usually.
                     continue;
                 }
 
@@ -69,10 +64,10 @@ impl DominanceTree {
                     }
                 }
 
-                new_dom.insert(b.id);
+                new_dom.insert(id);
 
-                if dom_sets.get(&b.id) != Some(&new_dom) {
-                    dom_sets.insert(b.id, new_dom);
+                if dom_sets.get(&id) != Some(&new_dom) {
+                    dom_sets.insert(id, new_dom);
                     changed = true;
                 }
             }
@@ -110,17 +105,17 @@ impl DominanceTree {
         // DF(n) = { y | n dom pred(y) but not n sdom y }
         let mut frontiers = HashMap::new();
 
-        for b in blocks {
+        for (id, b) in blocks.iter() {
             if b.preds.len() >= 2 {
                 for &p in &b.preds {
                     let mut runner = p;
-                    while runner != *doms.get(&b.id).unwrap_or(&cfg.entry) {
+                    while runner != *doms.get(&id).unwrap_or(&cfg.entry) {
                         // Approx check
                         // Add b to frontier of runner
                         frontiers
                             .entry(runner)
                             .or_insert_with(HashSet::new)
-                            .insert(b.id);
+                            .insert(id);
 
                         if let Some(&d) = doms.get(&runner) {
                             if d == runner {
@@ -157,21 +152,21 @@ impl PostDominanceTree {
         let exit = cfg.exit;
         pdoms.insert(exit, exit);
 
-        let all_nodes: HashSet<BlockId> = blocks.iter().map(|b| b.id).collect();
+        let all_nodes: HashSet<BlockId> = blocks.iter().map(|(id, _)| id).collect();
         let mut pdom_sets: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
 
         pdom_sets.insert(exit, [exit].iter().cloned().collect());
-        for b in blocks {
-            if b.id != exit {
-                pdom_sets.insert(b.id, all_nodes.clone());
+        for (id, _) in blocks.iter() {
+            if id != exit {
+                pdom_sets.insert(id, all_nodes.clone());
             }
         }
 
         let mut changed = true;
         while changed {
             changed = false;
-            for b in blocks {
-                if b.id == exit {
+            for (id, b) in blocks.iter() {
+                if id == exit {
                     continue;
                 }
 
@@ -196,10 +191,10 @@ impl PostDominanceTree {
                     }
                 }
 
-                new_pdom.insert(b.id);
+                new_pdom.insert(id);
 
-                if pdom_sets.get(&b.id) != Some(&new_pdom) {
-                    pdom_sets.insert(b.id, new_pdom);
+                if pdom_sets.get(&id) != Some(&new_pdom) {
+                    pdom_sets.insert(id, new_pdom);
                     changed = true;
                 }
             }
@@ -281,21 +276,33 @@ mod tests {
         // 4: If Else
         // 5: If Join
 
-        assert_eq!(*dom.doms.get(&3).unwrap(), 0);
-        assert_eq!(*dom.doms.get(&4).unwrap(), 0);
-        assert_eq!(*dom.doms.get(&5).unwrap(), 0);
-        assert_eq!(*dom.doms.get(&2).unwrap(), 5);
+        assert_eq!(
+            *dom.doms.get(&BlockId::from_u32(3)).unwrap(),
+            BlockId::from_u32(0)
+        );
+        assert_eq!(
+            *dom.doms.get(&BlockId::from_u32(4)).unwrap(),
+            BlockId::from_u32(0)
+        );
+        assert_eq!(
+            *dom.doms.get(&BlockId::from_u32(5)).unwrap(),
+            BlockId::from_u32(0)
+        );
+        assert_eq!(
+            *dom.doms.get(&BlockId::from_u32(2)).unwrap(),
+            BlockId::from_u32(5)
+        );
 
         // Frontiers:
         // DF(3) = {5} (3 dominates predecessor of 5, but not 5)
         // DF(4) = {5}
 
         let empty = HashSet::new();
-        let df3 = dom.frontiers.get(&3).unwrap_or(&empty);
-        assert!(df3.contains(&5));
+        let df3 = dom.frontiers.get(&BlockId::from_u32(3)).unwrap_or(&empty);
+        assert!(df3.contains(&BlockId::from_u32(5)));
 
-        let df4 = dom.frontiers.get(&4).unwrap_or(&empty);
-        assert!(df4.contains(&5));
+        let df4 = dom.frontiers.get(&BlockId::from_u32(4)).unwrap_or(&empty);
+        assert!(df4.contains(&BlockId::from_u32(5)));
     }
 
     #[test]
@@ -340,28 +347,37 @@ mod tests {
         // 6: Inner Else
         // 7: Inner Join
 
-        // Structure:
-        // 0 -> 2, 3
-        // 2 -> 5, 6
-        // 5 -> 7
-        // 6 -> 7
-        // 7 -> 4
-        // 3 -> 4
-        // 4 -> 1
-
         // Check immediate dominators:
         // idom(2) = 0
-        assert_eq!(*dom.doms.get(&2).unwrap(), 0);
+        assert_eq!(
+            *dom.doms.get(&BlockId::from_u32(2)).unwrap(),
+            BlockId::from_u32(0)
+        );
         // idom(3) = 0
-        assert_eq!(*dom.doms.get(&3).unwrap(), 0);
+        assert_eq!(
+            *dom.doms.get(&BlockId::from_u32(3)).unwrap(),
+            BlockId::from_u32(0)
+        );
         // idom(4) = 0
-        assert_eq!(*dom.doms.get(&4).unwrap(), 0);
+        assert_eq!(
+            *dom.doms.get(&BlockId::from_u32(4)).unwrap(),
+            BlockId::from_u32(0)
+        );
 
         // idom(5) = 2
-        assert_eq!(*dom.doms.get(&5).unwrap(), 2);
+        assert_eq!(
+            *dom.doms.get(&BlockId::from_u32(5)).unwrap(),
+            BlockId::from_u32(2)
+        );
         // idom(6) = 2
-        assert_eq!(*dom.doms.get(&6).unwrap(), 2);
+        assert_eq!(
+            *dom.doms.get(&BlockId::from_u32(6)).unwrap(),
+            BlockId::from_u32(2)
+        );
         // idom(7) = 2
-        assert_eq!(*dom.doms.get(&7).unwrap(), 2);
+        assert_eq!(
+            *dom.doms.get(&BlockId::from_u32(7)).unwrap(),
+            BlockId::from_u32(2)
+        );
     }
 }

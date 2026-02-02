@@ -1,9 +1,11 @@
 use crate::analysis::call_graph::CallGraph;
 use crate::analysis::liveness::Liveness;
+use crate::collections::IdArena;
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
+use crate::ir::module::FuncMarker;
 use crate::ir::module::{Function, Global, GlobalKind, Memory, MemoryKind, MemoryLimits, Module};
 use crate::ir::visitor::{ReadOnlyVisitor, Visitor};
-use crate::ir::{FuncId, Literal, Type};
+use crate::ir::{FuncId, Literal, LocalId, Type};
 use crate::passes::flatten::Flatten;
 use crate::passes::re_finalize::ReFinalize;
 use crate::passes::Pass;
@@ -27,6 +29,18 @@ pub enum AsyncifyState {
     Normal = 0,
     Unwinding = 1,
     Rewinding = 2,
+}
+
+#[allow(dead_code)]
+pub struct AsyncifyFunctions {
+    check_call_index: FuncId,
+    get_state: FuncId,
+    get_rewind_index: FuncId,
+    start_unwind: FuncId,
+    stop_unwind: FuncId,
+    start_rewind: FuncId,
+    stop_rewind: FuncId,
+    unwind: FuncId,
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +133,10 @@ impl Asyncify {
     }
 
     fn add_functions<'a>(&self, module: &mut Module<'a>, pointer_type: Type) {
+        if module.get_function_by_name(ASYNCIFY_START_UNWIND).is_some() {
+            return;
+        }
+
         let (state_id, _) = module
             .get_global_by_name(ASYNCIFY_STATE)
             .expect("Asyncify state global not found");
@@ -205,6 +223,7 @@ impl Asyncify {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_helper<'a>(
         &self,
         module: &mut Module<'a>,
@@ -275,35 +294,56 @@ impl Pass for Asyncify {
 
         let analyzer = ModuleAnalyzer::analyze(module, &self.config);
 
+        let asyncify_funcs = AsyncifyFunctions {
+            check_call_index: module
+                .get_function_by_name(ASYNCIFY_CHECK_CALL_INDEX)
+                .unwrap()
+                .0,
+            get_state: module.get_function_by_name(ASYNCIFY_GET_STATE).unwrap().0,
+            get_rewind_index: module
+                .get_function_by_name(ASYNCIFY_GET_REWIND_INDEX)
+                .unwrap()
+                .0,
+            start_unwind: module
+                .get_function_by_name(ASYNCIFY_START_UNWIND)
+                .unwrap()
+                .0,
+            stop_unwind: module.get_function_by_name(ASYNCIFY_STOP_UNWIND).unwrap().0,
+            start_rewind: module
+                .get_function_by_name(ASYNCIFY_START_REWIND)
+                .unwrap()
+                .0,
+            stop_rewind: module.get_function_by_name(ASYNCIFY_STOP_REWIND).unwrap().0,
+            unwind: module.get_function_by_name(ASYNCIFY_UNWIND).unwrap().0,
+        };
+
         let ids: Vec<_> = module.functions.iter().map(|(id, _)| id).collect();
         for id in ids {
-            if !analyzer.needs_instrumentation(&module.functions[id]) {
+            if !analyzer.needs_instrumentation(id) {
                 continue;
             }
 
-            let (range, added_locals) = {
-                let func = &module.functions[id];
-                let base_local_index = (func.params.tuple_len() + func.vars().len()) as u32;
+            let range = {
+                let func = unsafe { &mut *(&mut module.functions[id] as *mut Function<'a>) };
                 if let Some(body) = func.body() {
                     let mut body_clone = body;
-                    let mut flow = AsyncifyFlow::new_inner(
+                    let flow_functions = unsafe {
+                        &*(&module.functions as *const IdArena<FuncMarker, Function<'a>>)
+                    };
+                    let mut flow = AsyncifyFlow::new(
                         module.allocator,
-                        module.features,
-                        &module.functions,
                         &analyzer,
+                        flow_functions,
+                        &asyncify_funcs,
+                        func,
                         state_id,
-                        base_local_index,
                     );
-                    let range = flow.process(&mut body_clone);
-                    (Some((range.0, range.1, body_clone)), flow.added_locals)
+                    let r = flow.process(&mut body_clone);
+                    Some((r.0, r.1, body_clone))
                 } else {
-                    (None, Vec::new())
+                    None
                 }
             };
-
-            for ty in added_locals {
-                module.functions[id].add_var(ty);
-            }
 
             if let Some((start_idx, end_idx, body)) = range {
                 let has_body = module.functions[id].body().is_some();
@@ -329,9 +369,9 @@ impl Pass for Asyncify {
 }
 
 pub struct ModuleAnalyzer {
-    pub can_change_state: HashSet<String>,
-    pub is_top_most_runtime: HashSet<String>,
-    pub is_bottom_most_runtime: HashSet<String>,
+    pub can_change_state: HashSet<FuncId>,
+    pub is_top_most_runtime: HashSet<FuncId>,
+    pub is_bottom_most_runtime: HashSet<FuncId>,
     pub ignore_indirect: bool,
     pub fake_call_globals: HashMap<Type, String>,
 }
@@ -342,7 +382,7 @@ impl ModuleAnalyzer {
         let mut is_top_most_runtime = HashSet::new();
         let mut is_bottom_most_runtime = HashSet::new();
 
-        for func in module.functions.values() {
+        for (id, func) in module.functions.iter() {
             let mut analyzer = FunctionStateAnalyzer {
                 module,
                 config,
@@ -354,13 +394,13 @@ impl ModuleAnalyzer {
                 analyzer.visit(body);
             }
             if analyzer.can_change_state {
-                can_change_state.insert(func.name.clone());
+                can_change_state.insert(id);
             }
             if analyzer.is_top_most_runtime {
-                is_top_most_runtime.insert(func.name.clone());
+                is_top_most_runtime.insert(id);
             }
             if analyzer.is_bottom_most_runtime {
-                is_bottom_most_runtime.insert(func.name.clone());
+                is_bottom_most_runtime.insert(id);
             }
 
             // Check if it's an asyncify import
@@ -373,10 +413,10 @@ impl ModuleAnalyzer {
                     match func_name.as_str() {
                         "start_unwind" | "stop_rewind" => {
                             changes = true;
-                            is_top_most_runtime.insert(func_name.clone());
+                            is_top_most_runtime.insert(id);
                         }
                         "stop_unwind" | "start_rewind" => {
-                            is_bottom_most_runtime.insert(func_name.clone());
+                            is_bottom_most_runtime.insert(id);
                         }
                         _ => {}
                     }
@@ -389,15 +429,16 @@ impl ModuleAnalyzer {
                     changes = true;
                 }
                 if changes {
-                    can_change_state.insert(func_name.clone());
+                    can_change_state.insert(id);
                 }
             }
         }
 
         let call_graph = CallGraph::build(module);
-        let final_can_change_state = call_graph.propagate_back(can_change_state, |name| {
-            !config.remove_list.contains(&name.to_string())
-                && !is_bottom_most_runtime.contains(name)
+        let final_can_change_state = call_graph.propagate_back(can_change_state, |id| {
+            let func = &module.functions[id];
+            !config.remove_list.contains(&func.name.to_string())
+                && !is_bottom_most_runtime.contains(&id)
         });
 
         let mut fake_call_globals: HashMap<Type, String> = HashMap::new();
@@ -414,8 +455,8 @@ impl ModuleAnalyzer {
         }
     }
 
-    pub fn needs_instrumentation(&self, func: &Function) -> bool {
-        self.can_change_state.contains(&func.name) && !self.is_top_most_runtime.contains(&func.name)
+    pub fn needs_instrumentation(&self, id: FuncId) -> bool {
+        self.can_change_state.contains(&id) && !self.is_top_most_runtime.contains(&id)
     }
 
     pub fn can_change_state_expr(&self, module: &Module, expr: ExprRef) -> bool {
@@ -424,14 +465,13 @@ impl ModuleAnalyzer {
 
     pub fn can_change_state_expr_inner<'b>(
         &self,
-        functions: &crate::collections::id_arena::IdArena<
+        _functions: &crate::collections::id_arena::IdArena<
             crate::ir::module::FuncMarker,
             Function<'b>,
         >,
         expr: ExprRef<'b>,
     ) -> bool {
         let mut visitor = CanChangeStateVisitor {
-            functions,
             analyzer: self,
             can_change_state: false,
         };
@@ -440,22 +480,19 @@ impl ModuleAnalyzer {
     }
 }
 
-struct CanChangeStateVisitor<'a, 'b> {
-    functions:
-        &'a crate::collections::id_arena::IdArena<crate::ir::module::FuncMarker, Function<'b>>,
+struct CanChangeStateVisitor<'a> {
     analyzer: &'a ModuleAnalyzer,
     can_change_state: bool,
 }
 
-impl<'a, 'b> ReadOnlyVisitor<'a> for CanChangeStateVisitor<'a, 'b> {
+impl<'a, 'b> ReadOnlyVisitor<'a> for CanChangeStateVisitor<'a> {
     fn visit_expression(&mut self, expr: ExprRef<'a>) {
         if self.can_change_state {
             return;
         }
         match &expr.kind {
             ExpressionKind::Call { target, .. } => {
-                let func = &self.functions[*target];
-                if self.analyzer.can_change_state.contains(&func.name) {
+                if self.analyzer.can_change_state.contains(target) {
                     self.can_change_state = true;
                 }
             }
@@ -502,72 +539,44 @@ impl<'a, 'b> ReadOnlyVisitor<'a> for FunctionStateAnalyzer<'a, 'b> {
 }
 
 pub struct AsyncifyFlow<'a, 'b> {
+    analyzer: &'a ModuleAnalyzer,
     functions:
         &'a crate::collections::id_arena::IdArena<crate::ir::module::FuncMarker, Function<'b>>,
-    analyzer: &'a ModuleAnalyzer,
     builder: IrBuilder<'b>,
     state_id: crate::ir::GlobalId,
+    funcs: &'a AsyncifyFunctions,
+    func: &'a mut Function<'b>,
     call_index: u32,
-    added_locals: Vec<Type>,
-    next_local_index: u32,
     // (call_index) -> Set of live locals at that call site
-    pub site_liveness: HashMap<u32, HashSet<u32>>,
+    pub site_liveness: HashMap<u32, HashSet<LocalId>>,
 }
 
 impl<'a, 'b> AsyncifyFlow<'a, 'b> {
     pub fn new(
-        module: &'a Module<'b>,
-        analyzer: &'a ModuleAnalyzer,
-        state_id: crate::ir::GlobalId,
-        base_local_index: u32,
-    ) -> Self {
-        Self::new_inner(
-            module.allocator,
-            module.features,
-            &module.functions,
-            analyzer,
-            state_id,
-            base_local_index,
-        )
-    }
-
-    pub fn new_inner(
         allocator: &'b bumpalo::Bump,
-        _features: crate::ir::wasm_features::FeatureSet,
+        analyzer: &'a ModuleAnalyzer,
         functions: &'a crate::collections::id_arena::IdArena<
             crate::ir::module::FuncMarker,
             Function<'b>,
         >,
-        analyzer: &'a ModuleAnalyzer,
+        funcs: &'a AsyncifyFunctions,
+        func: &'a mut Function<'b>,
         state_id: crate::ir::GlobalId,
-        base_local_index: u32,
     ) -> Self {
         Self {
-            functions,
             analyzer,
+            functions,
             builder: IrBuilder::new(allocator),
             state_id,
+            funcs,
+            func,
             call_index: 0,
-            added_locals: Vec::new(),
-            next_local_index: base_local_index,
             site_liveness: HashMap::new(),
         }
     }
 
-    fn get_function_by_name(&self, name: &str) -> Option<(FuncId, &Function<'b>)> {
-        for (id, func) in self.functions.iter() {
-            if func.name == name {
-                return Some((id, func));
-            }
-        }
-        None
-    }
-
-    fn add_local(&mut self, ty: Type) -> u32 {
-        let idx = self.next_local_index;
-        self.next_local_index += 1;
-        self.added_locals.push(ty);
-        idx
+    fn add_local(&mut self, ty: Type) -> LocalId {
+        self.func.add_var(ty)
     }
 
     fn make_state_check(&self, state: AsyncifyState) -> ExprRef<'b> {
@@ -580,9 +589,7 @@ impl<'a, 'b> AsyncifyFlow<'a, 'b> {
     }
 
     fn make_range_check(&self, start: u32, end: u32) -> ExprRef<'b> {
-        let (rewind_id, _) = self
-            .get_function_by_name(ASYNCIFY_GET_REWIND_INDEX)
-            .unwrap();
+        let rewind_id = self.funcs.get_rewind_index;
         let get_rewind_index = self.builder.call(
             rewind_id,
             BumpVec::new_in(self.builder.bump),
@@ -681,8 +688,7 @@ impl<'a, 'b> AsyncifyFlow<'a, 'b> {
                 );
             }
             ExpressionKind::Call { target, .. } => {
-                let target_name = &self.functions[*target].name;
-                if self.analyzer.can_change_state.contains(target_name) {
+                if self.analyzer.can_change_state.contains(target) {
                     *expr = self.make_call_support(*expr)
                 }
             }
@@ -734,12 +740,8 @@ impl<'a, 'b> AsyncifyFlow<'a, 'b> {
         let mut ops = BumpVec::new_in(self.builder.bump);
         ops.push(self.builder.const_(Literal::I32(index as i32)));
 
-        let (check_call_id, _) = self
-            .get_function_by_name(ASYNCIFY_CHECK_CALL_INDEX)
-            .expect("Asyncify check_call_index not found");
-        let (unwind_id, _) = self
-            .get_function_by_name(ASYNCIFY_UNWIND)
-            .expect("Asyncify unwind not found");
+        let check_call_id = self.funcs.check_call_index;
+        let unwind_id = self.funcs.unwind;
 
         let check_index = self.builder.call(check_call_id, ops, Type::I32, false);
         let condition = self.builder.binary(
@@ -804,6 +806,7 @@ pub struct AsyncifyLocals<'a, 'b> {
 }
 
 impl<'a, 'b> AsyncifyLocals<'a, 'b> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         module: &'a mut Module<'b>,
         analyzer: &'a ModuleAnalyzer,
@@ -843,27 +846,25 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
         let liveness = Liveness::new(&self.module.functions[self.func_id]);
         let mut relevant_live_locals = HashSet::new();
 
-        struct CallLivenessScanner<'a, 'm> {
-            relevant_live_locals: &'a mut HashSet<u32>,
-            live_now: HashSet<u32>,
+        struct CallLivenessScanner<'a> {
+            relevant_live_locals: &'a mut HashSet<LocalId>,
+            live_now: HashSet<LocalId>,
             analyzer: &'a ModuleAnalyzer,
-            module: &'m Module<'a>,
         }
 
-        impl<'a, 'm, 'b> Visitor<'b> for CallLivenessScanner<'a, 'm> {
+        impl<'a, 'b> Visitor<'b> for CallLivenessScanner<'a> {
             fn visit_expression(&mut self, expr: &mut ExprRef<'b>) {
                 match &mut expr.kind {
-                    ExpressionKind::LocalSet { index, value }
-                    | ExpressionKind::LocalTee { index, value } => {
+                    ExpressionKind::LocalSet { id, value }
+                    | ExpressionKind::LocalTee { id, value } => {
                         self.visit(value);
-                        self.live_now.insert(*index);
+                        self.live_now.insert(*id);
                     }
-                    ExpressionKind::LocalGet { index } => {
-                        self.live_now.insert(*index);
+                    ExpressionKind::LocalGet { id } => {
+                        self.live_now.insert(*id);
                     }
                     ExpressionKind::Call { target, .. } => {
-                        let target_name = &self.module.functions[*target].name;
-                        if self.analyzer.can_change_state.contains(target_name) {
+                        if self.analyzer.can_change_state.contains(target) {
                             self.relevant_live_locals.extend(&self.live_now);
                         }
                     }
@@ -879,12 +880,11 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
             }
         }
 
-        for block in &liveness.cfg.blocks {
+        for (id, block) in liveness.cfg.blocks.iter() {
             let mut scanner = CallLivenessScanner {
                 relevant_live_locals: &mut relevant_live_locals,
-                live_now: liveness.live_in[&block.id].clone(),
+                live_now: liveness.live_in[&id].clone(),
                 analyzer: self.analyzer,
-                module: self.module,
             };
             for &expr in &block.contents {
                 let mut e = expr;
@@ -895,14 +895,14 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
         let pointer_type = self.pointer_type;
         // memory_id is already defined at the start of run()
 
-        let mut live_locals_vec: Vec<u32> = relevant_live_locals.into_iter().collect();
+        let mut live_locals_vec: Vec<LocalId> = relevant_live_locals.into_iter().collect();
         live_locals_vec.sort();
 
         let builder = IrBuilder::new(self.module.allocator);
         let data_ptr = builder.global_get(asyncify_data_global_id, pointer_type);
 
-        let rewind_index_local;
-        let unwind_index_local;
+        let rewind_index_local: LocalId;
+        let unwind_index_local: LocalId;
         let new_inner_body;
 
         {
@@ -1148,10 +1148,10 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
 
 struct LocalTransformer<'a, 'b> {
     builder: IrBuilder<'b>,
-    rewind_index_local: u32,
-    unwind_index_local: u32,
+    rewind_index_local: LocalId,
+    unwind_index_local: LocalId,
     _fake_globals: HashMap<Type, String>,
-    _fake_locals: HashMap<Type, u32>,
+    _fake_locals: HashMap<Type, LocalId>,
     module: &'a Module<'b>,
 }
 
@@ -1189,13 +1189,13 @@ impl<'a, 'b> LocalTransformer<'a, 'b> {
                 let v = self.visit(*value);
                 self.builder.unary(*op, v, type_)
             }
-            ExpressionKind::LocalSet { index, value } => {
+            ExpressionKind::LocalSet { id, value } => {
                 let v = self.visit(*value);
-                self.builder.local_set(*index, v)
+                self.builder.local_set(*id, v)
             }
-            ExpressionKind::LocalTee { index, value } => {
+            ExpressionKind::LocalTee { id, value } => {
                 let v = self.visit(*value);
-                self.builder.local_tee(*index, v, expr.type_)
+                self.builder.local_tee(*id, v, expr.type_)
             }
             ExpressionKind::GlobalSet { id, value } => {
                 let v = self.visit(*value);
@@ -1263,18 +1263,18 @@ mod tests {
         let builder = IrBuilder::new(&allocator);
 
         // Define imports that change state
-        let sleep_id = module.functions.push(crate::ir::module::Function {
+        let sleep_id = module.functions.alloc(crate::ir::module::Function {
             name: "sleep".to_string(),
             params: Type::NONE,
             results: Type::NONE,
-            vars: vec![],
+            param_ids: Vec::new(),
+            locals: crate::collections::IdArena::new(),
             body: None,
             import: Some(crate::ir::module::FunctionImport {
                 module: "env".to_string(),
                 name: "sleep".to_string(),
             }),
             type_idx: None,
-            local_names: vec![],
         });
 
         let mut func = crate::ir::module::Function::new(
@@ -1289,7 +1289,7 @@ mod tests {
         *func.body_mut() =
             Some(builder.block(None, bumpalo::vec![in &allocator; sleep_call], Type::NONE));
 
-        module.functions.push(func);
+        module.functions.alloc(func);
 
         let mut config = AsyncifyConfig::default();
         config.imports.push("env.sleep".to_string());
@@ -1324,18 +1324,18 @@ mod tests {
         let mut module = Module::new(&allocator);
         let builder = IrBuilder::new(&allocator);
 
-        let sleep_id = module.functions.push(crate::ir::module::Function {
+        let sleep_id = module.functions.alloc(crate::ir::module::Function {
             name: "sleep".to_string(),
             params: Type::NONE,
             results: Type::NONE,
-            vars: vec![],
+            param_ids: Vec::new(),
+            locals: crate::collections::IdArena::new(),
             body: None,
             import: Some(crate::ir::module::FunctionImport {
                 module: "env".to_string(),
                 name: "sleep".to_string(),
             }),
             type_idx: None,
-            local_names: vec![],
         });
 
         let mut func = crate::ir::module::Function::new(
@@ -1356,7 +1356,7 @@ mod tests {
         );
         *func.body_mut() = Some(if_expr);
 
-        module.functions.push(func);
+        module.functions.alloc(func);
 
         let mut config = AsyncifyConfig::default();
         config.imports.push("env.sleep".to_string());
@@ -1399,7 +1399,7 @@ mod tests {
         let mut module = Module::new(&allocator);
         let builder = IrBuilder::new(&allocator);
 
-        module.imports.push(crate::ir::module::Import {
+        module.add_import(crate::ir::module::Import {
             module: "env".to_string(),
             name: "sleep".to_string(),
             kind: crate::ir::module::ImportKind::Function(Type::NONE, Type::NONE),
@@ -1432,7 +1432,13 @@ mod tests {
         let mut asyncify = Asyncify::new(config);
         asyncify.run(&mut module);
 
-        let func = &module.functions[module.functions.iter().next().unwrap().0];
+        // Find the "test_abi"
+        let func = module
+            .functions
+            .iter()
+            .find(|(_, f)| f.name == "test_abi")
+            .map(|(_, f)| f)
+            .unwrap();
         let body = func.body().unwrap();
 
         // Check save logic (Unwinding)
@@ -1494,7 +1500,7 @@ mod tests {
         let builder = IrBuilder::new(&allocator);
 
         // a regular import that is NOT in the async list
-        module.imports.push(crate::ir::module::Import {
+        module.add_import(crate::ir::module::Import {
             module: "env".to_string(),
             name: "regular".to_string(),
             kind: crate::ir::module::ImportKind::Function(Type::NONE, Type::NONE),
@@ -1521,7 +1527,13 @@ mod tests {
         let mut asyncify = Asyncify::new(config);
         asyncify.run(&mut module);
 
-        let func = &module.functions[module.functions.iter().next().unwrap().0];
+        // Find the "safe_func"
+        let func = module
+            .functions
+            .iter()
+            .find(|(_, f)| f.name == "safe_func")
+            .map(|(_, f)| f)
+            .unwrap();
         let body = func.body().unwrap();
 
         // Should NOT have a block with state machinery

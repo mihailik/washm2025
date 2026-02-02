@@ -5,6 +5,18 @@ use crate::ir::wasm_features::FeatureSet;
 use crate::ir::Type;
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct TypeMarker;
+pub type TypeId = Id<TypeMarker>;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct DataMarker;
+pub type DataId = Id<DataMarker>;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct ElementMarker;
+pub type ElementId = Id<ElementMarker>;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct GlobalMarker;
 pub type GlobalId = Id<GlobalMarker>;
 
@@ -25,6 +37,12 @@ pub struct LocalMarker;
 pub type LocalId = Id<LocalMarker>;
 
 #[derive(Debug, Clone)]
+pub struct Local {
+    pub name: String,
+    pub type_: Type,
+}
+
+#[derive(Debug, Clone)]
 pub struct FunctionImport {
     pub module: String,
     pub name: String,
@@ -33,12 +51,12 @@ pub struct FunctionImport {
 #[derive(Debug)]
 pub struct Function<'a> {
     pub name: String,
-    pub type_idx: Option<u32>, // Index into module.types (None means infer from params/results)
+    pub type_idx: Option<TypeId>, // Pointer to module.types
     pub params: Type,
     pub results: Type,
-    pub vars: Vec<Type>,
+    pub param_ids: Vec<LocalId>, // Explicit parameter order
+    pub locals: IdArena<LocalMarker, Local>,
     pub body: Option<ExprRef<'a>>,
-    pub local_names: Vec<String>,
     pub import: Option<FunctionImport>,
 }
 
@@ -50,36 +68,70 @@ impl<'a> Function<'a> {
         vars: Vec<Type>,
         body: Option<ExprRef<'a>>,
     ) -> Self {
-        let local_names = vec![String::new(); params.tuple_len() + vars.len()];
+        let mut locals = IdArena::new();
+        let mut param_ids = Vec::new();
+        for param_type in params.tuple_elements() {
+            param_ids.push(
+                locals
+                    .alloc(Local {
+                        name: String::new(),
+                        type_: param_type,
+                    })
+                    .cast(),
+            );
+        }
+        for var_type in vars {
+            locals.alloc(Local {
+                name: String::new(),
+                type_: var_type,
+            });
+        }
         Self {
             name,
             params,
             results,
-            vars,
+            param_ids,
+            locals,
             body,
             type_idx: None,
-            local_names,
             import: None,
         }
     }
 
     pub fn with_type_idx(
         name: String,
-        type_idx: u32,
+        type_idx: TypeId,
         params: Type,
         results: Type,
         vars: Vec<Type>,
         body: Option<ExprRef<'a>>,
     ) -> Self {
-        let local_names = vec![String::new(); params.tuple_len() + vars.len()];
+        let mut locals = IdArena::new();
+        let mut param_ids = Vec::new();
+        for param_type in params.tuple_elements() {
+            param_ids.push(
+                locals
+                    .alloc(Local {
+                        name: String::new(),
+                        type_: param_type,
+                    })
+                    .cast(),
+            );
+        }
+        for var_type in vars {
+            locals.alloc(Local {
+                name: String::new(),
+                type_: var_type,
+            });
+        }
         Self {
             name,
             params,
             results,
-            vars,
+            param_ids,
+            locals,
             body,
             type_idx: Some(type_idx),
-            local_names,
             import: None,
         }
     }
@@ -91,19 +143,35 @@ impl<'a> Function<'a> {
         params: Type,
         results: Type,
     ) -> Self {
+        let mut locals = IdArena::new();
+        let mut param_ids = Vec::new();
+        for param_type in params.tuple_elements() {
+            param_ids.push(
+                locals
+                    .alloc(Local {
+                        name: String::new(),
+                        type_: param_type,
+                    })
+                    .cast(),
+            );
+        }
         Self {
             name,
             params,
             results,
-            vars: Vec::new(),
+            param_ids,
+            locals,
             body: None,
             type_idx: None,
-            local_names: Vec::new(),
             import: Some(FunctionImport {
                 module,
                 name: field,
             }),
         }
+    }
+
+    pub fn num_params(&self) -> usize {
+        self.param_ids.len()
     }
 
     pub fn body(&self) -> Option<ExprRef<'a>> {
@@ -114,20 +182,12 @@ impl<'a> Function<'a> {
         &mut self.body
     }
 
-    pub fn vars(&self) -> &[Type] {
-        &self.vars
+    pub fn locals(&self) -> &IdArena<LocalMarker, Local> {
+        &self.locals
     }
 
-    pub fn vars_mut(&mut self) -> &mut Vec<Type> {
-        &mut self.vars
-    }
-
-    pub fn local_names(&self) -> &[String] {
-        &self.local_names
-    }
-
-    pub fn local_names_mut(&mut self) -> &mut Vec<String> {
-        &mut self.local_names
+    pub fn locals_mut(&mut self) -> &mut IdArena<LocalMarker, Local> {
+        &mut self.locals
     }
 
     pub fn is_import(&self) -> bool {
@@ -140,21 +200,30 @@ impl<'a> Function<'a> {
         f
     }
 
-    pub fn add_var(&mut self, type_: Type) -> u32 {
-        let params_len = self.params.tuple_len();
-        let index = (params_len + self.vars.len()) as u32;
-        self.vars.push(type_);
-        self.local_names.push(String::new());
-        index
+    pub fn add_var(&mut self, type_: Type) -> LocalId {
+        self.locals
+            .alloc(Local {
+                name: String::new(),
+                type_,
+            })
+            .cast()
     }
 
-    pub fn get_local_type(&self, index: u32) -> Type {
-        let params_len = self.params.tuple_len();
-        if (index as usize) < params_len {
-            self.params.tuple_elements()[index as usize]
-        } else {
-            self.vars[(index as usize) - params_len]
-        }
+    pub fn get_local_type(&self, id: LocalId) -> Type {
+        self.locals
+            .get(id.cast())
+            .map(|l| l.type_)
+            .unwrap_or(Type::NONE)
+    }
+
+    pub fn vars(&self) -> Vec<Type> {
+        let param_set: std::collections::HashSet<LocalId> =
+            self.param_ids.iter().cloned().collect();
+        self.locals
+            .iter()
+            .filter(|(id, _)| !param_set.contains(&id.cast()))
+            .map(|(_, l)| l.type_)
+            .collect()
     }
 }
 
@@ -285,16 +354,15 @@ pub struct ElementSegment<'a> {
 pub struct Module<'a> {
     pub allocator: &'a bumpalo::Bump,
     pub features: FeatureSet,
-    pub types: Vec<FuncType>, // Type section
+    pub types: IdArena<TypeMarker, FuncType>, // Type section
     pub functions: IdArena<FuncMarker, Function<'a>>,
     pub tables: IdArena<TableMarker, Table>,
     pub memories: IdArena<MemoryMarker, Memory>,
     pub globals: IdArena<GlobalMarker, Global<'a>>,
-    pub imports: Vec<Import>,
     pub start: Option<FuncId>, // Start function index
     pub exports: Vec<Export>,
-    pub elements: Vec<ElementSegment<'a>>, // Element section
-    pub data: Vec<DataSegment<'a>>,
+    pub elements: IdArena<ElementMarker, ElementSegment<'a>>, // Element section
+    pub data: IdArena<DataMarker, DataSegment<'a>>,
     pub type_names: Vec<String>, // Names for types (debug)
     pub annotations: AnnotationStore<'a>,
 }
@@ -304,16 +372,15 @@ impl<'a> Module<'a> {
         Self {
             allocator,
             features: FeatureSet::DEFAULT,
-            types: Vec::new(),
+            types: IdArena::new(),
             functions: IdArena::new(),
             tables: IdArena::new(),
             memories: IdArena::new(),
             globals: IdArena::new(),
-            imports: Vec::new(),
             start: None,
             exports: Vec::new(),
-            elements: Vec::new(),
-            data: Vec::new(),
+            elements: IdArena::new(),
+            data: IdArena::new(),
             type_names: Vec::new(),
             annotations: AnnotationStore::new(),
         }
@@ -381,62 +448,49 @@ impl<'a> Module<'a> {
         });
     }
 
-    pub fn add_import(&mut self, import: Import) -> u32 {
-        let id = self.imports.len() as u32;
-
+    pub fn add_import(&mut self, import: Import) {
         match &import.kind {
             ImportKind::Function(params, results) => {
-                self.functions.push(Function {
-                    name: import.name.clone(),
-                    params: *params,
-                    results: *results,
-                    vars: Vec::new(),
-                    body: None,
-                    type_idx: None,
-                    local_names: Vec::new(),
-                    import: Some(FunctionImport {
-                        module: import.module.clone(),
-                        name: import.name.clone(),
-                    }),
-                });
-                // We return the func_id cast to u32 for now if needed,
-                // but usually we want to return the import index.
+                self.functions.alloc(Function::new_import(
+                    import.name.clone(),
+                    import.module.clone(),
+                    import.name.clone(),
+                    *params,
+                    *results,
+                ));
             }
             ImportKind::Table(limits) => {
-                self.tables.alloc(crate::ir::module::Table {
+                self.tables.alloc(Table {
                     name: import.name.clone(),
                     limits: limits.clone(),
-                    kind: crate::ir::module::TableKind::Import {
+                    kind: TableKind::Import {
                         module: import.module.clone(),
                         field: import.name.clone(),
                     },
                 });
             }
             ImportKind::Memory(limits) => {
-                self.memories.alloc(crate::ir::module::Memory {
+                self.memories.alloc(Memory {
                     name: import.name.clone(),
                     limits: limits.clone(),
-                    kind: crate::ir::module::MemoryKind::Import {
+                    kind: MemoryKind::Import {
                         module: import.module.clone(),
                         field: import.name.clone(),
                     },
                 });
             }
             ImportKind::Global(type_, mutable) => {
-                self.globals.alloc(crate::ir::module::Global {
+                self.globals.alloc(Global {
                     name: import.name.clone(),
                     type_: *type_,
                     mutable: *mutable,
-                    kind: crate::ir::module::GlobalKind::Import {
+                    kind: GlobalKind::Import {
                         module: import.module.clone(),
                         field: import.name.clone(),
                     },
                 });
             }
         }
-
-        self.imports.push(import);
-        id
     }
 
     pub fn add_export(&mut self, name: String, kind: ExportKind) {
@@ -466,31 +520,29 @@ impl<'a> Module<'a> {
         self.add_export(export_name, ExportKind::Global(id));
     }
 
-    pub fn add_data_segment(&mut self, segment: DataSegment<'a>) {
-        self.data.push(segment);
+    pub fn add_data_segment(&mut self, segment: DataSegment<'a>) -> DataId {
+        self.data.alloc(segment).cast()
     }
 
     pub fn set_start(&mut self, id: FuncId) {
         self.start = Some(id);
     }
 
-    pub fn add_element_segment(&mut self, segment: ElementSegment<'a>) {
-        self.elements.push(segment);
+    pub fn add_element_segment(&mut self, segment: ElementSegment<'a>) -> ElementId {
+        self.elements.alloc(segment).cast()
     }
 
-    pub fn add_type(&mut self, params: Type, results: Type) -> u32 {
-        let type_idx = self.types.len() as u32;
-        self.types.push(FuncType { params, results });
-        type_idx
+    pub fn add_type(&mut self, params: Type, results: Type) -> TypeId {
+        self.types.alloc(FuncType { params, results }).cast()
     }
 
     /// Finds the index of a signature type in the module's type section.
-    pub fn find_type_index(&self, ty: Type) -> Option<u32> {
+    pub fn find_type_id(&self, ty: Type) -> Option<TypeId> {
         let sig = crate::ir::type_store::lookup_signature(ty)?;
         self.types
             .iter()
-            .position(|t| t.params == sig.params && t.results == sig.results)
-            .map(|i| i as u32)
+            .find(|(_, t)| t.params == sig.params && t.results == sig.results)
+            .map(|(id, _)| id.cast())
     }
 
     pub fn set_annotation(

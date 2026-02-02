@@ -24,7 +24,7 @@ impl Pass for SignaturePruning {
         }
 
         let mut address_taken_ids = HashSet::new();
-        for elem in &module.elements {
+        for (_, elem) in &module.elements {
             for &func_id in &elem.func_indices {
                 address_taken_ids.insert(func_id);
             }
@@ -46,11 +46,7 @@ impl Pass for SignaturePruning {
 
         // 2. Scan all function bodies to check for param usage (local.get)
         for (id, func) in &mut module.functions {
-            let num_params = if let Some(p) = get_param_types(func.params) {
-                p.len()
-            } else {
-                0
-            };
+            let param_ids = func.param_ids.clone();
             if let Some(body) = func.body_mut() {
                 let mut scanner = ParamUsageScanner {
                     usage: if candidates.contains(&id) {
@@ -58,7 +54,7 @@ impl Pass for SignaturePruning {
                     } else {
                         None
                     },
-                    num_params,
+                    param_ids: &param_ids,
                 };
                 scanner.visit_expression(body);
             }
@@ -86,41 +82,39 @@ impl Pass for SignaturePruning {
                 }
 
                 let mut new_params = Vec::new();
-                let mut remap = HashMap::new();
+                let mut new_param_ids = Vec::new();
                 let mut constant_replacements = HashMap::new();
-
-                let mut _keep_any = false;
 
                 for (i, status) in infos.iter().enumerate() {
                     match status {
                         ParamStatus::Read | ParamStatus::Written | ParamStatus::Variable => {
-                            remap.insert(i as u32, new_params.len() as u32);
                             new_params.push(old_params_vec[i]);
-                            _keep_any = true;
+                            new_param_ids.push(func.param_ids[i]);
                         }
                         ParamStatus::Unused => {
-                            // Drop
+                            // Deallocate the formal parameter local, it's totally unused
+                            func.locals.dealloc(func.param_ids[i].cast());
                         }
                         ParamStatus::Constant(lit) => {
-                            constant_replacements.insert(i as u32, *lit);
+                            constant_replacements.insert(func.param_ids[i], *lit);
+                            // Also deallocate since it's now a constant
+                            func.locals.dealloc(func.param_ids[i].cast());
                         }
                     }
                 }
 
-                if new_params.len() == old_params_vec.len() {
+                if new_param_ids.len() == func.param_ids.len() {
                     continue;
                 }
 
                 if let Some(new_ty) = make_param_type(&new_params) {
                     func.params = new_ty;
+                    func.param_ids = new_param_ids;
                     pruned_functions.insert(func.name.clone());
 
                     if let Some(body) = func.body_mut() {
                         let mut remapper = LocalRemapper {
-                            param_remap: &remap,
-                            const_replacements: &constant_replacements,
-                            old_param_count: infos.len() as u32,
-                            new_param_count: new_params.len() as u32,
+                            const_replacements: constant_replacements,
                         };
                         remapper.visit(body);
                     }
@@ -175,23 +169,23 @@ enum ParamStatus {
 #[allow(dead_code)]
 struct ParamUsageScanner<'a> {
     usage: Option<&'a mut Vec<ParamStatus>>,
-    num_params: usize,
+    param_ids: &'a Vec<crate::ir::LocalId>,
 }
 
 impl<'a, 'b> Visitor<'b> for ParamUsageScanner<'a> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'b>) {
         if let Some(usage) = &mut self.usage {
-            match expr.kind {
-                ExpressionKind::LocalGet { index } => {
-                    if (index as usize) < self.num_params
-                        && usage[index as usize] == ParamStatus::Unused
-                    {
-                        usage[index as usize] = ParamStatus::Read;
+            match &mut expr.kind {
+                ExpressionKind::LocalGet { id } => {
+                    if let Some(pos) = self.param_ids.iter().position(|&p| p == *id) {
+                        if usage[pos] == ParamStatus::Unused {
+                            usage[pos] = ParamStatus::Read;
+                        }
                     }
                 }
-                ExpressionKind::LocalSet { index, .. } | ExpressionKind::LocalTee { index, .. } => {
-                    if (index as usize) < self.num_params {
-                        usage[index as usize] = ParamStatus::Written;
+                ExpressionKind::LocalSet { id, .. } | ExpressionKind::LocalTee { id, .. } => {
+                    if let Some(pos) = self.param_ids.iter().position(|&p| p == *id) {
+                        usage[pos] = ParamStatus::Written;
                     }
                 }
                 _ => {}
@@ -260,36 +254,18 @@ impl<'a, 'b> Visitor<'b> for CallSiteScanner<'a> {
     }
 }
 
-struct LocalRemapper<'a> {
-    param_remap: &'a HashMap<u32, u32>,
-    const_replacements: &'a HashMap<u32, Literal>,
-    old_param_count: u32,
-    new_param_count: u32,
-    // bump removed
+struct LocalRemapper {
+    const_replacements: HashMap<crate::ir::LocalId, Literal>,
 }
 
-impl<'a, 'b> Visitor<'b> for LocalRemapper<'a> {
+impl<'b> Visitor<'b> for LocalRemapper {
     fn visit_expression(&mut self, expr: &mut ExprRef<'b>) {
         self.visit_children(expr);
 
-        match &mut expr.kind {
-            ExpressionKind::LocalGet { index }
-            | ExpressionKind::LocalSet { index, .. }
-            | ExpressionKind::LocalTee { index, .. } => {
-                if *index < self.old_param_count {
-                    if let Some(lit) = self.const_replacements.get(index) {
-                        if matches!(expr.kind, ExpressionKind::LocalGet { .. }) {
-                            expr.kind = ExpressionKind::Const(*lit);
-                        }
-                    } else if let Some(new_idx) = self.param_remap.get(index) {
-                        *index = *new_idx;
-                    }
-                } else {
-                    let local_var_idx = *index - self.old_param_count;
-                    *index = self.new_param_count + local_var_idx;
-                }
+        if let ExpressionKind::LocalGet { id } = &mut expr.kind {
+            if let Some(lit) = self.const_replacements.get(id) {
+                expr.kind = ExpressionKind::Const(*lit);
             }
-            _ => {}
         }
     }
 }

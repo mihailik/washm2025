@@ -18,59 +18,43 @@ impl Pass for MergeLocals {
         let stats = ModuleStats::collect(module);
 
         for (_, func) in &mut module.functions {
-            if func.vars().is_empty() {
-                continue;
-            }
-
-            let num_params = if func.params == crate::ir::Type::NONE {
-                0
-            } else if let Some(components) = crate::ir::type_store::lookup_tuple(func.params) {
-                components.len()
-            } else {
-                1
-            };
-
             let local_usage = stats.local_counts.get(&func.name);
 
-            let mut new_vars = Vec::new();
-            let mut remap = HashMap::new();
-
-            for (i, &ty) in func.vars().iter().enumerate() {
-                let old_idx = (num_params + i) as u32;
+            // Identify unused locals
+            let mut unused = Vec::new();
+            for (id, _) in func.locals().iter() {
+                let local_id = id.cast();
                 let used = local_usage
-                    .map(|u| u.get(&old_idx).copied().unwrap_or(0) > 0)
+                    .map(|u| u.get(&local_id).copied().unwrap_or(0) > 0)
                     .unwrap_or(false);
 
-                if used {
-                    let new_idx = (num_params + new_vars.len()) as u32;
-                    remap.insert(old_idx, new_idx);
-                    new_vars.push(ty);
+                if !used {
+                    unused.push(local_id);
                 }
             }
 
-            if new_vars.len() < func.vars().len() {
-                *func.vars_mut() = new_vars;
-                if let Some(mut body) = func.body() {
-                    let mut updater = LocalRemapper { remap: &remap };
-                    updater.visit(&mut body);
-                }
+            // Remove unused locals (caution: removing while iterating not allowed, done via filtered vec if it was a vec)
+            // With IdArena, we can remove them.
+            for local_id in unused {
+                func.locals_mut().remove_id(local_id.cast());
             }
         }
     }
 }
 
+#[allow(dead_code)]
 struct LocalRemapper<'a> {
-    remap: &'a HashMap<u32, u32>,
+    remap: &'a HashMap<crate::ir::LocalId, crate::ir::LocalId>,
 }
 
 impl<'a, 'b> Visitor<'b> for LocalRemapper<'a> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'b>) {
         match &mut expr.kind {
-            ExpressionKind::LocalGet { index }
-            | ExpressionKind::LocalSet { index, .. }
-            | ExpressionKind::LocalTee { index, .. } => {
-                if let Some(&new_idx) = self.remap.get(index) {
-                    *index = new_idx;
+            ExpressionKind::LocalGet { id }
+            | ExpressionKind::LocalSet { id, .. }
+            | ExpressionKind::LocalTee { id, .. } => {
+                if let Some(&new_id) = self.remap.get(id) {
+                    *id = new_id;
                 }
             }
             _ => {}

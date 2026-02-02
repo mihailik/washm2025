@@ -160,9 +160,7 @@ impl<'a> Visitor<'a> for Simplify {
 /// Check if two expressions are structurally equal (simple cases only)
 fn are_expressions_equal<'a>(left: &Expression<'a>, right: &Expression<'a>) -> bool {
     match (&left.kind, &right.kind) {
-        (ExpressionKind::LocalGet { index: i1 }, ExpressionKind::LocalGet { index: i2 }) => {
-            i1 == i2
-        }
+        (ExpressionKind::LocalGet { id: i1 }, ExpressionKind::LocalGet { id: i2 }) => i1 == i2,
         (ExpressionKind::GlobalGet { id: i1 }, ExpressionKind::GlobalGet { id: i2 }) => i1 == i2,
         (ExpressionKind::Const(l1), ExpressionKind::Const(l2)) => l1 == l2,
         _ => false, // Conservative: assume not equal for complex expressions
@@ -185,12 +183,12 @@ mod tests {
         // Expected: i32.const 0
 
         let left = ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::LocalGet { index: 0 },
+            kind: ExpressionKind::LocalGet { id: 0.into() },
             type_: Type::I32,
         }));
 
         let right = ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::LocalGet { index: 0 },
+            kind: ExpressionKind::LocalGet { id: 0.into() },
             type_: Type::I32,
         }));
 
@@ -239,12 +237,12 @@ mod tests {
         // Expected: i32.const 0
 
         let left = ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::LocalGet { index: 0 },
+            kind: ExpressionKind::LocalGet { id: 0.into() },
             type_: Type::I32,
         }));
 
         let right = ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::LocalGet { index: 0 },
+            kind: ExpressionKind::LocalGet { id: 0.into() },
             type_: Type::I32,
         }));
 

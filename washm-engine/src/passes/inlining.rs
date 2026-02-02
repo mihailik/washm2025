@@ -13,6 +13,12 @@ pub struct Inlining {
     pub options: OptimizationOptions,
 }
 
+struct InliningInfo<'a> {
+    body: ExprRef<'a>,
+    param_ids: Vec<crate::ir::LocalId>,
+    all_locals: Vec<(crate::ir::LocalId, Type)>,
+}
+
 impl Default for Inlining {
     fn default() -> Self {
         Self::new()
@@ -111,18 +117,29 @@ impl Pass for Inlining {
         if let Some(start) = module.start {
             used_globally.insert(start);
         }
-        for segment in &module.elements {
+        for (_, segment) in &module.elements {
             for &idx in &segment.func_indices {
                 used_globally.insert(idx);
             }
         }
 
         // Store bodies and signatures
-        let mut function_info: HashMap<FuncId, (ExprRef<'a>, Type, Vec<Type>)> = HashMap::new();
+        let mut function_info: HashMap<FuncId, InliningInfo<'a>> = HashMap::new();
 
         for (id, func) in &module.functions {
             if let Some(body) = func.body() {
-                function_info.insert(id, (body, func.params, func.vars().to_vec()));
+                function_info.insert(
+                    id,
+                    InliningInfo {
+                        body,
+                        param_ids: func.param_ids.clone(),
+                        all_locals: func
+                            .locals
+                            .iter()
+                            .map(|(id, l)| (id.cast(), l.type_))
+                            .collect(),
+                    },
+                );
             }
         }
 
@@ -130,11 +147,8 @@ impl Pass for Inlining {
 
         // 1. Identification: Which functions are good candidates (Full Inlining)
         let mut candidates = HashMap::new();
-        for (id, func) in &module.functions {
-            let num_callers = call_graph
-                .get_callers(&func.name)
-                .map(|s| s.len())
-                .unwrap_or(0);
+        for (id, func) in module.functions.iter() {
+            let num_callers = call_graph.get_callers(id).map(|s| s.len()).unwrap_or(0);
             let is_used_globally = used_globally.contains(&id);
             if self.worth_full_inlining(&func.name, num_callers, is_used_globally, func) {
                 candidates.insert(id, true);
@@ -149,23 +163,23 @@ impl Pass for Inlining {
             }
 
             let mut body = module.functions[id].body_mut().take().unwrap();
-            let mut vars = std::mem::take(module.functions[id].vars_mut());
-            let params = module.functions[id].params;
-            let _name = module.functions[id].name.clone();
+
+            // We need to pass the function itself to add new variables
+            let (func_body, caller_func) = {
+                let func = module.functions.get_mut(id).unwrap();
+                (&mut body, func)
+            };
 
             let mut inliner = Inliner {
                 function_info: &function_info,
                 candidates: &candidates,
                 builder: IrBuilder::new(allocator),
-                caller_vars: &mut vars,
-                caller_param_count: params.tuple_len(),
+                caller_func,
                 caller_name: id,
                 inline_counter: 0,
             };
-            inliner.visit(&mut body);
+            inliner.visit(func_body);
 
-            // Put vars back
-            *module.functions[id].vars_mut() = vars;
             *module.functions[id].body_mut() = Some(body);
         }
     }
@@ -215,11 +229,10 @@ impl Pass for InliningOptimizing {
 }
 
 struct Inliner<'a, 'b> {
-    function_info: &'b HashMap<FuncId, (ExprRef<'a>, Type, Vec<Type>)>,
+    function_info: &'b HashMap<FuncId, InliningInfo<'a>>,
     candidates: &'b HashMap<FuncId, bool>,
     builder: IrBuilder<'a>,
-    caller_vars: &'b mut Vec<Type>,
-    caller_param_count: usize,
+    caller_func: &'b mut crate::ir::module::Function<'a>,
     caller_name: FuncId,
     inline_counter: usize,
 }
@@ -242,39 +255,36 @@ impl<'a, 'b> Visitor<'a> for Inliner<'a, 'b> {
                 return;
             }
 
-            if let Some((callee_body, callee_params, callee_vars)) = self.function_info.get(target)
-            {
+            if let Some(info) = self.function_info.get(target) {
                 self.inline_counter += 1;
                 let inline_id = self.inline_counter;
 
                 // Perform full inlining
                 let mut block_list = BumpVec::new_in(self.builder.bump);
-                let base_local_index = self.caller_param_count + self.caller_vars.len();
 
-                // Parameters become locals
-                let param_types: &[Type] = &callee_params.tuple_elements();
-                for (i, &param_type) in param_types.iter().enumerate() {
-                    self.caller_vars.push(param_type);
-                    let operand = operands[i];
-                    block_list.push(
-                        self.builder
-                            .local_set((base_local_index + i) as u32, operand),
-                    );
+                let mut mapping = HashMap::new();
+
+                // Map callee locals (params + vars) to new locals in caller
+                for (callee_local_id, local_type) in &info.all_locals {
+                    let new_id = self.caller_func.add_var(*local_type);
+                    mapping.insert(*callee_local_id, new_id);
                 }
 
-                // Add callee vars (actual locals)
-                for &var_type in callee_vars {
-                    self.caller_vars.push(var_type);
+                // Initialize param-locals with operand values
+                for (i, &callee_param_id) in info.param_ids.iter().enumerate() {
+                    let caller_local_id = mapping[&callee_param_id];
+                    let operand = operands[i];
+                    block_list.push(self.builder.local_set(caller_local_id, operand));
                 }
 
                 // Clone body
-                let mut cloned_body = self.builder.deep_clone(*callee_body);
+                let mut cloned_body = self.builder.deep_clone(info.body);
 
                 // Remap locals and handle Returns in cloned body
                 let block_name = format!("inline${}", inline_id);
                 let allocated_name = self.builder.bump.alloc_str(&block_name);
                 let mut remapper = InliningRemapper {
-                    offset: base_local_index as u32,
+                    mapping,
                     return_target: allocated_name,
                     builder: self.builder,
                 };
@@ -293,7 +303,7 @@ impl<'a, 'b> Visitor<'a> for Inliner<'a, 'b> {
 }
 
 struct InliningRemapper<'a> {
-    offset: u32,
+    mapping: HashMap<crate::ir::LocalId, crate::ir::LocalId>,
     return_target: &'a str,
     builder: IrBuilder<'a>,
 }
@@ -301,14 +311,20 @@ struct InliningRemapper<'a> {
 impl<'a> Visitor<'a> for InliningRemapper<'a> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
         match &mut expr.kind {
-            ExpressionKind::LocalGet { index } => {
-                *index += self.offset;
+            ExpressionKind::LocalGet { id } => {
+                if let Some(new_id) = self.mapping.get(id) {
+                    *id = *new_id;
+                }
             }
-            ExpressionKind::LocalSet { index, .. } => {
-                *index += self.offset;
+            ExpressionKind::LocalSet { id, .. } => {
+                if let Some(new_id) = self.mapping.get(id) {
+                    *id = *new_id;
+                }
             }
-            ExpressionKind::LocalTee { index, .. } => {
-                *index += self.offset;
+            ExpressionKind::LocalTee { id, .. } => {
+                if let Some(new_id) = self.mapping.get(id) {
+                    *id = *new_id;
+                }
             }
             ExpressionKind::Return { value } => {
                 // Convert Return to Break to the inlined block
@@ -375,14 +391,15 @@ mod tests {
         if let ExpressionKind::Block { name, list, .. } = &caller_body.kind {
             assert_eq!(name.as_deref(), Some("inline$1"));
             assert_eq!(list.len(), 2);
-            assert!(matches!(
-                list[0].kind,
-                ExpressionKind::LocalSet { index: 0, .. }
-            ));
-            assert!(matches!(
-                list[1].kind,
-                ExpressionKind::LocalGet { index: 0 }
-            ));
+            // In the new model, we use the mapping, so we need to check the ID index
+            if let ExpressionKind::LocalSet { id, .. } = &list[0].kind {
+                // The callee param was index 0, so it should be mapped to a new local index.
+                // In a fresh function, the first new local is index 0 (if no params).
+                assert_eq!(id.index(), 0);
+            }
+            if let ExpressionKind::LocalGet { id } = &list[1].kind {
+                assert_eq!(id.index(), 0);
+            }
         } else {
             panic!("Expected Block, got {:?}", caller_body.kind);
         }

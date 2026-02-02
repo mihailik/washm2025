@@ -1,5 +1,5 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::Module;
+use crate::ir::module::{FuncId, Module};
 use crate::ir::visitor::ReadOnlyVisitor;
 use std::collections::{HashMap, HashSet};
 
@@ -7,10 +7,10 @@ use std::collections::{HashMap, HashSet};
 /// Tracks direct calls between functions.
 pub struct CallGraph {
     /// Direct calls from each function (Caller -> Callees)
-    pub calls: HashMap<String, HashSet<String>>,
+    pub calls: HashMap<FuncId, HashSet<FuncId>>,
 
     /// Functions that call this function (Callee -> Callers)
-    pub callers: HashMap<String, HashSet<String>>,
+    pub callers: HashMap<FuncId, HashSet<FuncId>>,
 }
 
 impl Default for CallGraph {
@@ -31,18 +31,16 @@ impl CallGraph {
         let mut graph = Self::new();
 
         // Initialize nodes for all functions
-        for (_, func) in &module.functions {
-            graph.calls.insert(func.name.clone(), HashSet::new());
-            graph.callers.insert(func.name.clone(), HashSet::new());
+        for (id, _) in module.functions.iter() {
+            graph.calls.insert(id, HashSet::new());
+            graph.callers.insert(id, HashSet::new());
         }
 
-        for (_, func) in &module.functions {
+        for (id, func) in module.functions.iter() {
             if let Some(body) = func.body() {
-                let caller_name = func.name.clone();
                 let mut visitor = CallGraphBuilder {
-                    caller: caller_name,
+                    caller: id,
                     graph: &mut graph,
-                    module,
                 };
                 visitor.visit(body);
             }
@@ -51,31 +49,31 @@ impl CallGraph {
     }
 
     /// Get all functions directly called by `func`
-    pub fn get_callees(&self, func: &str) -> Option<&HashSet<String>> {
-        self.calls.get(func)
+    pub fn get_callees(&self, func: FuncId) -> Option<&HashSet<FuncId>> {
+        self.calls.get(&func)
     }
 
     /// Get all functions that directly call `func`
-    pub fn get_callers(&self, func: &str) -> Option<&HashSet<String>> {
-        self.callers.get(func)
+    pub fn get_callers(&self, func: FuncId) -> Option<&HashSet<FuncId>> {
+        self.callers.get(&func)
     }
 
     /// Propagate a property backwards from callees to callers.
     /// `initial` is the set of functions that initially have the property.
     /// `can_have` is a filter function to check if a function can ever have the property.
-    pub fn propagate_back<F>(&self, initial: HashSet<String>, mut can_have: F) -> HashSet<String>
+    pub fn propagate_back<F>(&self, initial: HashSet<FuncId>, mut can_have: F) -> HashSet<FuncId>
     where
-        F: FnMut(&str) -> bool,
+        F: FnMut(FuncId) -> bool,
     {
         let mut result = initial;
-        let mut worklist: Vec<String> = result.iter().cloned().collect();
+        let mut worklist: Vec<FuncId> = result.iter().cloned().collect();
 
         while let Some(curr) = worklist.pop() {
-            if let Some(callers) = self.get_callers(&curr) {
-                for caller in callers {
-                    if !result.contains(caller) && can_have(caller) {
-                        result.insert(caller.clone());
-                        worklist.push(caller.clone());
+            if let Some(callers) = self.get_callers(curr) {
+                for &caller in callers {
+                    if !result.contains(&caller) && can_have(caller) {
+                        result.insert(caller);
+                        worklist.push(caller);
                     }
                 }
             }
@@ -85,30 +83,27 @@ impl CallGraph {
     }
 }
 
-struct CallGraphBuilder<'a, 'm> {
-    caller: String,
+struct CallGraphBuilder<'a> {
+    caller: FuncId,
     graph: &'a mut CallGraph,
-    module: &'m Module<'a>,
 }
 
-impl<'a, 'b, 'm> ReadOnlyVisitor<'a> for CallGraphBuilder<'b, 'm> {
-    fn visit_expression(&mut self, expr: ExprRef<'a>) {
+impl<'a, 'b> ReadOnlyVisitor<'b> for CallGraphBuilder<'a> {
+    fn visit(&mut self, expr: ExprRef<'b>) {
         if let ExpressionKind::Call { target, .. } = &expr.kind {
-            // Record call
-            let target_name = self.module.functions[*target].name.clone();
-
             self.graph
                 .calls
-                .entry(self.caller.clone())
-                .or_default()
-                .insert(target_name.clone());
+                .get_mut(&self.caller)
+                .unwrap()
+                .insert(*target);
 
             self.graph
                 .callers
-                .entry(target_name)
+                .entry(*target)
                 .or_default()
-                .insert(self.caller.clone());
+                .insert(self.caller);
         }
+        self.visit_children(expr);
     }
 }
 
@@ -135,13 +130,12 @@ mod tests {
             Some(nop),
         );
 
+        let mut module = Module::new(&bump);
+        let callee_id = module.add_function(callee);
+
         // Create function "caller" calling "callee"
-        let call = builder.call(
-            "callee",
-            bumpalo::collections::Vec::new_in(&bump),
-            Type::NONE,
-            false,
-        );
+        let operands = bumpalo::collections::Vec::new_in(&bump);
+        let call = builder.call(callee_id, operands, Type::NONE, false);
         let caller = Function::new(
             "caller".to_string(),
             Type::NONE,
@@ -150,20 +144,18 @@ mod tests {
             Some(call),
         );
 
-        let mut module = Module::new(&bump);
-        module.add_function(callee);
-        module.add_function(caller);
+        let caller_id = module.add_function(caller);
 
         let graph = CallGraph::build(&module);
 
         // Check "caller" -> "callee" edge
-        let callees = graph.get_callees("caller").unwrap();
-        assert!(callees.contains("callee"));
+        let callees = graph.get_callees(caller_id).unwrap();
+        assert!(callees.contains(&callee_id));
         assert_eq!(callees.len(), 1);
 
         // Check "callee" <- "caller" edge
-        let callers = graph.get_callers("callee").unwrap();
-        assert!(callers.contains("caller"));
+        let callers = graph.get_callers(callee_id).unwrap();
+        assert!(callers.contains(&caller_id));
         assert_eq!(callers.len(), 1);
     }
 }

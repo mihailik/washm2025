@@ -31,10 +31,10 @@ impl<'a, H: Hasher> ReadOnlyVisitor<'a> for DeepHasher<'a, H> {
                 Literal::F64(v) => v.to_bits().hash(self.hasher),
                 Literal::V128(v) => v.hash(self.hasher),
             },
-            ExpressionKind::LocalGet { index }
-            | ExpressionKind::LocalSet { index, .. }
-            | ExpressionKind::LocalTee { index, .. } => {
-                index.hash(self.hasher);
+            ExpressionKind::LocalGet { id }
+            | ExpressionKind::LocalSet { id, .. }
+            | ExpressionKind::LocalTee { id, .. } => {
+                id.hash(self.hasher);
             }
             ExpressionKind::GlobalGet { id } | ExpressionKind::GlobalSet { id, .. } => {
                 id.hash(self.hasher);

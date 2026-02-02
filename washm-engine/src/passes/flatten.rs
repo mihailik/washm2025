@@ -1,10 +1,13 @@
+use crate::collections::id_arena::Id;
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
-use crate::ir::module::{Function, Module};
+use crate::ir::module::{Function, LocalMarker, Module};
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
 use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
 use std::collections::HashMap;
+
+type LocalId = Id<LocalMarker>;
 
 /// Flatten pass: Converts nested expression trees to flatter IR
 ///
@@ -51,7 +54,7 @@ struct Flattener<'a, 'b> {
     // For each expression, a bunch of expressions that should execute right before it
     preludes: HashMap<ExprRef<'a>, Vec<ExprRef<'a>>>,
     // Break values are sent through a temp local
-    break_temps: HashMap<String, u32>,
+    break_temps: HashMap<String, LocalId>,
     // Parent stack to allow migrating preludes upwards
     expression_stack: Vec<ExprRef<'a>>,
     // Functional context needed to add variables
@@ -78,13 +81,13 @@ impl<'a, 'b> Flattener<'a, 'b> {
         }
     }
 
-    fn get_temp_for_break_target(&mut self, name: &str, type_: Type) -> u32 {
-        if let Some(&index) = self.break_temps.get(name) {
-            index
+    fn get_temp_for_break_target(&mut self, name: &str, type_: Type) -> LocalId {
+        if let Some(&id) = self.break_temps.get(name) {
+            id
         } else {
-            let index = self.function.add_var(type_);
-            self.break_temps.insert(name.to_string(), index);
-            index
+            let id = self.function.add_var(type_);
+            self.break_temps.insert(name.to_string(), id);
+            id
         }
     }
 
@@ -280,17 +283,17 @@ impl<'a, 'b> Visitor<'a> for Flattener<'a, 'b> {
 
             let mut replaced = false;
             match &mut curr.kind {
-                ExpressionKind::LocalTee { index, value } => {
+                ExpressionKind::LocalTee { id, value } => {
                     if value.type_ == Type::UNREACHABLE {
                         *expr = *value;
                         replaced = true;
                     } else {
-                        let index = *index;
+                        let local_id = *id;
                         let value_copy = *value;
-                        let set = self.builder.local_set(index, value_copy);
+                        let set = self.builder.local_set(local_id, value_copy);
                         our_preludes.push(set);
-                        let local_type = self.function.get_local_type(index);
-                        *expr = self.builder.local_get(index, local_type);
+                        let local_type = self.function.get_local_type(local_id);
+                        *expr = self.builder.local_get(local_id, local_type);
                         replaced = true;
                     }
                 }

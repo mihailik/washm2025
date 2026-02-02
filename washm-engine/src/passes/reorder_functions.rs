@@ -82,7 +82,7 @@ impl Pass for ReorderFunctions {
         }
 
         // Elements (Tables)
-        for elem in &mut module.elements {
+        for (_, elem) in &mut module.elements {
             for id in &mut elem.func_indices {
                 if let Some(&new_id) = old_to_new.get(id) {
                     *id = new_id;

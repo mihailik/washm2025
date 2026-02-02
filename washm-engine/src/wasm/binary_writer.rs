@@ -1,15 +1,16 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::Module;
 use crate::ir::ops::{AtomicOp, BinaryOp, UnaryOp};
-use crate::ir::{FuncId, GlobalId, MemoryId, TableId};
+use crate::ir::{DataId, ElementId, FuncId, GlobalId, MemoryId, TableId, TypeId};
 use crate::ir::{Literal, Type};
 use std::borrow::Cow;
 use std::io;
 use wasm_encoder::{
-    AbstractHeapType, CodeSection, ConstExpr, DataSection, ElementSection, Encode, ExportKind,
-    ExportSection, Function as EncoderFunction, FunctionSection, GlobalSection, HeapType,
-    ImportSection, Instruction, MemArg, MemorySection, MemoryType, Module as EncoderModule,
-    RefType, StartSection, TableSection, TableType, TypeSection, ValType,
+    AbstractHeapType, CodeSection, ConstExpr, DataCountSection, DataSection, ElementSection,
+    Encode, ExportKind, ExportSection, Function as EncoderFunction, FunctionSection, GlobalSection,
+    HeapType, ImportSection, IndirectNameMap, Instruction, MemArg, MemorySection, MemoryType,
+    Module as EncoderModule, NameMap, NameSection, RefType, StartSection, TableSection, TableType,
+    TypeSection, ValType,
 };
 
 trait InstructionEncoder {
@@ -167,13 +168,63 @@ impl BinaryWriter {
         let mut table_map = std::collections::HashMap::<TableId, u32>::new();
         let mut memory_map = std::collections::HashMap::<MemoryId, u32>::new();
         let mut global_map = std::collections::HashMap::<GlobalId, u32>::new();
+        let mut type_id_map = std::collections::HashMap::<TypeId, u32>::new();
+        let mut sig_map = std::collections::HashMap::<(Vec<Type>, Vec<Type>), u32>::new();
+        let mut data_map = std::collections::HashMap::<DataId, u32>::new();
+        let mut element_map = std::collections::HashMap::<ElementId, u32>::new();
 
         let mut func_idx = 0;
         let mut table_idx = 0;
         let mut memory_idx = 0;
         let mut global_idx = 0;
+        let mut type_idx = 0;
+        let mut data_idx = 0;
+        let mut element_idx = 0;
 
-        // 1. Assign indices to imports
+        let mut all_types = Vec::new();
+
+        // 1. Collect and assign indices to types from module
+        // We MUST preserve all explicit types even if they are duplicates.
+        for (id, func_type) in &module.types {
+            let sig = (
+                Self::expand_type(func_type.params),
+                Self::expand_type(func_type.results),
+            );
+
+            // Keep track of the first index for each signature for implicit use
+            if !sig_map.contains_key(&sig) {
+                sig_map.insert(sig.clone(), type_idx);
+            }
+
+            all_types.push(sig);
+            type_id_map.insert(id, type_idx);
+            type_idx += 1;
+        }
+
+        // 1.1 Collect implicit types from functions and imports
+        for (_, func) in &module.functions {
+            let sig = (
+                Self::expand_type(func.params),
+                Self::expand_type(func.results),
+            );
+            if !sig_map.contains_key(&sig) {
+                sig_map.insert(sig.clone(), type_idx);
+                all_types.push(sig);
+                type_idx += 1;
+            }
+        }
+
+        // 2. Assign indices to segments
+        for (id, _) in &module.data {
+            data_map.insert(id, data_idx);
+            data_idx += 1;
+        }
+        for (id, _) in &module.elements {
+            element_map.insert(id, element_idx);
+            element_idx += 1;
+        }
+
+        // 3. Assign indices to imports
         for (id, func) in &module.functions {
             if func.is_import() {
                 func_map.insert(id, func_idx);
@@ -225,64 +276,39 @@ impl BinaryWriter {
             }
         }
 
-        // Use types from module if available, otherwise infer from functions/imports
-        let mut type_map: Vec<(Vec<Type>, Vec<Type>)> = Vec::new();
-
-        // First, use any explicit types from module.types
-        for func_type in &module.types {
-            let params_vec = Self::expand_type(func_type.params);
-            let results_vec = Self::expand_type(func_type.results);
-            type_map.push((params_vec, results_vec));
-        }
-
-        // Collect types from all functions (imports and definitions)
-        for import in &module.imports {
-            if let crate::ir::module::ImportKind::Function(params, results) = &import.kind {
-                let params_vec = Self::expand_type(*params);
-                let results_vec = Self::expand_type(*results);
-                let sig = (params_vec, results_vec);
-                if !type_map.contains(&sig) {
-                    type_map.push(sig);
-                }
+        // Type section
+        if !all_types.is_empty() {
+            let mut types = TypeSection::new();
+            for sig in &all_types {
+                let p: Vec<ValType> = sig.0.iter().map(|&t| Self::to_val_type(t)).collect();
+                let r: Vec<ValType> = sig.1.iter().map(|&t| Self::to_val_type(t)).collect();
+                types.ty().function(p, r);
             }
-        }
-        for (_, func) in &module.functions {
-            let params_vec = Self::expand_type(func.params);
-            let results_vec = Self::expand_type(func.results);
-            let sig = (params_vec, results_vec);
-            if !type_map.contains(&sig) {
-                type_map.push(sig);
-            }
+            encoder.section(&types);
         }
 
         let mut func_type_indices: Vec<u32> = Vec::new();
         // Function section only includes types for definitions
         for (_, func) in &module.functions {
             if !func.is_import() {
-                let idx = if let Some(type_idx) = func.type_idx {
-                    type_idx
+                let idx = if let Some(type_id) = func.type_idx {
+                    *type_id_map.get(&type_id).ok_or_else(|| {
+                        WriteError::InternalError("TypeId not found in map".to_string())
+                    })?
                 } else {
+                    // Use signature map
                     let sig = (
                         Self::expand_type(func.params),
                         Self::expand_type(func.results),
                     );
-                    type_map.iter().position(|t| *t == sig).ok_or_else(|| {
-                        WriteError::InternalError("Signature not found in type map".to_string())
-                    })? as u32
+                    *sig_map.get(&sig).ok_or_else(|| {
+                        WriteError::InternalError(
+                            "Signature not found in types after collection".to_string(),
+                        )
+                    })?
                 };
                 func_type_indices.push(idx);
             }
-        }
-
-        // 1. Type Section
-        if !type_map.is_empty() {
-            let mut types = TypeSection::new();
-            for (params, results) in &type_map {
-                let p: Vec<ValType> = params.iter().map(|&t| Self::to_val_type(t)).collect();
-                let r: Vec<ValType> = results.iter().map(|&t| Self::to_val_type(t)).collect();
-                types.ty().function(p, r);
-            }
-            encoder.section(&types);
         }
 
         // 2. Import Section
@@ -292,17 +318,25 @@ impl BinaryWriter {
 
             for (_, func) in &module.functions {
                 if let Some(import) = &func.import {
-                    let sig = (
-                        Self::expand_type(func.params),
-                        Self::expand_type(func.results),
-                    );
-                    let type_idx = type_map.iter().position(|t| *t == sig).ok_or_else(|| {
-                        WriteError::InternalError("Signature not found in type map".to_string())
-                    })?;
+                    let type_idx = if let Some(type_id) = func.type_idx {
+                        *type_id_map.get(&type_id).ok_or_else(|| {
+                            WriteError::InternalError("TypeId not found in map".to_string())
+                        })?
+                    } else {
+                        let sig = (
+                            Self::expand_type(func.params),
+                            Self::expand_type(func.results),
+                        );
+                        *sig_map.get(&sig).ok_or_else(|| {
+                            WriteError::InternalError(
+                                "Signature not found in types after collection".to_string(),
+                            )
+                        })?
+                    };
                     imports.import(
                         &import.module,
                         &import.name,
-                        wasm_encoder::EntityType::Function(type_idx as u32),
+                        wasm_encoder::EntityType::Function(type_idx),
                     );
                     has_imports = true;
                 }
@@ -429,9 +463,12 @@ impl BinaryWriter {
                         &mut vec![],
                         &std::collections::HashMap::new(),
                         &global_map,
-                        &type_map,
+                        &type_id_map,
+                        &data_map,
+                        &element_map,
                         &table_map,
                         &memory_map,
+                        &std::collections::HashMap::new(),
                     )?;
                     let init_expr = init_expr_encoder.finish();
                     globals.global(
@@ -504,7 +541,7 @@ impl BinaryWriter {
         // 9. Element Section
         if !module.elements.is_empty() {
             let mut elements = ElementSection::new();
-            for segment in &module.elements {
+            for (_, segment) in &module.elements {
                 let mut offset_expr_encoder = ConstExprEncoder::new();
                 Self::write_instructions(
                     &mut offset_expr_encoder,
@@ -512,9 +549,12 @@ impl BinaryWriter {
                     &mut vec![],
                     &func_map,
                     &global_map,
-                    &type_map,
+                    &type_id_map,
+                    &data_map,
+                    &element_map,
                     &table_map,
                     &memory_map,
+                    &std::collections::HashMap::new(),
                 )?;
                 let offset_expr = offset_expr_encoder.finish();
                 let func_indices: Vec<u32> = segment
@@ -531,15 +571,56 @@ impl BinaryWriter {
             encoder.section(&elements);
         }
 
+        // 9.1 Data Count Section (Section 12, but must precede Code Section)
+        if !module.data.is_empty() {
+            encoder.section(&DataCountSection {
+                count: module.data.len() as u32,
+            });
+        }
+
         // 10. Code Section
         {
             let mut code = CodeSection::new();
             for (_, func) in &module.functions {
                 if !func.is_import() {
-                    let mut locals = Vec::new();
-                    for &t in &func.vars {
-                        locals.push((1, Self::to_val_type(t)));
+                    let mut local_map = std::collections::HashMap::<crate::ir::LocalId, u32>::new();
+                    let mut current_idx = 0;
+
+                    // 1. Assign indices to parameters in explicit order
+                    for &id in &func.param_ids {
+                        local_map.insert(id, current_idx);
+                        current_idx += 1;
                     }
+
+                    // 2. Group non-parameter locals by type
+                    let mut locals = Vec::new();
+                    let mut type_groups =
+                        std::collections::HashMap::<Type, Vec<crate::ir::LocalId>>::new();
+                    let mut types_ordered = Vec::new();
+
+                    let param_set: std::collections::HashSet<crate::ir::LocalId> =
+                        func.param_ids.iter().cloned().collect();
+
+                    for (id, local) in func.locals.iter() {
+                        if param_set.contains(&id.cast()) {
+                            continue;
+                        }
+                        let ty = local.type_;
+                        if !type_groups.contains_key(&ty) {
+                            types_ordered.push(ty);
+                        }
+                        type_groups.entry(ty).or_default().push(id.cast());
+                    }
+
+                    for ty in types_ordered {
+                        let ids = &type_groups[&ty];
+                        locals.push((ids.len() as u32, Self::to_val_type(ty)));
+                        for &id in ids {
+                            local_map.insert(id, current_idx);
+                            current_idx += 1;
+                        }
+                    }
+
                     let mut func_encoder = EncoderFunction::new(locals);
 
                     if let Some(body_expr) = &func.body {
@@ -550,9 +631,12 @@ impl BinaryWriter {
                             &mut label_stack,
                             &func_map,
                             &global_map,
-                            &type_map,
+                            &type_id_map,
+                            &data_map,
+                            &element_map,
                             &table_map,
                             &memory_map,
+                            &local_map,
                         )?;
                     }
                     func_encoder.instruction(&Instruction::End);
@@ -567,7 +651,7 @@ impl BinaryWriter {
         // 11. Data Section
         {
             let mut data = DataSection::new();
-            for segment in &module.data {
+            for (_, segment) in &module.data {
                 let mut offset_expr_encoder = ConstExprEncoder::new();
                 Self::write_instructions(
                     &mut offset_expr_encoder,
@@ -575,9 +659,12 @@ impl BinaryWriter {
                     &mut vec![],
                     &func_map,
                     &global_map,
-                    &type_map,
+                    &type_id_map,
+                    &data_map,
+                    &element_map,
                     &table_map,
                     &memory_map,
+                    &std::collections::HashMap::new(),
                 )?;
                 let offset_expr = offset_expr_encoder.finish();
                 data.active(
@@ -591,18 +678,142 @@ impl BinaryWriter {
             }
         }
 
+        // 12. Name Section (Custom Section)
+        {
+            let mut names = NameSection::new();
+            let mut has_names = false;
+
+            // 1. Function names
+            let mut func_names = NameMap::new();
+            for (id, func) in &module.functions {
+                if !func.name.is_empty() {
+                    func_names.append(*func_map.get(&id).unwrap(), &func.name);
+                }
+            }
+            if !func_names.is_empty() {
+                names.functions(&func_names);
+                has_names = true;
+            }
+
+            // 2. Global names
+            let mut global_names = NameMap::new();
+            for (id, global) in &module.globals {
+                if !global.name.is_empty() {
+                    global_names.append(*global_map.get(&id).unwrap(), &global.name);
+                }
+            }
+            if !global_names.is_empty() {
+                names.globals(&global_names);
+                has_names = true;
+            }
+
+            // 3. Table names
+            let mut table_names = NameMap::new();
+            for (id, table) in &module.tables {
+                if !table.name.is_empty() {
+                    table_names.append(*table_map.get(&id).unwrap(), &table.name);
+                }
+            }
+            if !table_names.is_empty() {
+                names.tables(&table_names);
+                has_names = true;
+            }
+
+            // 4. Memory names
+            let mut memory_names = NameMap::new();
+            for (id, memory) in &module.memories {
+                if !memory.name.is_empty() {
+                    memory_names.append(*memory_map.get(&id).unwrap(), &memory.name);
+                }
+            }
+            if !memory_names.is_empty() {
+                names.memories(&memory_names);
+                has_names = true;
+            }
+
+            // 5. Local names (per function)
+            let mut local_names = IndirectNameMap::new();
+            let mut has_any_local_names = false;
+            for (id, func) in &module.functions {
+                let mut map = NameMap::new();
+                let mut func_has_local_names = false;
+
+                // We need to find the WASM indices for locals in this function
+                // This logic mirrors the one in the Code Section writing
+                let mut current_idx = 0;
+                for &local_id in &func.param_ids {
+                    if let Some(local) = func.locals.get(local_id.cast()) {
+                        if !local.name.is_empty() {
+                            map.append(current_idx, &local.name);
+                            func_has_local_names = true;
+                        }
+                    }
+                    current_idx += 1;
+                }
+
+                // Non-parameter locals
+                let param_set: std::collections::HashSet<crate::ir::LocalId> =
+                    func.param_ids.iter().cloned().collect();
+
+                // To match indices, we must group them the same way as in Section 10
+                let mut type_groups =
+                    std::collections::HashMap::<Type, Vec<crate::ir::LocalId>>::new();
+                let mut types_ordered = Vec::new();
+
+                for (local_id, local) in func.locals.iter() {
+                    if param_set.contains(&local_id.cast()) {
+                        continue;
+                    }
+                    let ty = local.type_;
+                    if !type_groups.contains_key(&ty) {
+                        types_ordered.push(ty);
+                    }
+                    type_groups.entry(ty).or_default().push(local_id.cast());
+                }
+
+                for ty in types_ordered {
+                    for &local_id in &type_groups[&ty] {
+                        if let Some(local) = func.locals.get(local_id.cast()) {
+                            if !local.name.is_empty() {
+                                map.append(current_idx, &local.name);
+                                func_has_local_names = true;
+                            }
+                        }
+                        current_idx += 1;
+                    }
+                }
+
+                if func_has_local_names {
+                    local_names.append(*func_map.get(&id).unwrap(), &map);
+                    has_any_local_names = true;
+                }
+            }
+            if has_any_local_names {
+                names.locals(&local_names);
+                has_names = true;
+            }
+
+            if has_names {
+                encoder.section(&names);
+            }
+        }
+
         Ok(encoder.finish())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_instructions<E: InstructionEncoder>(
         encoder: &mut E,
         expr_ref: ExprRef,
         label_stack: &mut Vec<Option<String>>,
         func_map: &std::collections::HashMap<FuncId, u32>,
         global_map: &std::collections::HashMap<GlobalId, u32>,
-        type_map: &[(Vec<Type>, Vec<Type>)],
+        type_id_map: &std::collections::HashMap<TypeId, u32>,
+        data_map: &std::collections::HashMap<DataId, u32>,
+        element_map: &std::collections::HashMap<ElementId, u32>,
         table_map: &std::collections::HashMap<TableId, u32>,
         memory_map: &std::collections::HashMap<MemoryId, u32>,
+        local_map: &std::collections::HashMap<crate::ir::LocalId, u32>,
     ) -> Result<()> {
         let expr = &*expr_ref;
         match &expr.kind {
@@ -625,34 +836,49 @@ impl BinaryWriter {
                     encoder.instruction(&Instruction::V128Const(i128::from_le_bytes(bytes)));
                 }
             },
-            ExpressionKind::LocalGet { index } => {
-                encoder.instruction(&Instruction::LocalGet(*index));
+            ExpressionKind::LocalGet { id } => {
+                let idx = local_map.get(id).ok_or_else(|| {
+                    WriteError::InternalError(format!("Local not found: {:?}", id))
+                })?;
+                encoder.instruction(&Instruction::LocalGet(*idx));
             }
-            ExpressionKind::LocalSet { index, value } => {
+            ExpressionKind::LocalSet { id, value } => {
                 Self::write_instructions(
                     encoder,
                     *value,
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
-                encoder.instruction(&Instruction::LocalSet(*index));
+                let idx = local_map.get(id).ok_or_else(|| {
+                    WriteError::InternalError(format!("Local not found: {:?}", id))
+                })?;
+                encoder.instruction(&Instruction::LocalSet(*idx));
             }
-            ExpressionKind::LocalTee { index, value } => {
+            ExpressionKind::LocalTee { id, value } => {
                 Self::write_instructions(
                     encoder,
                     *value,
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
-                encoder.instruction(&Instruction::LocalTee(*index));
+                let idx = local_map.get(id).ok_or_else(|| {
+                    WriteError::InternalError(format!("Local not found: {:?}", id))
+                })?;
+                encoder.instruction(&Instruction::LocalTee(*idx));
             }
             ExpressionKind::GlobalGet { id } => {
                 let idx = global_map.get(id).ok_or_else(|| {
@@ -667,9 +893,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 let idx = global_map.get(id).ok_or_else(|| {
                     WriteError::UnsupportedFeature(format!("Global not found: {:?}", id))
@@ -683,9 +912,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -693,9 +925,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
 
                 let instr = match op {
@@ -788,9 +1023,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 let instr = match op {
                     UnaryOp::EqZInt32 => Instruction::I32Eqz,
@@ -858,9 +1096,12 @@ impl BinaryWriter {
                         label_stack,
                         func_map,
                         global_map,
-                        type_map,
+                        type_id_map,
+                        data_map,
+                        element_map,
                         table_map,
                         memory_map,
+                        local_map,
                     )?;
                 }
                 encoder.instruction(&Instruction::End);
@@ -875,9 +1116,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::End);
                 label_stack.pop();
@@ -893,9 +1137,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 label_stack.push(None);
                 encoder.instruction(&Instruction::If(Self::to_block_type(expr.type_)));
@@ -905,9 +1152,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 if let Some(f) = if_false {
                     encoder.instruction(&Instruction::Else);
@@ -917,9 +1167,12 @@ impl BinaryWriter {
                         label_stack,
                         func_map,
                         global_map,
-                        type_map,
+                        type_id_map,
+                        data_map,
+                        element_map,
                         table_map,
                         memory_map,
+                        local_map,
                     )?;
                 }
                 encoder.instruction(&Instruction::End);
@@ -937,9 +1190,12 @@ impl BinaryWriter {
                         label_stack,
                         func_map,
                         global_map,
-                        type_map,
+                        type_id_map,
+                        data_map,
+                        element_map,
                         table_map,
                         memory_map,
+                        local_map,
                     )?;
                 }
                 let depth = Self::find_label_depth(label_stack, name)?;
@@ -950,9 +1206,12 @@ impl BinaryWriter {
                         label_stack,
                         func_map,
                         global_map,
-                        type_map,
+                        type_id_map,
+                        data_map,
+                        element_map,
                         table_map,
                         memory_map,
+                        local_map,
                     )?;
                     encoder.instruction(&Instruction::BrIf(depth));
                 } else {
@@ -967,9 +1226,12 @@ impl BinaryWriter {
                         label_stack,
                         func_map,
                         global_map,
-                        type_map,
+                        type_id_map,
+                        data_map,
+                        element_map,
                         table_map,
                         memory_map,
+                        local_map,
                     )?;
                 }
                 encoder.instruction(&Instruction::Return);
@@ -984,9 +1246,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::Drop);
             }
@@ -1001,9 +1266,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1011,9 +1279,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1021,9 +1292,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::Select);
             }
@@ -1041,9 +1315,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 let memarg = MemArg {
                     offset: *offset as u64,
@@ -1083,9 +1360,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1093,9 +1373,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 let memarg = MemArg {
                     offset: *offset as u64,
@@ -1128,9 +1411,12 @@ impl BinaryWriter {
                         label_stack,
                         func_map,
                         global_map,
-                        type_map,
+                        type_id_map,
+                        data_map,
+                        element_map,
                         table_map,
                         memory_map,
+                        local_map,
                     )?;
                 }
                 let idx = func_map.get(target).ok_or_else(|| {
@@ -1158,9 +1444,12 @@ impl BinaryWriter {
                         label_stack,
                         func_map,
                         global_map,
-                        type_map,
+                        type_id_map,
+                        data_map,
+                        element_map,
                         table_map,
                         memory_map,
+                        local_map,
                     )?;
                 }
                 Self::write_instructions(
@@ -1169,9 +1458,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 let mut targets = Vec::new();
                 for name in names {
@@ -1191,9 +1483,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 let idx = *memory_map.get(memory).unwrap();
                 encoder.instruction(&Instruction::MemoryGrow(idx));
@@ -1201,7 +1496,7 @@ impl BinaryWriter {
             ExpressionKind::CallIndirect {
                 target,
                 operands,
-                type_,
+                type_id,
                 table,
             } => {
                 for &op in operands {
@@ -1211,9 +1506,12 @@ impl BinaryWriter {
                         label_stack,
                         func_map,
                         global_map,
-                        type_map,
+                        type_id_map,
+                        data_map,
+                        element_map,
                         table_map,
                         memory_map,
+                        local_map,
                     )?;
                 }
                 Self::write_instructions(
@@ -1222,27 +1520,21 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
 
-                let sig = if type_.is_signature() {
-                    let s = crate::ir::type_store::lookup_signature(*type_).ok_or_else(|| {
-                        WriteError::UnsupportedFeature(format!("Signature {:?} not found", type_))
-                    })?;
-                    (Self::expand_type(s.params), Self::expand_type(s.results))
-                } else {
-                    (Vec::new(), Self::expand_type(*type_))
-                };
-
-                let idx = type_map.iter().position(|t| *t == sig).ok_or_else(|| {
-                    WriteError::UnsupportedFeature(format!("Signature {:?} not in type_map", type_))
-                })?;
+                let idx = *type_id_map
+                    .get(type_id)
+                    .ok_or_else(|| WriteError::InternalError("TypeId not in map".to_string()))?;
 
                 let table_idx = *table_map.get(table).unwrap();
                 encoder.instruction(&Instruction::CallIndirect {
-                    type_index: idx as u32,
+                    type_index: idx,
                     table_index: table_idx,
                 });
             }
@@ -1257,9 +1549,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::RefIsNull);
             }
@@ -1276,9 +1571,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1286,9 +1584,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::RefEq);
             }
@@ -1304,9 +1605,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1314,9 +1618,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1324,9 +1631,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::MemoryFill(*memory_map.get(memory).unwrap()));
             }
@@ -1343,9 +1653,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1353,9 +1666,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1363,9 +1679,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::MemoryCopy {
                     src_mem: *memory_map.get(src_memory).unwrap(),
@@ -1385,9 +1704,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1395,9 +1717,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1405,17 +1730,20 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::MemoryInit {
                     mem: *memory_map.get(memory).unwrap(),
-                    data_index: *segment,
+                    data_index: *data_map.get(segment).unwrap(),
                 });
             }
             ExpressionKind::DataDrop { segment } => {
-                encoder.instruction(&Instruction::DataDrop(*segment));
+                encoder.instruction(&Instruction::DataDrop(*data_map.get(segment).unwrap()));
             }
             ExpressionKind::TableGet { table, index } => {
                 Self::write_instructions(
@@ -1424,9 +1752,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::TableGet(*table_map.get(table).unwrap()));
             }
@@ -1441,9 +1772,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1451,9 +1785,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::TableSet(*table_map.get(table).unwrap()));
             }
@@ -1471,9 +1808,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1481,9 +1821,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::TableGrow(*table_map.get(table).unwrap()));
             }
@@ -1499,9 +1842,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1509,9 +1855,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1519,9 +1868,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::TableFill(*table_map.get(table).unwrap()));
             }
@@ -1538,9 +1890,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1548,9 +1903,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1558,9 +1916,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::TableCopy {
                     src_table: *table_map.get(src_table).unwrap(),
@@ -1580,9 +1941,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1590,9 +1954,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1600,17 +1967,20 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::TableInit {
                     table: *table_map.get(table).unwrap(),
-                    elem_index: *segment,
+                    elem_index: *element_map.get(segment).unwrap(),
                 });
             }
             ExpressionKind::ElemDrop { segment } => {
-                encoder.instruction(&Instruction::ElemDrop(*segment));
+                encoder.instruction(&Instruction::ElemDrop(*element_map.get(segment).unwrap()));
             }
             ExpressionKind::AtomicRMW {
                 op,
@@ -1626,9 +1996,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1636,9 +2009,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 let arg = MemArg {
                     offset: *offset as u64,
@@ -1741,9 +2117,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1751,9 +2130,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1761,9 +2143,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 let arg = MemArg {
                     offset: *offset as u64,
@@ -1801,9 +2186,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1811,9 +2199,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1821,9 +2212,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 let arg = MemArg {
                     offset: 0,
@@ -1848,9 +2242,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 Self::write_instructions(
                     encoder,
@@ -1858,9 +2255,12 @@ impl BinaryWriter {
                     label_stack,
                     func_map,
                     global_map,
-                    type_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
                     table_map,
                     memory_map,
+                    local_map,
                 )?;
                 encoder.instruction(&Instruction::MemoryAtomicNotify(MemArg {
                     offset: 0,
@@ -1978,7 +2378,7 @@ mod tests {
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
         let body = bump.alloc(Expression {
-            kind: ExpressionKind::LocalGet { index: 0 },
+            kind: ExpressionKind::LocalGet { id: 0.into() },
             type_: Type::I32,
         });
 
@@ -2012,7 +2412,7 @@ mod tests {
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
         let body = ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::LocalGet { index: 1 }, // Get local variable
+            kind: ExpressionKind::LocalGet { id: 1.into() }, // Get local variable
             type_: Type::I32,
         }));
 
@@ -2038,9 +2438,16 @@ mod tests {
         let func = &module2.functions.iter().next().unwrap().1;
         assert_eq!(func.params, Type::I32);
         assert_eq!(func.results, Type::I32);
-        assert_eq!(func.vars().len(), 2);
-        assert_eq!(func.vars()[0], Type::I32);
-        assert_eq!(func.vars()[1], Type::I64);
+        let num_params = BinaryWriter::expand_type(func.params).len();
+        assert_eq!(func.locals.len() - num_params, 2);
+        assert_eq!(
+            func.locals.get_at_index(num_params).unwrap().type_,
+            Type::I32
+        );
+        assert_eq!(
+            func.locals.get_at_index(num_params + 1).unwrap().type_,
+            Type::I64
+        );
     }
 
     #[test]

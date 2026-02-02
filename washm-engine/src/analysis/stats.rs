@@ -9,7 +9,7 @@ pub struct ModuleStats {
     pub function_counts: HashMap<String, usize>,
     pub global_counts: HashMap<crate::ir::GlobalId, usize>,
     pub type_counts: HashMap<u32, usize>,
-    pub local_counts: HashMap<String, HashMap<u32, usize>>,
+    pub local_counts: HashMap<String, HashMap<crate::ir::LocalId, usize>>,
 }
 
 impl ModuleStats {
@@ -17,7 +17,7 @@ impl ModuleStats {
         let mut stats = Self::default();
 
         // Count types in module signatures
-        for ty in &module.types {
+        for (_, ty) in &module.types {
             stats.increment_type(ty.params);
             stats.increment_type(ty.results);
         }
@@ -30,8 +30,8 @@ impl ModuleStats {
             } else {
                 stats.increment_type(func.params);
                 stats.increment_type(func.results);
-                for &ty in &func.vars {
-                    stats.increment_type(ty);
+                for local in func.locals.values() {
+                    stats.increment_type(local.type_);
                 }
 
                 if let Some(body_expr) = &func.body {
@@ -44,7 +44,7 @@ impl ModuleStats {
                 }
             }
             if let Some(idx) = func.type_idx {
-                *stats.type_counts.entry(idx).or_insert(0) += 1;
+                *stats.type_counts.entry(idx.index()).or_insert(0) += 1;
             }
         }
 
@@ -92,7 +92,7 @@ impl ModuleStats {
         }
 
         // Count references in table elements
-        for elem in &module.elements {
+        for (_, elem) in &module.elements {
             for &id in &elem.func_indices {
                 if let Some(func) = module.functions.get(id) {
                     stats.increment_func(&func.name);
@@ -136,21 +136,22 @@ impl<'a, 'b, 'c> ReadOnlyVisitor<'c> for StatsVisitor<'a, 'b> {
             ExpressionKind::GlobalGet { id } | ExpressionKind::GlobalSet { id, .. } => {
                 self.stats.increment_global(*id);
             }
-            ExpressionKind::LocalGet { index }
-            | ExpressionKind::LocalSet { index, .. }
-            | ExpressionKind::LocalTee { index, .. } => {
+            ExpressionKind::LocalGet { id }
+            | ExpressionKind::LocalSet { id, .. }
+            | ExpressionKind::LocalTee { id, .. } => {
                 if let Some(func_name) = &self.current_function {
                     *self
                         .stats
                         .local_counts
                         .entry(func_name.clone())
                         .or_default()
-                        .entry(*index)
+                        .entry(*id)
                         .or_insert(0) += 1;
                 }
             }
-            ExpressionKind::CallIndirect { type_, .. } => {
-                self.stats.increment_type(*type_);
+            ExpressionKind::CallIndirect { type_id, .. } => {
+                self.stats
+                    .increment_type(crate::ir::Type::from_signature_id(type_id.index()));
             }
             ExpressionKind::StructNew { type_, .. }
             | ExpressionKind::StructGet { type_, .. }

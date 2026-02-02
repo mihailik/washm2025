@@ -1,6 +1,7 @@
 use crate::analysis::stats::ModuleStats;
+use crate::collections::{Id, IdArena};
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::Module;
+use crate::ir::module::{Module, TypeId};
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
 use std::collections::HashMap;
@@ -29,14 +30,17 @@ impl Pass for ReorderTypes {
         });
 
         let mut remap = HashMap::new();
-        let mut new_types = Vec::with_capacity(module.types.len());
+        let mut new_arena = IdArena::new();
 
-        for (new_idx, &old_idx) in sorted_indices.iter().enumerate() {
-            remap.insert(old_idx as u32, new_idx as u32);
-            new_types.push(module.types[old_idx].clone());
+        for &old_idx in &sorted_indices {
+            let old_id = Id::from_u32(old_idx as u32);
+            if let Some(ty) = module.types.get(old_id) {
+                let new_id = new_arena.alloc(ty.clone());
+                remap.insert(old_id, new_id);
+            }
         }
 
-        module.types = new_types;
+        module.types = new_arena;
 
         // Update references
         for (_, func) in &mut module.functions {
@@ -47,8 +51,8 @@ impl Pass for ReorderTypes {
             }
             func.params = self.remap_type(func.params, &remap);
             func.results = self.remap_type(func.results, &remap);
-            for var in func.vars_mut() {
-                *var = self.remap_type(*var, &remap);
+            for (_, var) in func.locals.iter_mut() {
+                var.type_ = self.remap_type(var.type_, &remap);
             }
 
             if let Some(body) = func.body_mut() {
@@ -74,10 +78,11 @@ impl Pass for ReorderTypes {
 }
 
 impl ReorderTypes {
-    fn remap_type(&self, ty: crate::ir::Type, remap: &HashMap<u32, u32>) -> crate::ir::Type {
+    fn remap_type(&self, ty: crate::ir::Type, remap: &HashMap<TypeId, TypeId>) -> crate::ir::Type {
         if let Some(id) = ty.signature_id() {
-            if let Some(&new_id) = remap.get(&id) {
-                return crate::ir::Type::from_signature_id(new_id);
+            let old_type_id = Id::from_u32(id);
+            if let Some(&new_id) = remap.get(&old_type_id) {
+                return crate::ir::Type::from_signature_id(new_id.index);
             }
         }
         ty
@@ -85,7 +90,7 @@ impl ReorderTypes {
 }
 
 struct TypeUpdater<'a> {
-    remap: &'a HashMap<u32, u32>,
+    remap: &'a HashMap<TypeId, TypeId>,
     pass: &'a ReorderTypes,
 }
 
@@ -93,8 +98,14 @@ impl<'a, 'b> Visitor<'b> for TypeUpdater<'a> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'b>) {
         expr.type_ = self.pass.remap_type(expr.type_, self.remap);
         match &mut expr.kind {
-            ExpressionKind::CallIndirect { type_, .. }
-            | ExpressionKind::StructNew { type_, .. }
+            ExpressionKind::CallIndirect { type_id, .. } => {
+                let ty = crate::ir::Type::from_signature_id(type_id.index());
+                let new_ty = self.pass.remap_type(ty, self.remap);
+                if let Some(new_id) = new_ty.signature_id() {
+                    *type_id = crate::ir::TypeId::from_u32(new_id);
+                }
+            }
+            ExpressionKind::StructNew { type_, .. }
             | ExpressionKind::StructGet { type_, .. }
             | ExpressionKind::StructSet { type_, .. }
             | ExpressionKind::ArrayNew { type_, .. }

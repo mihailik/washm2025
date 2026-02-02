@@ -1,4 +1,5 @@
 use crate::ir::expression::ExprRef;
+use crate::ir::LocalId;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,26 +12,26 @@ pub enum ActionKind {
 #[derive(Debug, Clone)]
 pub struct LivenessAction<'a> {
     pub kind: ActionKind,
-    pub index: u32,
+    pub id: LocalId,
     pub effective: bool,
     pub origin: ExprRef<'a>,
-    pub copy_from: Option<u32>,
+    pub copy_from: Option<LocalId>,
 }
 
 impl<'a> LivenessAction<'a> {
-    pub fn get(index: u32, origin: ExprRef<'a>) -> Self {
+    pub fn get(id: LocalId, origin: ExprRef<'a>) -> Self {
         Self {
             kind: ActionKind::Get,
-            index,
+            id,
             effective: false,
             origin,
             copy_from: None,
         }
     }
-    pub fn set(index: u32, origin: ExprRef<'a>, copy_from: Option<u32>) -> Self {
+    pub fn set(id: LocalId, origin: ExprRef<'a>, copy_from: Option<LocalId>) -> Self {
         Self {
             kind: ActionKind::Set,
-            index,
+            id,
             effective: false,
             origin,
             copy_from,
@@ -47,13 +48,13 @@ impl<'a> LivenessAction<'a> {
 
 #[derive(Debug, Clone, Default)]
 pub struct Liveness<'a> {
-    pub start: HashSet<u32>,
-    pub end: HashSet<u32>,
+    pub start: HashSet<LocalId>,
+    pub end: HashSet<LocalId>,
     pub actions: Vec<LivenessAction<'a>>,
 }
 
 pub struct InterferenceGraph {
-    pub matrix: HashMap<u32, HashSet<u32>>,
+    pub matrix: HashMap<LocalId, HashSet<LocalId>>,
 }
 
 impl Default for InterferenceGraph {
@@ -69,7 +70,7 @@ impl InterferenceGraph {
         }
     }
 
-    pub fn add(&mut self, a: u32, b: u32) {
+    pub fn add(&mut self, a: LocalId, b: LocalId) {
         if a == b {
             return;
         }
@@ -77,7 +78,7 @@ impl InterferenceGraph {
         self.matrix.entry(min).or_default().insert(max);
     }
 
-    pub fn interferes(&self, a: u32, b: u32) -> bool {
+    pub fn interferes(&self, a: LocalId, b: LocalId) -> bool {
         if a == b {
             return true;
         }

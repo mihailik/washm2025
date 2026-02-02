@@ -1,11 +1,8 @@
 use crate::analysis::effects::EffectAnalyzer;
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::Function;
+use crate::ir::module::{Function, LocalId};
 use crate::ir::visitor::Visitor;
 use std::collections::HashMap;
-
-/// Local variable ID
-pub type LocalId = u32;
 
 /// Represents def-use chains for locals within a function
 ///
@@ -20,18 +17,13 @@ pub struct LocalGraph<'a> {
     uses: HashMap<LocalId, Vec<ExprRef<'a>>>,
 
     /// Number of local variables in function
-    num_locals: u32,
+    num_locals: usize,
 }
 
 impl<'a> LocalGraph<'a> {
     /// Build local graph for a function
     pub fn build(func: &'a Function<'a>) -> Self {
-        // Count total locals: params + vars
-        // For now, assume single-value params (Type is not a tuple)
-        // TODO: Handle multi-value params properly when tuple types are needed
-        let num_params = func.params.tuple_len() as u32;
-        let num_vars = func.vars().len() as u32;
-        let num_locals = num_params + num_vars;
+        let num_locals = func.locals.len();
 
         let mut graph = LocalGraph {
             definitions: HashMap::new(),
@@ -40,8 +32,8 @@ impl<'a> LocalGraph<'a> {
         };
 
         // Add parameter definitions
-        for i in 0..num_params {
-            graph.definitions.entry(i).or_default();
+        for id in &func.param_ids {
+            graph.definitions.entry(*id).or_default();
         }
 
         // Walk expression tree and record def/use
@@ -61,24 +53,16 @@ impl<'a> LocalGraph<'a> {
         impl<'a, 'b> Visitor<'a> for DefUseCollector<'a, 'b> {
             fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
                 match &expr.kind {
-                    ExpressionKind::LocalGet { index } => {
-                        self.graph.uses.entry(*index).or_default().push(*expr);
+                    ExpressionKind::LocalGet { id } => {
+                        self.graph.uses.entry(*id).or_default().push(*expr);
                     }
-                    ExpressionKind::LocalSet { index, .. } => {
-                        self.graph
-                            .definitions
-                            .entry(*index)
-                            .or_default()
-                            .push(*expr);
+                    ExpressionKind::LocalSet { id, .. } => {
+                        self.graph.definitions.entry(*id).or_default().push(*expr);
                     }
-                    ExpressionKind::LocalTee { index, .. } => {
+                    ExpressionKind::LocalTee { id, .. } => {
                         // Tee both defines and uses
-                        self.graph
-                            .definitions
-                            .entry(*index)
-                            .or_default()
-                            .push(*expr);
-                        self.graph.uses.entry(*index).or_default().push(*expr);
+                        self.graph.definitions.entry(*id).or_default().push(*expr);
+                        self.graph.uses.entry(*id).or_default().push(*expr);
                     }
                     _ => {}
                 }
@@ -128,8 +112,8 @@ impl<'a> LocalGraph<'a> {
     }
 
     /// Get all locals defined in function
-    pub fn all_locals(&self) -> impl Iterator<Item = LocalId> + '_ {
-        0..self.num_locals
+    pub fn all_locals(&self) -> impl Iterator<Item = crate::ir::LocalId> + '_ {
+        (0..self.num_locals).map(|i| crate::ir::LocalId::from_u32(i as u32))
     }
 
     /// Get single definition if exists
@@ -161,7 +145,7 @@ impl<'a> LocalGraph<'a> {
     pub fn can_sink(&self, set: ExprRef<'a>, _target: ExprRef<'a>) -> bool {
         // Extract local ID from set
         let _local_id = match &set.kind {
-            ExpressionKind::LocalSet { index, .. } => *index,
+            ExpressionKind::LocalSet { id, .. } => *id,
             _ => return false,
         };
 

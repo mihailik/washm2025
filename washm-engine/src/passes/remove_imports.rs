@@ -18,7 +18,7 @@ impl Pass for RemoveImports {
         let mut imported_sigs = HashMap::new();
         let mut preserved = HashSet::new();
 
-        for segment in &module.elements {
+        for (_, segment) in &module.elements {
             for &id in &segment.func_indices {
                 preserved.insert(id);
             }
@@ -55,45 +55,12 @@ impl Pass for RemoveImports {
             }
         }
 
-        // 4. Remove from module.imports
-        module.imports.retain(|imp| {
-            if let crate::ir::module::ImportKind::Function(..) = &imp.kind {
-                for &id in &to_replace {
-                    let f = &module.functions[id];
-                    if let Some(i) = &f.import {
-                        if i.module == imp.module && i.name == imp.name {
-                            return false;
-                        }
-                    }
-                }
-            }
-            true
-        });
-
-        // 5. Remove the imports from the module
+        // 4. Remove the imports from the module
         let to_remove_ids = to_replace.clone();
-
-        // Collect names of functions being removed to sync with module.imports
-        let mut to_remove_names = HashSet::new();
-        for &id in &to_remove_ids {
-            let func = &module.functions[id];
-            if let Some(import) = &func.import {
-                to_remove_names.insert((import.module.clone(), import.name.clone()));
-            }
-        }
 
         module
             .functions
             .retain(|id, _| !to_remove_ids.contains(&id));
-
-        // Sync with legacy imports vector
-        module.imports.retain(|import| {
-            if let crate::ir::module::ImportKind::Function(..) = &import.kind {
-                !to_remove_names.contains(&(import.module.clone(), import.name.clone()))
-            } else {
-                true
-            }
-        });
     }
 }
 
@@ -191,7 +158,10 @@ mod tests {
         pass.run(&mut module);
 
         // Check if import is gone
-        assert!(module.imports.is_empty(), "Import should be removed");
+        assert!(
+            module.functions.iter().all(|(_, f)| !f.is_import()),
+            "Import should be removed"
+        );
 
         // Check if call is replaced by Nop
         let binding = module.functions[module.functions.iter().next().unwrap().0].body();
@@ -234,7 +204,10 @@ mod tests {
         pass.run(&mut module);
 
         // Check if import is gone
-        assert!(module.imports.is_empty(), "Import should be removed");
+        assert!(
+            module.functions.iter().all(|(_, f)| !f.is_import()),
+            "Import should be removed"
+        );
 
         // Check if call is replaced by Const
         let binding = module.functions[module.functions.iter().next().unwrap().0].body();

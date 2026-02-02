@@ -27,10 +27,10 @@ impl Pass for RemoveMemoryInit {
 
             if !is_exported {
                 // Remove function
-                module.functions.remove(id.index() as usize);
+                module.functions.remove_id(id);
 
                 // Remove from elements if present
-                for segment in &mut module.elements {
+                for (_, segment) in &mut module.elements {
                     segment.func_indices.retain(|&idx| idx != id);
                 }
             }

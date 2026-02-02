@@ -1,15 +1,15 @@
-use crate::analysis::cfg::ControlFlowGraph;
+use crate::analysis::cfg::{BlockId, ControlFlowGraph};
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::Function;
+use crate::ir::module::{Function, LocalId};
 use crate::ir::visitor::ReadOnlyVisitor;
 use std::collections::{HashMap, HashSet};
 
 pub struct Liveness<'a> {
     pub cfg: ControlFlowGraph<'a>,
     // BasicBlock ID -> Set of Live Locals at Entry
-    pub live_in: HashMap<u32, HashSet<u32>>,
+    pub live_in: HashMap<BlockId, HashSet<LocalId>>,
     // BasicBlock ID -> Set of Live Locals at Exit
-    pub live_out: HashMap<u32, HashSet<u32>>,
+    pub live_out: HashMap<BlockId, HashSet<LocalId>>,
 }
 
 impl<'a> Liveness<'a> {
@@ -26,10 +26,10 @@ impl<'a> Liveness<'a> {
         let cfg = ControlFlowGraph::build(func, body);
 
         // 2. Compute Gen definitions
-        let mut gen: HashMap<u32, HashSet<u32>> = HashMap::new();
-        let mut kill: HashMap<u32, HashSet<u32>> = HashMap::new();
+        let mut gen: HashMap<BlockId, HashSet<LocalId>> = HashMap::new();
+        let mut kill: HashMap<BlockId, HashSet<LocalId>> = HashMap::new();
 
-        for block in &cfg.blocks {
+        for (id, block) in cfg.blocks.iter() {
             let mut g = HashSet::new();
             let mut k = HashSet::new();
 
@@ -44,18 +44,18 @@ impl<'a> Liveness<'a> {
                 scanner.visit(expr);
             }
 
-            gen.insert(block.id, g);
-            kill.insert(block.id, k);
+            gen.insert(id, g);
+            kill.insert(id, k);
         }
 
         // 3. Iterative solver
-        let mut live_in: HashMap<u32, HashSet<u32>> = HashMap::new();
-        let mut live_out: HashMap<u32, HashSet<u32>> = HashMap::new();
+        let mut live_in: HashMap<BlockId, HashSet<LocalId>> = HashMap::new();
+        let mut live_out: HashMap<BlockId, HashSet<LocalId>> = HashMap::new();
 
         // Initialize
-        for block in &cfg.blocks {
-            live_in.insert(block.id, HashSet::new());
-            live_out.insert(block.id, HashSet::new());
+        for (id, _) in cfg.blocks.iter() {
+            live_in.insert(id, HashSet::new());
+            live_out.insert(id, HashSet::new());
         }
 
         let mut changed = true;
@@ -63,7 +63,7 @@ impl<'a> Liveness<'a> {
             changed = false;
 
             // Visit blocks in whatever order (reverse post-order is best, but any works for convergence)
-            for block in &cfg.blocks {
+            for (id, block) in cfg.blocks.iter() {
                 // Calculate LiveOut = Union(LiveIn(succ))
                 let mut current_live_out = HashSet::new();
                 for &succ_id in &block.succs {
@@ -75,19 +75,19 @@ impl<'a> Liveness<'a> {
                 }
 
                 // Calculate LiveIn = Gen U (LiveOut - Kill)
-                let mut current_live_in = gen[&block.id].clone();
+                let mut current_live_in = gen.get(&id).unwrap().clone();
                 for &local in &current_live_out {
-                    if !kill[&block.id].contains(&local) {
+                    if !kill.get(&id).unwrap().contains(&local) {
                         current_live_in.insert(local);
                     }
                 }
 
-                if current_live_in != live_in[&block.id] {
-                    live_in.insert(block.id, current_live_in);
+                if current_live_in != *live_in.get(&id).unwrap() {
+                    live_in.insert(id, current_live_in);
                     changed = true;
                 }
-                if current_live_out != live_out[&block.id] {
-                    live_out.insert(block.id, current_live_out);
+                if current_live_out != *live_out.get(&id).unwrap() {
+                    live_out.insert(id, current_live_out);
                     changed = true;
                 }
             }
@@ -102,25 +102,25 @@ impl<'a> Liveness<'a> {
 }
 
 struct LivenessScanner<'a> {
-    gen: &'a mut HashSet<u32>,
-    kill: &'a mut HashSet<u32>,
+    gen: &'a mut HashSet<LocalId>,
+    kill: &'a mut HashSet<LocalId>,
 }
 
 impl<'a> ReadOnlyVisitor<'a> for LivenessScanner<'a> {
     fn visit_expression(&mut self, expr: ExprRef<'a>) {
         match &expr.kind {
-            ExpressionKind::LocalGet { index } => {
-                if !self.kill.contains(index) {
-                    self.gen.insert(*index);
+            ExpressionKind::LocalGet { id } => {
+                if !self.kill.contains(id) {
+                    self.gen.insert(*id);
                 }
             }
-            ExpressionKind::LocalSet { index, value } => {
+            ExpressionKind::LocalSet { id, value } => {
                 self.visit(*value); // Visit value first (it is read)
-                self.kill.insert(*index);
+                self.kill.insert(*id);
             }
-            ExpressionKind::LocalTee { index, value } => {
+            ExpressionKind::LocalTee { id, value } => {
                 self.visit(*value);
-                self.kill.insert(*index);
+                self.kill.insert(*id);
                 // Generally Tee is "Set local, then result is value".
                 // So it kills.
             }

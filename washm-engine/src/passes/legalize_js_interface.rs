@@ -117,7 +117,9 @@ impl Pass for LegalizeJSInterface {
             if original_func.params != Type::NONE {
                 let get_local = allocator.alloc(Expression {
                     type_: original_func.params,
-                    kind: ExpressionKind::LocalGet { index: 0 },
+                    kind: ExpressionKind::LocalGet {
+                        id: crate::ir::module::LocalId::from_u32(0),
+                    },
                 });
                 args.push(ExprRef::new(get_local));
             }
@@ -136,7 +138,11 @@ impl Pass for LegalizeJSInterface {
                 // We need to store the result in a local.
 
                 // For simplified logic: param is index 0. temp var is index 0 (if no params) or 1.
-                let temp_local_idx = if wrapper_params != Type::NONE { 1 } else { 0 };
+                let temp_local_idx = if wrapper_params != Type::NONE {
+                    crate::ir::module::LocalId::from_u32(1)
+                } else {
+                    crate::ir::module::LocalId::from_u32(0)
+                };
 
                 let mut block_list = BumpVec::new_in(allocator);
 
@@ -144,7 +150,7 @@ impl Pass for LegalizeJSInterface {
                 let set_temp = allocator.alloc(Expression {
                     type_: Type::NONE,
                     kind: ExpressionKind::LocalSet {
-                        index: temp_local_idx,
+                        id: temp_local_idx,
                         value: ExprRef::new(call_original),
                     },
                 });
@@ -159,9 +165,7 @@ impl Pass for LegalizeJSInterface {
                 // local.get $temp
                 let get_temp_for_high = allocator.alloc(Expression {
                     type_: Type::I64,
-                    kind: ExpressionKind::LocalGet {
-                        index: temp_local_idx,
-                    },
+                    kind: ExpressionKind::LocalGet { id: temp_local_idx },
                 });
                 // i64.shr_u
                 let shr = allocator.alloc(Expression {
@@ -193,9 +197,7 @@ impl Pass for LegalizeJSInterface {
                 // 3. i32.wrap (low bits) -> return value
                 let get_temp_for_low = allocator.alloc(Expression {
                     type_: Type::I64,
-                    kind: ExpressionKind::LocalGet {
-                        index: temp_local_idx,
-                    },
+                    kind: ExpressionKind::LocalGet { id: temp_local_idx },
                 });
                 let wrap_low = allocator.alloc(Expression {
                     type_: Type::I32,

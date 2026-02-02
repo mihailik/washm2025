@@ -1,7 +1,7 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::{ExportKind, Function, Module};
 use crate::ir::visitor::ReadOnlyVisitor;
-use crate::ir::Type;
+use crate::ir::{LocalId, Type};
 use std::collections::HashSet;
 
 pub struct Validator<'a, 'm> {
@@ -29,7 +29,7 @@ impl<'a, 'm> Validator<'a, 'm> {
 
             // Validate type_idx if present
             if let Some(type_id) = func.type_idx {
-                if let Some(func_type) = self.module.types.get(type_id as usize) {
+                if let Some(func_type) = self.module.types.get(type_id) {
                     // Verify that the function signature matches the type
                     if func_type.params != func.params || func_type.results != func.results {
                         self.fail(&format!(
@@ -94,7 +94,7 @@ impl<'a, 'm> Validator<'a, 'm> {
         }
 
         // Validate data segments
-        for segment in &self.module.data {
+        for (_, segment) in &self.module.data {
             // Check memory exists
             if self.module.memories.get(segment.memory_index).is_none() {
                 self.fail(&format!(
@@ -123,7 +123,7 @@ impl<'a, 'm> Validator<'a, 'm> {
         }
 
         // Validate element segments
-        for segment in &self.module.elements {
+        for (_, segment) in &self.module.elements {
             // Check table exists
             if self.module.tables.get(segment.table_index).is_none() {
                 self.fail(&format!(
@@ -154,22 +154,8 @@ impl<'a, 'm> Validator<'a, 'm> {
         self.errors.push(msg.to_string());
     }
 
-    fn get_local_type(&self, func: &Function, index: u32) -> Option<Type> {
-        let idx = index as usize;
-        let param_len = func.params.tuple_len();
-        if idx < param_len {
-            if param_len == 1 {
-                return Some(func.params);
-            }
-            // Multi-value params
-            if let Some(types) = crate::ir::type_store::lookup_tuple(func.params) {
-                return types.get(idx).cloned();
-            }
-            return None;
-        }
-
-        let var_idx = idx - param_len;
-        func.vars().get(var_idx).cloned()
+    fn get_local_type(&self, func: &Function, id: LocalId) -> Option<Type> {
+        func.locals.get(id).map(|l| l.type_)
     }
 }
 
@@ -187,32 +173,31 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
                     ));
                 }
             }
-            ExpressionKind::LocalGet { index } => {
+            ExpressionKind::LocalGet { id } => {
                 if let Some(current) = self.current_function {
-                    if let Some(expected_ty) = self.get_local_type(current, *index) {
+                    if let Some(expected_ty) = self.get_local_type(current, *id) {
                         if expr.type_ != expected_ty && expr.type_ != Type::UNREACHABLE {
                             self.fail(&format!(
-                                "LocalGet: Expression type {:?} does not match local {} type {:?}",
-                                expr.type_, index, expected_ty
+                                "LocalGet: Expression type {:?} does not match local {:?} type {:?}",
+                                expr.type_, id, expected_ty
                             ));
                         }
                     } else {
-                        self.fail(&format!("LocalGet: Index {} out of bounds", index));
+                        self.fail(&format!("LocalGet: ID {:?} out of bounds", id));
                     }
                 }
             }
-            ExpressionKind::LocalSet { index, value }
-            | ExpressionKind::LocalTee { index, value } => {
+            ExpressionKind::LocalSet { id, value } | ExpressionKind::LocalTee { id, value } => {
                 if let Some(current) = self.current_function {
-                    if let Some(expected_ty) = self.get_local_type(current, *index) {
+                    if let Some(expected_ty) = self.get_local_type(current, *id) {
                         if value.type_ != expected_ty && value.type_ != Type::UNREACHABLE {
                             self.fail(&format!(
-                                "LocalSet/Tee: Value type {:?} does not match local {} type {:?}",
-                                value.type_, index, expected_ty
+                                "LocalSet/Tee: Value type {:?} does not match local {:?} type {:?}",
+                                value.type_, id, expected_ty
                             ));
                         }
                     } else {
-                        self.fail(&format!("LocalSet/Tee: Index {} out of bounds", index));
+                        self.fail(&format!("LocalSet/Tee: ID {:?} out of bounds", id));
                     }
                 }
             }

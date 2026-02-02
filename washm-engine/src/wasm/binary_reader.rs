@@ -22,6 +22,10 @@ pub struct BinaryReader<'a> {
     table_ids: Vec<crate::ir::TableId>,
     memory_ids: Vec<crate::ir::MemoryId>,
     global_ids: Vec<crate::ir::GlobalId>,
+    type_ids: Vec<crate::ir::TypeId>,
+    data_ids: Vec<crate::ir::DataId>,
+    element_ids: Vec<crate::ir::ElementId>,
+    current_func_local_ids: Vec<crate::ir::LocalId>,
 }
 
 #[derive(Debug)]
@@ -69,6 +73,10 @@ impl<'a> BinaryReader<'a> {
             table_ids: Vec::new(),
             memory_ids: Vec::new(),
             global_ids: Vec::new(),
+            type_ids: Vec::new(),
+            data_ids: Vec::new(),
+            element_ids: Vec::new(),
+            current_func_local_ids: Vec::new(),
         }
     }
 
@@ -176,7 +184,8 @@ impl<'a> BinaryReader<'a> {
     pub fn parse_module(&mut self) -> Result<Module<'a>> {
         let mut module = Module::new(self.bump);
         let mut function_section = Vec::new();
-        let mut code_section = Vec::new();
+        let mut import_count = 0;
+        let mut code_entry_count = 0;
 
         let this = self as *mut Self;
         for payload in Parser::new(0).parse_all(&self.data) {
@@ -198,7 +207,14 @@ impl<'a> BinaryReader<'a> {
                                     .iter()
                                     .map(|&t| Self::valtype_to_type(t))
                                     .collect();
-                                unsafe { (*this).types.push((params, results)) };
+
+                                let params_type = Self::types_to_type(&params);
+                                let results_type = Self::types_to_type(&results);
+                                let id = module.add_type(params_type, results_type);
+                                unsafe {
+                                    (*this).types.push((params, results));
+                                    (*this).type_ids.push(id);
+                                }
                             }
                         }
                     }
@@ -211,23 +227,35 @@ impl<'a> BinaryReader<'a> {
                                 match ty {
                                     TypeRef::Func(type_idx) => {
                                         let func_type = unsafe {
-                                            (&(*this).types)
+                                            #[allow(dangerous_implicit_autorefs)]
+                                            (*this)
+                                                .types
                                                 .get(type_idx as usize)
+                                                .ok_or(ParseError::InvalidType)?
+                                        };
+                                        let type_id = unsafe {
+                                            #[allow(dangerous_implicit_autorefs)]
+                                            (*this)
+                                                .type_ids
+                                                .get(type_idx as usize)
+                                                .copied()
                                                 .ok_or(ParseError::InvalidType)?
                                         };
                                         let params = Self::types_to_type(&func_type.0);
                                         let results = Self::types_to_type(&func_type.1);
 
-                                        let id = module.add_function(
-                                            crate::ir::module::Function::new_import(
-                                                field_name.to_string(),
-                                                module_name.to_string(),
-                                                field_name.to_string(),
-                                                params,
-                                                results,
-                                            ),
+                                        let mut func = crate::ir::module::Function::new_import(
+                                            field_name.to_string(),
+                                            module_name.to_string(),
+                                            field_name.to_string(),
+                                            params,
+                                            results,
                                         );
+                                        func.type_idx = Some(type_id);
+
+                                        let id = module.add_function(func);
                                         self.func_ids.push(id);
+                                        import_count += 1;
 
                                         unsafe {
                                             (*this).all_function_types.push(type_idx);
@@ -312,21 +340,36 @@ impl<'a> BinaryReader<'a> {
                         unsafe { (*this).all_function_types.push(type_idx) };
 
                         let func_type = unsafe {
-                            (&(*this).types)
+                            #[allow(dangerous_implicit_autorefs)]
+                            (*this)
+                                .types
                                 .get(type_idx as usize)
                                 .ok_or(ParseError::InvalidType)?
                         };
                         let params = Self::types_to_type(&func_type.0);
                         let results = Self::types_to_type(&func_type.1);
 
+                        let mut locals = crate::collections::id_arena::IdArena::new();
+                        let mut param_ids = Vec::new();
+                        for t in params.tuple_elements() {
+                            param_ids.push(
+                                locals
+                                    .alloc(crate::ir::module::Local {
+                                        name: String::new(),
+                                        type_: t,
+                                    })
+                                    .cast(),
+                            );
+                        }
+
                         let id = module.add_function(Function {
                             name: format!("func_{}", i),
                             params,
                             results,
-                            type_idx: Some(type_idx),
-                            vars: Vec::new(),
+                            param_ids,
+                            type_idx: Some(self.type_ids[type_idx as usize]),
+                            locals,
                             body: None,
-                            local_names: Vec::new(),
                             import: None,
                         });
                         self.func_ids.push(id);
@@ -370,7 +413,7 @@ impl<'a> BinaryReader<'a> {
                         let mutable = global.ty.mutable;
 
                         let init = unsafe {
-                            (*this)
+                            (&mut *this)
                                 .parse_expression(global.init_expr.get_operators_reader(), &module)
                         }?;
                         let name = format!("global_{}", i);
@@ -440,7 +483,7 @@ impl<'a> BinaryReader<'a> {
                             wasmparser::ElementKind::Active {
                                 ref offset_expr, ..
                             } => unsafe {
-                                (*this)
+                                (&mut *this)
                                     .parse_expression(offset_expr.get_operators_reader(), &module)
                             }?,
                             _ => None,
@@ -470,27 +513,44 @@ impl<'a> BinaryReader<'a> {
                             _ => return Err(ParseError::InvalidSection), // Passive/Declarative not handled yet
                         };
 
-                        module.elements.push(ElementSegment {
+                        let id = module.add_element_segment(ElementSegment {
                             table_index,
                             offset: offset.ok_or(ParseError::UnexpectedEof)?,
                             func_indices,
                         });
+                        unsafe { (*this).element_ids.push(id) };
                     }
                 }
                 Payload::CodeSectionEntry(body) => {
-                    let mut locals = Vec::new();
+                    let func_id = self.func_ids[import_count + code_entry_count];
+                    code_entry_count += 1;
+
+                    let m_ptr: *const crate::ir::module::Module = &module;
+                    let func = module.get_function_mut(func_id).unwrap();
+
+                    // Add local variables to the function arena (params are already there)
                     let mut reader = body.get_locals_reader()?;
                     for _ in 0..reader.get_count() {
                         let (count, ty) = reader.read()?;
                         let t = Self::valtype_to_type(ty);
                         for _ in 0..count {
-                            locals.push(t);
+                            func.locals.alloc(crate::ir::module::Local {
+                                name: String::new(),
+                                type_: t,
+                            });
                         }
                     }
 
-                    let expr =
-                        unsafe { (*this).parse_expression(body.get_operators_reader()?, &module) }?;
-                    code_section.push((locals, expr));
+                    // Build mapping of positional indices to LocalId
+                    unsafe {
+                        (*this).current_func_local_ids =
+                            func.locals.iter().map(|(id, _)| id.cast()).collect();
+                    }
+
+                    let expr = unsafe {
+                        (&mut *this).parse_expression(body.get_operators_reader()?, &*m_ptr)
+                    }?;
+                    func.body = expr;
                 }
                 Payload::DataSection(reader) => {
                     for data in reader {
@@ -499,7 +559,7 @@ impl<'a> BinaryReader<'a> {
                             wasmparser::DataKind::Active {
                                 ref offset_expr, ..
                             } => unsafe {
-                                (*this)
+                                (&mut *this)
                                     .parse_expression(offset_expr.get_operators_reader(), &module)
                             }?,
                             _ => None,
@@ -514,34 +574,16 @@ impl<'a> BinaryReader<'a> {
                             _ => return Err(ParseError::InvalidSection),
                         };
 
-                        module.data.push(DataSegment {
+                        let id = module.add_data_segment(DataSegment {
                             memory_index,
                             offset: offset.ok_or(ParseError::UnexpectedEof)?,
                             data: data.data.to_vec(),
                         });
+                        unsafe { (*this).data_ids.push(id) };
                     }
                 }
                 _ => {}
             }
-        }
-
-        // Add types to module
-        for (params, results) in &self.types {
-            let params_type = Self::types_to_type(params);
-            let results_type = Self::types_to_type(results);
-            module.types.push(crate::ir::module::FuncType {
-                params: params_type,
-                results: results_type,
-            });
-        }
-
-        // Combine function signatures with code
-        let num_func_imports = self.func_ids.len() - function_section.len();
-        for (i, (locals, expr)) in code_section.into_iter().enumerate() {
-            let func_id = self.func_ids[num_func_imports + i];
-            let func = module.get_function_mut(func_id).unwrap();
-            func.vars = locals;
-            func.body = expr;
         }
 
         Ok(module)
@@ -784,12 +826,14 @@ impl<'a> BinaryReader<'a> {
                         .types
                         .get(type_index as usize)
                         .ok_or(ParseError::InvalidType)?;
+                    let type_id = self
+                        .type_ids
+                        .get(type_index as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidType)?;
                     let param_count = func_type.0.len();
 
-                    let params_type = Self::types_to_type(&func_type.0);
                     let result_type = Self::types_to_type(&func_type.1);
-                    let sig_type =
-                        crate::ir::type_store::intern_signature(params_type, result_type);
 
                     let target = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let mut operands = BumpVec::with_capacity_in(param_count, self.bump);
@@ -805,20 +849,35 @@ impl<'a> BinaryReader<'a> {
                         .ok_or(ParseError::InvalidIndex("call_indirect table", table_index))?;
 
                     let call_expr =
-                        builder.call_indirect(table_id, target, operands, sig_type, result_type);
+                        builder.call_indirect(table_id, target, operands, type_id, result_type);
                     stack.push(call_expr);
                 }
                 Operator::LocalGet { local_index } => {
-                    stack.push(builder.local_get(local_index, Type::I32)); // TODO: track actual type
+                    let id = self
+                        .current_func_local_ids
+                        .get(local_index as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("local.get", local_index))?;
+                    stack.push(builder.local_get(id, Type::I32)); // TODO: track actual type
                 }
                 Operator::LocalSet { local_index } => {
+                    let id = self
+                        .current_func_local_ids
+                        .get(local_index as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("local.set", local_index))?;
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.local_set(local_index, value));
+                    stack.push(builder.local_set(id, value));
                 }
                 Operator::LocalTee { local_index } => {
+                    let id = self
+                        .current_func_local_ids
+                        .get(local_index as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("local.tee", local_index))?;
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let value_type = value.type_;
-                    stack.push(builder.local_tee(local_index, value, value_type));
+                    stack.push(builder.local_tee(id, value, value_type));
                 }
                 Operator::GlobalGet { global_index } => {
                     let id = self
@@ -2326,7 +2385,12 @@ impl<'a> BinaryReader<'a> {
                     ));
                 }
                 Operator::DataDrop { data_index } => {
-                    stack.push(builder.data_drop(data_index));
+                    let id = self
+                        .data_ids
+                        .get(data_index as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("data_drop", data_index))?;
+                    stack.push(builder.data_drop(id));
                 }
                 Operator::MemoryInit { data_index, mem } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2337,7 +2401,12 @@ impl<'a> BinaryReader<'a> {
                         .get(mem as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", mem))?;
-                    stack.push(builder.memory_init(memory, data_index, dest, src, size));
+                    let data_id = self
+                        .data_ids
+                        .get(data_index as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory_init data", data_index))?;
+                    stack.push(builder.memory_init(memory, data_id, dest, src, size));
                 }
                 Operator::MemoryCopy { dst_mem, src_mem } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2477,10 +2546,20 @@ impl<'a> BinaryReader<'a> {
                         .get(table as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table", table))?;
-                    stack.push(builder.table_init(table_id, elem_index, dest, offset, size));
+                    let elem_id = self
+                        .element_ids
+                        .get(elem_index as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("table_init elem", elem_index))?;
+                    stack.push(builder.table_init(table_id, elem_id, dest, offset, size));
                 }
                 Operator::ElemDrop { elem_index } => {
-                    stack.push(builder.elem_drop(elem_index));
+                    let id = self
+                        .element_ids
+                        .get(elem_index as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("elem_drop", elem_index))?;
+                    stack.push(builder.elem_drop(id));
                 }
                 Operator::RefI31 => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;

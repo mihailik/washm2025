@@ -1,10 +1,8 @@
 use crate::analysis::usage::UsageTracker;
-use crate::ir::expression::{ExprRef, ExpressionKind};
+#[cfg(test)]
+use crate::ir::expression::ExpressionKind;
 use crate::ir::module::{ExportKind, Module};
-use crate::ir::visitor::Visitor;
-use crate::ir::Type;
 use crate::passes::Pass;
-use std::collections::HashMap;
 
 pub struct RemoveUnusedModuleElements;
 
@@ -26,43 +24,16 @@ impl Pass for RemoveUnusedModuleElements {
             .memories
             .retain(|id, _| tracker.memories.contains(&id));
 
-        // 2. Filter elements and data segments (they are still Vec)
-        let old_elements = std::mem::take(&mut module.elements);
-        module.elements = old_elements
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| tracker.element_segments.contains(&(*i as u32)))
-            .map(|(_, e)| e)
-            .collect();
+        // 2. Filter elements and data segments
+        module
+            .elements
+            .retain(|id, _| tracker.element_segments.contains(&id));
+        module
+            .data
+            .retain(|id, _| tracker.data_segments.contains(&id));
 
-        let old_data = std::mem::take(&mut module.data);
-        module.data = old_data
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| tracker.data_segments.contains(&(*i as u32)))
-            .map(|(_, d)| d)
-            .collect();
-
-        // 3. Types pruning (still using u32 indices)
-        let mut new_types = Vec::new();
-        let mut type_remap = HashMap::new();
-        let old_types = std::mem::take(&mut module.types);
-        for (i, ty) in old_types.into_iter().enumerate() {
-            if tracker.types.contains(&(i as u32)) {
-                type_remap.insert(i as u32, new_types.len() as u32);
-                new_types.push(ty);
-            }
-        }
-        module.types = new_types;
-
-        // Remap types in functions
-        for (_, func) in &mut module.functions {
-            if let Some(type_idx) = &mut func.type_idx {
-                if let Some(&new_idx) = type_remap.get(type_idx) {
-                    *type_idx = new_idx;
-                }
-            }
-        }
+        // 3. Types pruning
+        module.types.retain(|id, _| tracker.types.contains(&id));
 
         // 4. Update references in the module
         // Exports
@@ -81,57 +52,11 @@ impl Pass for RemoveUnusedModuleElements {
         }
 
         // Update all expressions in the module
-        let mut updater = IndexUpdater {
-            type_remap: &type_remap,
-        };
+        // (No remapping needed for stable IDs)
 
-        for (_, func) in &mut module.functions {
-            if let Some(body_expr) = &mut func.body {
-                updater.visit(body_expr);
-            }
-        }
-
-        for (_, global) in &mut module.globals {
-            if let crate::ir::module::GlobalKind::Local { init } = &mut global.kind {
-                updater.visit(init);
-            }
-        }
-
-        for elem in &mut module.elements {
-            updater.visit(&mut elem.offset);
+        for (_, elem) in &mut module.elements {
             elem.func_indices
                 .retain(|id| tracker.functions.contains(id));
-        }
-
-        for data in &mut module.data {
-            updater.visit(&mut data.offset);
-        }
-    }
-}
-
-struct IndexUpdater<'a> {
-    type_remap: &'a HashMap<u32, u32>,
-}
-
-impl<'a, 'b> Visitor<'b> for IndexUpdater<'a> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'b>) {
-        self.visit_children(expr);
-
-        // Update the expression's own type
-        self.remap_type(&mut expr.type_);
-
-        if let ExpressionKind::CallIndirect { type_, .. } = &mut expr.kind {
-            self.remap_type(type_);
-        }
-    }
-}
-
-impl<'a> IndexUpdater<'a> {
-    fn remap_type(&self, ty: &mut Type) {
-        if let Some(id) = ty.signature_id() {
-            if let Some(&new_id) = self.type_remap.get(&id) {
-                *ty = Type::from_signature_id(new_id);
-            }
         }
     }
 }
@@ -300,13 +225,13 @@ mod tests {
 
         // Function 0 (Exported) uses Type 1
         let mut func = Function::new("f0".to_string(), Type::F64, Type::F64, vec![], None);
-        func.type_idx = Some(1);
+        func.type_idx = Some(1.into());
         let f0_id = module.add_function(func);
         module.export_function(f0_id, "f0".to_string());
 
         // Function 1 (Unused) uses Type 2
         let mut func2 = Function::new("f1".to_string(), Type::I64, Type::I64, vec![], None);
-        func2.type_idx = Some(2);
+        func2.type_idx = Some(2.into());
         module.add_function(func2);
 
         let mut pass = RemoveUnusedModuleElements;
@@ -317,10 +242,12 @@ mod tests {
 
         // Type 0 and Type 2 should be gone. Only Type 1 remains.
         assert_eq!(module.types.len(), 1);
-        assert_eq!(module.types[0].params, Type::F64);
+        let mut type_ids = module.types.ids();
+        let remaining_type_id = type_ids.next().unwrap();
+        assert_eq!(module.types[remaining_type_id].params, Type::F64);
 
-        // Function 0's type_idx should be remapped from 1 to 0.
-        assert_eq!(module.functions[f0_id].type_idx, Some(0));
+        // Function 0's type_idx should still point to the same type.
+        assert_eq!(module.functions[f0_id].type_idx, Some(remaining_type_id));
     }
 
     #[test]
