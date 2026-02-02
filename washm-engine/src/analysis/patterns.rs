@@ -14,6 +14,12 @@ pub struct MatchEnv<'a> {
     right: Option<ExprRef<'a>>,
 }
 
+impl<'a> Default for MatchEnv<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> MatchEnv<'a> {
     pub fn new() -> Self {
         Self {

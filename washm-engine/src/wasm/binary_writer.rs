@@ -207,13 +207,13 @@ impl BinaryWriter {
             }
         }
         for (id, table) in &module.tables {
-            if let crate::ir::module::TableKind::Local { .. } = table.kind {
+            if let crate::ir::module::TableKind::Local = table.kind {
                 table_map.insert(id, table_idx);
                 table_idx += 1;
             }
         }
         for (id, mem) in &module.memories {
-            if let crate::ir::module::MemoryKind::Local { .. } = mem.kind {
+            if let crate::ir::module::MemoryKind::Local = mem.kind {
                 memory_map.insert(id, memory_idx);
                 memory_idx += 1;
             }
@@ -376,7 +376,7 @@ impl BinaryWriter {
             let mut tables = TableSection::new();
             let mut has_tables = false;
             for (_, table) in &module.tables {
-                if let crate::ir::module::TableKind::Local { .. } = table.kind {
+                if let crate::ir::module::TableKind::Local = table.kind {
                     tables.table(TableType {
                         element_type: Self::to_ref_type(table.limits.element_type),
                         minimum: table.limits.initial as u64,
@@ -397,7 +397,7 @@ impl BinaryWriter {
             let mut memories = MemorySection::new();
             let mut has_memories = false;
             for (_, mem) in &module.memories {
-                if let crate::ir::module::MemoryKind::Local { .. } = mem.kind {
+                if let crate::ir::module::MemoryKind::Local = mem.kind {
                     memories.memory(MemoryType {
                         minimum: mem.limits.initial as u64,
                         maximum: mem.limits.maximum.map(|m| m as u64),

@@ -85,7 +85,7 @@ impl<'a, 'b> Visitor<'a> for PrecomputePropagateVisitor<'a, 'b> {
             | ExpressionKind::LocalTee { index, value } => {
                 // If value is a constant, record it
                 if let ExpressionKind::Const(lit) = &value.kind {
-                    self.known_locals.insert(*index, lit.clone());
+                    self.known_locals.insert(*index, *lit);
                 } else {
                     // Otherwise, we don't know this local anymore
                     self.known_locals.remove(index);
@@ -94,7 +94,7 @@ impl<'a, 'b> Visitor<'a> for PrecomputePropagateVisitor<'a, 'b> {
             ExpressionKind::LocalGet { index, .. } => {
                 // If we know the value, replace with constant
                 if let Some(lit) = self.known_locals.get(index) {
-                    expr.kind = ExpressionKind::Const(lit.clone());
+                    expr.kind = ExpressionKind::Const(*lit);
                     self.made_changes = true;
                 }
             }

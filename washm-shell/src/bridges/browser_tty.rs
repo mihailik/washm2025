@@ -46,7 +46,7 @@ pub fn ensure_bridge() -> Result<(), String> {
     // Evaluate vendor code as-is: strip embedded sourceMappingURL comments and append a meaningful sourceURL
     let xterm_clean = xterm_js
         .lines()
-        .filter(|l| !l.contains("sourceMappingURL"))
+        .filter(|l: &&str| !l.contains("sourceMappingURL"))
         .collect::<Vec<_>>()
         .join("\n");
     let xterm_source = "node_modules/xterm/lib/xterm.js";
@@ -61,7 +61,7 @@ pub fn ensure_bridge() -> Result<(), String> {
     // Strip embedded sourceMappingURL comments (they produce malformed wrappers) and evaluate the file as-is
     let fit_clean = fit_js
         .lines()
-        .filter(|l| !l.contains("sourceMappingURL"))
+        .filter(|l: &&str| !l.contains("sourceMappingURL"))
         .collect::<Vec<_>>()
         .join("\n");
     let fit_source = "node_modules/xterm-addon-fit/lib/xterm-addon-fit.js";

@@ -102,7 +102,7 @@ impl Asyncify {
 
         for ty in [Type::I32, Type::I64, Type::F32, Type::F64] {
             module.add_global(Global {
-                name: format!("asyncify_fake_global_{}", ty.to_string()),
+                name: format!("asyncify_fake_global_{}", ty),
                 type_: ty,
                 mutable: true,
                 kind: GlobalKind::Local {
@@ -285,7 +285,7 @@ impl Pass for Asyncify {
                 let func = &module.functions[id];
                 let base_local_index = (func.params.tuple_len() + func.vars().len()) as u32;
                 if let Some(body) = func.body() {
-                    let mut body_clone = body.clone();
+                    let mut body_clone = body;
                     let mut flow = AsyncifyFlow::new_inner(
                         module.allocator,
                         module.features,
@@ -380,14 +380,13 @@ impl ModuleAnalyzer {
                         }
                         _ => {}
                     }
-                } else if !config.ignore_imports {
-                    if config.imports.is_empty()
+                } else if !config.ignore_imports
+                    && (config.imports.is_empty()
                         || config
                             .imports
-                            .contains(&format!("{}.{}", mod_name, func_name))
-                    {
-                        changes = true;
-                    }
+                            .contains(&format!("{}.{}", mod_name, func_name)))
+                {
+                    changes = true;
                 }
                 if changes {
                     can_change_state.insert(func_name.clone());
@@ -403,7 +402,7 @@ impl ModuleAnalyzer {
 
         let mut fake_call_globals: HashMap<Type, String> = HashMap::new();
         for ty in [Type::I32, Type::I64, Type::F32, Type::F64] {
-            fake_call_globals.insert(ty, format!("asyncify_fake_global_{}", ty.to_string()));
+            fake_call_globals.insert(ty, format!("asyncify_fake_global_{}", ty));
         }
 
         Self {
@@ -637,11 +636,7 @@ impl<'a, 'b> AsyncifyFlow<'a, 'b> {
                 if_false,
             } => {
                 let true_range = self.process(if_true);
-                let _false_range = if let Some(f) = if_false {
-                    Some(self.process(f))
-                } else {
-                    None
-                };
+                let _false_range = if_false.as_mut().map(|f| self.process(f));
 
                 let state_rewinding = self.make_state_check(AsyncifyState::Rewinding);
 
@@ -984,7 +979,7 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
                         ty,
                     ),
                 ));
-                offset += size as u32;
+                offset += size;
             }
         }
         let load_block = builder.block(None, load_block_list, Type::NONE);
@@ -1014,7 +1009,7 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
                     builder.local_get(stack_ptr_temp, self.pointer_type),
                     builder.local_get(local_idx, ty),
                 ));
-                offset += size as u32;
+                offset += size;
             }
 
             // Increment cursor
@@ -1169,7 +1164,7 @@ impl<'a, 'b> LocalTransformer<'a, 'b> {
                 for &child in list {
                     new_list.push(self.visit(child));
                 }
-                self.builder.block(name.clone(), new_list, type_)
+                self.builder.block(*name, new_list, type_)
             }
             ExpressionKind::If {
                 condition,
@@ -1183,7 +1178,7 @@ impl<'a, 'b> LocalTransformer<'a, 'b> {
             }
             ExpressionKind::Loop { name, body } => {
                 let body = self.visit(*body);
-                self.builder.loop_(name.clone(), body, type_)
+                self.builder.loop_(*name, body, type_)
             }
             ExpressionKind::Binary { op, left, right } => {
                 let l = self.visit(*left);

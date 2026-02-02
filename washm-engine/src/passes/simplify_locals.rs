@@ -240,7 +240,7 @@ impl SimplifyLocals {
                         if ctx.first_cycle || ctx.get_counts.get(&index).copied().unwrap_or(0) == 1
                         {
                             // Single use: Replace Get with Value
-                            if (*value).type_ != expr.type_ {
+                            if value.type_ != expr.type_ {
                                 ctx.refinalize = true;
                             }
                             *expr = *value;

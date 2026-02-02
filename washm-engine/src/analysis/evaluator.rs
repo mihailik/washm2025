@@ -24,7 +24,7 @@ impl<'a> Evaluator<'a> {
     /// Evaluate expression to constant if possible
     pub fn eval(&self, expr: ExprRef) -> Option<Literal> {
         match &expr.kind {
-            ExpressionKind::Const(lit) => Some(lit.clone()),
+            ExpressionKind::Const(lit) => Some(*lit),
             ExpressionKind::Binary { op, left, right } => {
                 let l = self.eval(*left)?;
                 let r = self.eval(*right)?;

@@ -302,10 +302,10 @@ impl HeapType {
         // any -> eq -> struct/array/i31
         match other {
             HeapType::ANY => true,
-            HeapType::EQ => match self {
-                HeapType::EQ | HeapType::STRUCT | HeapType::ARRAY | HeapType::I31 => true,
-                _ => false,
-            },
+            HeapType::EQ => matches!(
+                self,
+                HeapType::EQ | HeapType::STRUCT | HeapType::ARRAY | HeapType::I31
+            ),
             HeapType::FUNC => self == HeapType::FUNC,
             _ => false,
         }

@@ -102,7 +102,7 @@ impl Pass for SignaturePruning {
                             // Drop
                         }
                         ParamStatus::Constant(lit) => {
-                            constant_replacements.insert(i as u32, lit.clone());
+                            constant_replacements.insert(i as u32, *lit);
                         }
                     }
                 }
@@ -222,7 +222,7 @@ impl<'a, 'b> Visitor<'b> for CallSiteScanner<'a> {
                         // Check if op is constant
                         let _is_const = matches!(op.kind, ExpressionKind::Const(_));
                         let const_val = if let ExpressionKind::Const(lit) = &op.kind {
-                            Some(lit.clone())
+                            Some(*lit)
                         } else {
                             None
                         };
@@ -279,7 +279,7 @@ impl<'a, 'b> Visitor<'b> for LocalRemapper<'a> {
                 if *index < self.old_param_count {
                     if let Some(lit) = self.const_replacements.get(index) {
                         if matches!(expr.kind, ExpressionKind::LocalGet { .. }) {
-                            expr.kind = ExpressionKind::Const(lit.clone());
+                            expr.kind = ExpressionKind::Const(*lit);
                         }
                     } else if let Some(new_idx) = self.param_remap.get(index) {
                         *index = *new_idx;

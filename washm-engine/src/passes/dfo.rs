@@ -37,35 +37,32 @@ impl Pass for DataFlowOpts {
 
                 // Dead Store Elimination and Constant Propagation
                 for (def, uses) in &ssa.def_uses {
-                    match def {
-                        DefA::Instruction(instr) => {
-                            if let ExpressionKind::LocalSet { value, .. }
-                            | ExpressionKind::LocalTee { value, .. } = &instr.kind
-                            {
-                                // Dead Store Elimination: No uses and no side effects
-                                if uses.is_empty() {
-                                    let effects = EffectAnalyzer::analyze(*value);
-                                    if !effects.has_side_effects() {
-                                        dead_definitions.insert(instr.as_ptr());
-                                    }
+                    if let DefA::Instruction(instr) = def {
+                        if let ExpressionKind::LocalSet { value, .. }
+                        | ExpressionKind::LocalTee { value, .. } = &instr.kind
+                        {
+                            // Dead Store Elimination: No uses and no side effects
+                            if uses.is_empty() {
+                                let effects = EffectAnalyzer::analyze(*value);
+                                if !effects.has_side_effects() {
+                                    dead_definitions.insert(instr.as_ptr());
                                 }
+                            }
 
-                                // Simple Constant Propagation: If value is a constant, propagate to all uses
-                                if let ExpressionKind::Const { .. } = &value.kind {
-                                    for &use_expr in uses {
-                                        constant_props.insert(use_expr.as_ptr(), *value);
-                                    }
+                            // Simple Constant Propagation: If value is a constant, propagate to all uses
+                            if let ExpressionKind::Const { .. } = &value.kind {
+                                for &use_expr in uses {
+                                    constant_props.insert(use_expr.as_ptr(), *value);
                                 }
+                            }
 
-                                // Generalized Copy Propagation: local.set $v2, (local.get $v1)
-                                if let ExpressionKind::LocalGet { .. } = &value.kind {
-                                    for &use_expr in uses {
-                                        constant_props.insert(use_expr.as_ptr(), *value);
-                                    }
+                            // Generalized Copy Propagation: local.set $v2, (local.get $v1)
+                            if let ExpressionKind::LocalGet { .. } = &value.kind {
+                                for &use_expr in uses {
+                                    constant_props.insert(use_expr.as_ptr(), *value);
                                 }
                             }
                         }
-                        _ => {}
                     }
                 }
 
@@ -101,7 +98,6 @@ impl<'a> Visitor<'a> for DfoApplier<'a> {
             // For dead LocalSet/LocalTee with no uses and no side effects inside,
             // we can replace with Nop (since it's in a block or top-level)
             expr.kind = ExpressionKind::Nop;
-            return;
         }
     }
 }

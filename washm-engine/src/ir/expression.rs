@@ -1546,7 +1546,7 @@ impl<'a> IrBuilder<'a> {
                     list: new_list,
                 }
             }
-            ExpressionKind::Const(lit) => ExpressionKind::Const(lit.clone()),
+            ExpressionKind::Const(lit) => ExpressionKind::Const(*lit),
             ExpressionKind::Unary { op, value } => ExpressionKind::Unary {
                 op: *op,
                 value: self.deep_clone(*value),
@@ -1995,11 +1995,11 @@ impl<'a> IrBuilder<'a> {
                     new_operands.push(self.deep_clone(*op));
                 }
                 ExpressionKind::Throw {
-                    tag: *tag,
+                    tag,
                     operands: new_operands,
                 }
             }
-            ExpressionKind::Rethrow { target } => ExpressionKind::Rethrow { target: *target },
+            ExpressionKind::Rethrow { target } => ExpressionKind::Rethrow { target },
             ExpressionKind::TupleMake { operands } => {
                 let mut new_operands = BumpVec::with_capacity_in(operands.len(), self.bump);
                 for op in operands.iter() {

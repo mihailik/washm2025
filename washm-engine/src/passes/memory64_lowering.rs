@@ -16,19 +16,7 @@ impl Pass for Memory64Lowering {
         // and injecting logic to handle 64-bit offsets/indices.
 
         // Check if module uses memory64.
-        let is_memory64 = if let Some(_) = module.memories.ids().next() {
-            // Wait, MemoryLimits doesn't store index type (i32/i64).
-            // Binaryen-ir Module might assume i32 memory for MVP, but Memory64 proposal adds i64.
-            // Currently our MemoryLimits struct in module.rs:
-            // pub struct MemoryLimits { pub initial: u32, pub maximum: Option<u32> }
-            // So we only support 32-bit memory in our IR definition currently!
-
-            // If the IR doesn't support 64-bit memory yet, this pass is effectively a no-op
-            // or placeholder for when we add Memory64 support.
-            false
-        } else {
-            false
-        };
+        let is_memory64 = module.memories.ids().next().is_some() && false; // Placeholder
 
         if !is_memory64 {
             return;

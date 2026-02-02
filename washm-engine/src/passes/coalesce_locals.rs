@@ -373,9 +373,7 @@ impl<'a, 'b> Visitor<'a> for CopyCoalescingVisitor<'b> {
                             // The original type of the LocalSet becomes the type of the value (LocalGet's type)
                             // if it's not Type::NONE.
                             if expr_mut.type_ != Type::NONE {
-                                expr_mut.kind = ExpressionKind::Drop {
-                                    value: value.clone(),
-                                };
+                                expr_mut.kind = ExpressionKind::Drop { value: *value };
                             } else {
                                 expr_mut.kind = ExpressionKind::Nop;
                             }
@@ -863,18 +861,14 @@ impl CoalesceLocals {
                 }
                 ExpressionKind::LocalSet { index, value } => {
                     if !used.contains(index) {
-                        expr_mut.kind = ExpressionKind::Drop {
-                            value: value.clone(),
-                        };
+                        expr_mut.kind = ExpressionKind::Drop { value: *value };
                     } else {
                         Self::eliminate_recursive(value, used);
                     }
                 }
                 ExpressionKind::LocalTee { index, value } => {
                     if !used.contains(index) {
-                        expr_mut.kind = ExpressionKind::Drop {
-                            value: value.clone(),
-                        };
+                        expr_mut.kind = ExpressionKind::Drop { value: *value };
                     } else {
                         Self::eliminate_recursive(value, used);
                     }

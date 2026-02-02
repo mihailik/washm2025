@@ -447,18 +447,16 @@ impl<'a> BinaryReader<'a> {
                         };
 
                         let mut func_indices = Vec::new();
-                        match element.items {
-                            wasmparser::ElementItems::Functions(funcs) => {
-                                for f in funcs {
-                                    let f_idx = f?;
-                                    let id =
-                                        self.func_ids.get(f_idx as usize).copied().ok_or(
-                                            ParseError::InvalidIndex("element func", f_idx),
-                                        )?;
-                                    func_indices.push(id);
-                                }
+                        if let wasmparser::ElementItems::Functions(funcs) = element.items {
+                            for f in funcs {
+                                let f_idx = f?;
+                                let id = self
+                                    .func_ids
+                                    .get(f_idx as usize)
+                                    .copied()
+                                    .ok_or(ParseError::InvalidIndex("element func", f_idx))?;
+                                func_indices.push(id);
                             }
-                            _ => {}
                         }
 
                         let table_index = match element.kind {
@@ -508,11 +506,11 @@ impl<'a> BinaryReader<'a> {
                         };
 
                         let memory_index = match data.kind {
-                            wasmparser::DataKind::Active { memory_index, .. } => {
-                                self.memory_ids.get(memory_index as usize).copied().ok_or(
-                                    ParseError::InvalidIndex("data memory", memory_index as u32),
-                                )?
-                            }
+                            wasmparser::DataKind::Active { memory_index, .. } => self
+                                .memory_ids
+                                .get(memory_index as usize)
+                                .copied()
+                                .ok_or(ParseError::InvalidIndex("data memory", memory_index))?,
                             _ => return Err(ParseError::InvalidSection),
                         };
 
@@ -843,7 +841,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -860,7 +858,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -877,7 +875,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -894,7 +892,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -911,7 +909,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -928,7 +926,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -945,7 +943,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -962,7 +960,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -979,7 +977,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -996,7 +994,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -1013,7 +1011,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -1030,7 +1028,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -1047,7 +1045,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -1064,7 +1062,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
@@ -1082,7 +1080,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
@@ -1099,7 +1097,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
@@ -1116,7 +1114,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
@@ -1133,7 +1131,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
@@ -1150,7 +1148,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
@@ -1167,7 +1165,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
@@ -1184,7 +1182,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
@@ -1201,7 +1199,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
@@ -1218,7 +1216,7 @@ impl<'a> BinaryReader<'a> {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let memory = self
                         .memory_ids
-                        .get(0)
+                        .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
@@ -1235,7 +1233,7 @@ impl<'a> BinaryReader<'a> {
                         .memory_ids
                         .get(mem as usize)
                         .copied()
-                        .ok_or(ParseError::InvalidIndex("memory", mem as u32))?;
+                        .ok_or(ParseError::InvalidIndex("memory", mem))?;
                     stack.push(builder.memory_size(memory));
                 }
                 Operator::MemoryGrow { mem, .. } => {
@@ -1244,7 +1242,7 @@ impl<'a> BinaryReader<'a> {
                         .memory_ids
                         .get(mem as usize)
                         .copied()
-                        .ok_or(ParseError::InvalidIndex("memory", mem as u32))?;
+                        .ok_or(ParseError::InvalidIndex("memory", mem))?;
                     stack.push(builder.memory_grow(memory, delta));
                 }
                 Operator::I32Const { value } => {

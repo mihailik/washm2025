@@ -97,7 +97,7 @@ impl ConstHoisting {
                     };
 
                     lit_to_local.insert(lit.clone(), current_local_idx);
-                    candidates.push((lit.0.clone(), ty));
+                    candidates.push((lit.0, ty));
                     current_local_idx += 1;
                 }
             }
@@ -130,7 +130,7 @@ impl ConstHoisting {
                 // 5. Prepend initialization
                 let mut new_list = BumpVec::new_in(allocator);
                 for (lit, _) in candidates {
-                    let wrapped = HashableLiteral(lit.clone());
+                    let wrapped = HashableLiteral(lit);
                     let local_idx = *lit_to_local.get(&wrapped).unwrap();
                     let const_expr = builder.const_(lit);
                     let set_expr = builder.local_set(local_idx, const_expr);
@@ -161,7 +161,7 @@ impl ConstScanner {
 impl<'a> Visitor<'a> for ConstScanner {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
         if let ExpressionKind::Const(lit) = &expr.kind {
-            *self.counts.entry(HashableLiteral(lit.clone())).or_insert(0) += 1;
+            *self.counts.entry(HashableLiteral(*lit)).or_insert(0) += 1;
         }
         self.visit_children(expr);
     }
@@ -176,7 +176,7 @@ struct ConstRewriter<'a, 'b> {
 impl<'a, 'b> Visitor<'a> for ConstRewriter<'a, 'b> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
         if let ExpressionKind::Const(lit) = &expr.kind {
-            if let Some(&local_idx) = self.lit_to_local.get(&HashableLiteral(lit.clone())) {
+            if let Some(&local_idx) = self.lit_to_local.get(&HashableLiteral(*lit)) {
                 // Replace with local.get
                 // Type should match literal type
                 let ty = match lit {

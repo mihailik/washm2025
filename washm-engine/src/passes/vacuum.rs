@@ -161,10 +161,11 @@ impl<'a> VacuumOptimizer<'a> {
             }
             return;
         }
-        if !is_last && child.type_ != Type::UNREACHABLE {
-            if !EffectAnalyzer::analyze(child).has_side_effects() {
-                return;
-            }
+        if !is_last
+            && child.type_ != Type::UNREACHABLE
+            && !EffectAnalyzer::analyze(child).has_side_effects()
+        {
+            return;
         }
         list.push(child);
     }

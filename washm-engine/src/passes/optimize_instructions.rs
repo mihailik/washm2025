@@ -840,11 +840,7 @@ impl OptimizeInstructions {
 
                 // It is important to check for the operation because
                 // not all binary operations can be folded.
-                if let Some(val) = Self::eval_binary_op(op, left, right) {
-                    Some(builder.const_(val))
-                } else {
-                    None
-                }
+                Self::eval_binary_op(op, left, right).map(|val| builder.const_(val))
             },
         );
 
@@ -857,11 +853,7 @@ impl OptimizeInstructions {
 
                 let builder = IrBuilder::new(bump);
 
-                if let Some(val) = Self::eval_unary_op(op, value) {
-                    Some(builder.const_(val))
-                } else {
-                    None
-                }
+                Self::eval_unary_op(op, value).map(|val| builder.const_(val))
             },
         );
     }

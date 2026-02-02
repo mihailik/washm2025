@@ -139,7 +139,7 @@ impl<'a> AnnotationStore<'a> {
 
     /// Returns true if this expression should be treated as 'inlined' (omitted as a statement).
     pub fn is_inlined(&self, expr: ExprRef<'a>) -> bool {
-        self.inner.get(&expr).map_or(false, |a| a.inlined)
+        self.inner.get(&expr).is_some_and(|a| a.inlined)
     }
 
     /// Returns the source expression if this is an inlined value.

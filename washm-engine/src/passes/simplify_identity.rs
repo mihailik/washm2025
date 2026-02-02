@@ -191,22 +191,20 @@ impl<'a> Visitor<'a> for SimplifyIdentity {
                     // x == x -> 1, x != x -> 0
             BinaryOp::EqInt32 | BinaryOp::EqInt64 |
                     BinaryOp::EqFloat32 | BinaryOp::EqFloat64 => {
-                        if are_expressions_equal(left, right) {
-                            if !matches!(op, BinaryOp::EqFloat32 | BinaryOp::EqFloat64) {
+                        if are_expressions_equal(left, right)
+                            && !matches!(op, BinaryOp::EqFloat32 | BinaryOp::EqFloat64) {
                                 expr.kind = ExpressionKind::Const(Literal::I32(1));
                                 return;
                             }
-                        }
                         IdentitySide::None
                     }
                     BinaryOp::NeInt32 | BinaryOp::NeInt64 |
                     BinaryOp::NeFloat32 | BinaryOp::NeFloat64 => {
-                        if are_expressions_equal(left, right) {
-                            if !matches!(op, BinaryOp::NeFloat32 | BinaryOp::NeFloat64) {
+                        if are_expressions_equal(left, right)
+                            && !matches!(op, BinaryOp::NeFloat32 | BinaryOp::NeFloat64) {
                                 expr.kind = ExpressionKind::Const(Literal::I32(0));
                                 return;
                             }
-                        }
                         IdentitySide::None
                     }
                     _ => IdentitySide::None,

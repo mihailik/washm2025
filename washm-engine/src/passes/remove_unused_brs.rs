@@ -237,20 +237,18 @@ impl<'a> BrOptimizer<'a> {
                         };
                         if is_true {
                             *condition = None;
-                        } else {
-                            if let Some(val) = value {
-                                let val_ref = *val;
-                                unsafe {
-                                    std::ptr::swap(expr.as_ptr(), val_ref.as_ptr());
-                                }
-                                return self.optimize(expr);
-                            } else {
-                                **expr = Expression {
-                                    kind: ExpressionKind::Nop,
-                                    type_: Type::NONE,
-                                };
-                                return Flow::fallthrough();
+                        } else if let Some(val) = value {
+                            let val_ref = *val;
+                            unsafe {
+                                std::ptr::swap(expr.as_ptr(), val_ref.as_ptr());
                             }
+                            return self.optimize(expr);
+                        } else {
+                            **expr = Expression {
+                                kind: ExpressionKind::Nop,
+                                type_: Type::NONE,
+                            };
+                            return Flow::fallthrough();
                         }
                     }
                 }

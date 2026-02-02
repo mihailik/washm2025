@@ -123,11 +123,10 @@ impl NameOptimizer {
                 self.process(if_false, used_names);
                 self.process(condition, used_names);
             }
-            ExpressionKind::Return { value } => {
-                if let Some(v) = value {
-                    self.process(v, used_names);
-                }
+            ExpressionKind::Return { value: Some(v) } => {
+                self.process(v, used_names);
             }
+            ExpressionKind::Return { value: None } => {}
             ExpressionKind::MemoryInit {
                 dest, offset, size, ..
             } => {

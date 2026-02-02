@@ -13,6 +13,12 @@ pub struct Inlining {
     pub options: OptimizationOptions,
 }
 
+impl Default for Inlining {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Inlining {
     pub fn new() -> Self {
         Self {
@@ -21,8 +27,10 @@ impl Inlining {
     }
 
     pub fn with_options(options: InliningOptions) -> Self {
-        let mut opt = OptimizationOptions::default();
-        opt.inlining = options;
+        let opt = OptimizationOptions {
+            inlining: options,
+            ..OptimizationOptions::default()
+        };
         Self { options: opt }
     }
 
@@ -95,7 +103,7 @@ impl Pass for Inlining {
         let mut used_globally = HashSet::new();
         for export in &module.exports {
             if let ExportKind::Function(id) = export.kind {
-                if let Some(_) = module.functions.get(id) {
+                if module.functions.get(id).is_some() {
                     used_globally.insert(id);
                 }
             }
@@ -165,6 +173,12 @@ impl Pass for Inlining {
 
 pub struct InliningOptimizing {
     pub options: OptimizationOptions,
+}
+
+impl Default for InliningOptimizing {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InliningOptimizing {

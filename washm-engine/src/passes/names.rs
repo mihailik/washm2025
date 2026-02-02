@@ -198,8 +198,7 @@ impl Pass for MinifyExports {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        let mut next_id = 0;
-        for export in &mut module.exports {
+        for (next_id, export) in module.exports.iter_mut().enumerate() {
             let mut name = String::new();
             let mut id = next_id;
             loop {
@@ -210,7 +209,6 @@ impl Pass for MinifyExports {
                     break;
                 }
             }
-            next_id += 1;
             export.name = name;
         }
     }

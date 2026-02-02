@@ -215,9 +215,7 @@ impl<M, T> IdArena<M, T> {
     }
 
     /// Returns the number of occupied items in the arena.
-
     /// Returns true if the arena is empty.
-
     pub fn pop(&mut self) -> Option<T> {
         if self.items.is_empty() {
             return None;

@@ -69,7 +69,7 @@ impl Pass for RemoveUnusedTypes {
     }
 }
 
-fn updater_visit_init<'a, 'b>(
+fn updater_visit_init<'b>(
     expr: &mut ExprRef<'b>,
     remap: &HashMap<u32, u32>,
     pass: &RemoveUnusedTypes,

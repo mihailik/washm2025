@@ -142,32 +142,28 @@ impl<'a, 'b, 'c> InvariantReplacer<'a, 'b, 'c> {
     }
 
     fn is_trivial(&self, expr: ExprRef<'a>) -> bool {
-        match &expr.kind {
-            ExpressionKind::Const(_) | ExpressionKind::LocalGet { .. } | ExpressionKind::Nop => {
-                true
-            }
-            _ => false,
-        }
+        matches!(
+            &expr.kind,
+            ExpressionKind::Const(_) | ExpressionKind::LocalGet { .. } | ExpressionKind::Nop
+        )
     }
 }
 
 impl<'a, 'b, 'c> Visitor<'a> for InvariantReplacer<'a, 'b, 'c> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if self.is_invariant(*expr) {
-            if !self.is_trivial(*expr) {
-                // Hoist it!
-                let expr_type = expr.type_;
-                let local_index = self.vars.len() as u32;
-                self.vars.push(expr_type);
+        if self.is_invariant(*expr) && !self.is_trivial(*expr) {
+            // Hoist it!
+            let expr_type = expr.type_;
+            let local_index = self.vars.len() as u32;
+            self.vars.push(expr_type);
 
-                let hoisted_expr = *expr;
-                let set = Expression::local_set(self.allocator, local_index, hoisted_expr);
-                self.hoists.push(set);
+            let hoisted_expr = *expr;
+            let set = Expression::local_set(self.allocator, local_index, hoisted_expr);
+            self.hoists.push(set);
 
-                let get = Expression::local_get(self.allocator, local_index, expr_type);
-                *expr = get;
-                return; // Don't visit children of hoisted expression
-            }
+            let get = Expression::local_get(self.allocator, local_index, expr_type);
+            *expr = get;
+            return; // Don't visit children of hoisted expression
         }
 
         self.visit_children(expr);

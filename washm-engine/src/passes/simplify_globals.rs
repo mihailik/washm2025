@@ -120,7 +120,7 @@ impl SimplifyGlobals {
             if !global.mutable {
                 if let Some(init) = global.kind_to_init() {
                     if let ExpressionKind::Const(lit) = &init.kind {
-                        constants.insert(id.cast(), lit.clone());
+                        constants.insert(id.cast(), *lit);
                     }
                 }
             }
@@ -336,7 +336,7 @@ impl<'a, 'b, 'c> Visitor<'a> for SingleUseFolder<'a, 'b, 'c> {
                     let global = &self.globals[id.cast()];
                     if !global.is_import() {
                         if let ExpressionKind::Const(lit) = &global.kind_to_init().unwrap().kind {
-                            *expr = IrBuilder::new(self.allocator).const_(lit.clone());
+                            *expr = IrBuilder::new(self.allocator).const_(*lit);
                             self.changed = true;
                             return;
                         }
@@ -374,7 +374,7 @@ impl<'a, 'b> Visitor<'a> for GlobalConstantApplier<'a, 'b> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
         if let ExpressionKind::GlobalGet { id } = &expr.kind {
             if let Some(lit) = self.constants.get(id) {
-                *expr = self.builder.const_(lit.clone());
+                *expr = self.builder.const_(*lit);
                 self.changed = true;
             }
         }
@@ -405,7 +405,7 @@ impl<'a, 'b, 'c> Visitor<'a> for ConstantCodeApplier<'a, 'b, 'c> {
             self.visit_children(expr);
             if let ExpressionKind::GlobalSet { value, .. } = &expr.kind {
                 if let ExpressionKind::Const(lit) = &value.kind {
-                    self.curr_constants.insert(id, lit.clone());
+                    self.curr_constants.insert(id, *lit);
                 } else {
                     self.curr_constants.remove(&id);
                 }
@@ -420,7 +420,7 @@ impl<'a, 'b, 'c> Visitor<'a> for ConstantCodeApplier<'a, 'b, 'c> {
                 let global = &self.globals[id.cast()];
                 if !global.is_import() {
                     if let ExpressionKind::Const(lit) = &global.kind_to_init().unwrap().kind {
-                        *expr = self.builder.const_(lit.clone());
+                        *expr = self.builder.const_(*lit);
                         self.replaced = true;
                         return;
                     }
@@ -428,7 +428,7 @@ impl<'a, 'b, 'c> Visitor<'a> for ConstantCodeApplier<'a, 'b, 'c> {
             }
             // 2. Check linear trace
             if let Some(lit) = self.curr_constants.get(id) {
-                *expr = self.builder.const_(lit.clone());
+                *expr = self.builder.const_(*lit);
                 self.replaced = true;
                 return;
             }

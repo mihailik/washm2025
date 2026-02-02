@@ -120,11 +120,8 @@ impl<'a, 'b> Visitor<'b> for IndexUpdater<'a> {
         // Update the expression's own type
         self.remap_type(&mut expr.type_);
 
-        match &mut expr.kind {
-            ExpressionKind::CallIndirect { type_, .. } => {
-                self.remap_type(type_);
-            }
-            _ => {}
+        if let ExpressionKind::CallIndirect { type_, .. } = &mut expr.kind {
+            self.remap_type(type_);
         }
     }
 }

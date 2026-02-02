@@ -30,6 +30,12 @@ pub struct GlobalAnalysis {
     pub reachable_functions: HashSet<FuncId>,
 }
 
+impl Default for GlobalAnalysis {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GlobalAnalysis {
     pub fn new() -> Self {
         Self {
@@ -91,14 +97,9 @@ impl GlobalAnalysis {
                     continue;
                 }
 
-                let mut is_effectively_constant = false;
-                if !global.mutable {
-                    is_effectively_constant = true;
-                } else if !self.written_globals.contains(&gid)
-                    || !self.non_init_written.contains(&gid)
-                {
-                    is_effectively_constant = true;
-                }
+                let is_effectively_constant = !global.mutable
+                    || !self.written_globals.contains(&gid)
+                    || !self.non_init_written.contains(&gid);
 
                 if is_effectively_constant {
                     self.constant_globals.insert(gid);
@@ -106,14 +107,16 @@ impl GlobalAnalysis {
                     // Try to resolve the value
                     if let crate::ir::module::GlobalKind::Local { init } = &global.kind {
                         if let ExpressionKind::Const(value) = &init.kind {
-                            if !self.global_values.contains_key(&gid) {
-                                self.global_values.insert(gid, value.clone());
+                            if let std::collections::hash_map::Entry::Vacant(e) =
+                                self.global_values.entry(gid)
+                            {
+                                e.insert(*value);
                                 changed = true;
                             }
                         } else if let ExpressionKind::GlobalGet { id: other_id } = &init.kind {
                             if let Some(value) = self.global_values.get(other_id) {
-                                let val = value.clone();
-                                if !self.global_values.get(&gid).map_or(false, |v| v == &val) {
+                                let val = *value;
+                                if !(self.global_values.get(&gid) == Some(&val)) {
                                     self.global_values.insert(gid, val);
                                     changed = true;
                                 }
@@ -214,11 +217,10 @@ impl GlobalAnalysis {
                 self.visit_usage(module, *ptr);
                 self.visit_usage(module, *value);
             }
-            ExpressionKind::Return { value } => {
-                if let Some(v) = value {
-                    self.visit_usage(module, *v);
-                }
+            ExpressionKind::Return { value: Some(v) } => {
+                self.visit_usage(module, *v);
             }
+            ExpressionKind::Return { value: None } => {}
             ExpressionKind::Switch {
                 condition, value, ..
             } => {
