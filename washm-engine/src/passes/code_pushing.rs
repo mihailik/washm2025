@@ -12,8 +12,8 @@ impl Pass for CodePushing {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 let mut pusher = CodePusher;
                 pusher.visit(body);
             }
@@ -44,6 +44,8 @@ mod tests {
         module.add_function(func);
         let mut pass = CodePushing;
         pass.run(&mut module);
-        assert!(module.functions[0].body.is_some());
+        assert!(module.functions[module.functions.iter().next().unwrap().0]
+            .body()
+            .is_some());
     }
 }

@@ -1,31 +1,33 @@
-//! Effect analysis for WebAssembly expressions.
-//!
-//! This module provides the foundational types for reasoning about side effects
-//! in WebAssembly expressions. Effects are used by optimization passes to
-//! determine whether it is safe to reorder, eliminate, or move instructions.
-//!
-//! ## Design Philosophy
-//!
-//! In Rust, we leverage the type system to make effect analysis more precise
-//! and harder to misuse than the C++ counterpart. Effects are represented as
-//! bitflags, allowing efficient composition and querying.
-//!
-//! ## Usage
-//!
-//! ```rust
-//! use washm::analysis::effects::{Effect, EffectAnalyzer};
-//! use washm::ir::expression::{IrBuilder, ExprRef};
-//! use washm::ir::{Literal, Type};
-//! use bumpalo::Bump;
-//!
-//! let bump = Bump::new();
-//! let builder = IrBuilder::new(&bump);
-//! let expr = builder.unreachable();
-//!
-//! let effect = EffectAnalyzer::analyze(expr);
-//! assert!(effect.may_trap());
-//! assert!(effect.transfers_control());
-//! ```
+// Effect analysis for WebAssembly expressions.
+//
+// This module provides the foundational types for reasoning about side effects
+// in WebAssembly expressions. Effects are used by optimization passes to
+// determine whether it is safe to reorder, eliminate, or move instructions.
+//
+// ## Design Philosophy
+//
+// In Rust, we leverage the type system to make effect analysis more precise
+use crate::collections::Id;
+use crate::ir::{FuncId, GlobalId, MemoryId, TableId};
+// and harder to misuse than the C++ counterpart. Effects are represented as
+// bitflags, allowing efficient composition and querying.
+//
+// ## Usage
+//
+// ```rust
+// use washm::analysis::effects::{Effect, EffectAnalyzer};
+// use washm::ir::expression::{IrBuilder, ExprRef};
+// use washm::ir::{Literal, Type};
+// use bumpalo::Bump;
+//
+// let bump = Bump::new();
+// let builder = IrBuilder::new(&bump);
+// let expr = builder.unreachable();
+//
+// let effect = EffectAnalyzer::analyze(expr);
+// assert!(effect.may_trap());
+// assert!(effect.transfers_control());
+// ```
 
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use bitflags::bitflags;
@@ -360,9 +362,9 @@ impl EffectAnalyzer {
                 effect
             }
 
-            ExpressionKind::MemorySize => Effect::MEMORY_READ,
+            ExpressionKind::MemorySize { .. } => Effect::MEMORY_READ,
 
-            ExpressionKind::MemoryGrow { delta } => {
+            ExpressionKind::MemoryGrow { delta, .. } => {
                 Effect::GROWS | Effect::NONDETERMINISTIC | Self::analyze(*delta)
             }
 
@@ -782,7 +784,7 @@ mod tests {
     fn test_analyzer_global_get() {
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
-        let g0_id = unsafe { std::mem::transmute(0u64) };
+        let g0_id: GlobalId = Id::from_raw_parts(0, 0);
         let global_get = builder.global_get(g0_id, Type::I32);
 
         let effect = EffectAnalyzer::analyze(global_get);
@@ -795,7 +797,7 @@ mod tests {
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
         let value = builder.const_(Literal::I32(42));
-        let g0_id = unsafe { std::mem::transmute(0u64) };
+        let g0_id: GlobalId = Id::from_raw_parts(0, 0);
         let global_set = builder.global_set(g0_id, value);
 
         let effect = EffectAnalyzer::analyze(global_set);
@@ -808,7 +810,15 @@ mod tests {
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
         let ptr = builder.const_(Literal::I32(0));
-        let load = builder.load(4, false, 0, 4, ptr, Type::I32);
+        let load = builder.load(
+            MemoryId::from_raw_parts(0, 0),
+            4,
+            false,
+            0,
+            4,
+            ptr,
+            Type::I32,
+        );
 
         let effect = EffectAnalyzer::analyze(load);
         assert!(effect.reads_memory());
@@ -822,7 +832,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
         let ptr = builder.const_(Literal::I32(0));
         let value = builder.const_(Literal::I32(42));
-        let store = builder.store(4, 0, 4, ptr, value);
+        let store = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, value, ptr);
 
         let effect = EffectAnalyzer::analyze(store);
         assert!(effect.writes_memory());
@@ -835,7 +845,12 @@ mod tests {
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
         let operands = bumpalo::vec![in &bump;];
-        let call = builder.call("foo", operands, Type::I32, false);
+        let call = builder.call(
+            FuncId::from_raw_parts(0, 0), /* foo */
+            operands,
+            Type::I32,
+            false,
+        );
 
         let effect = EffectAnalyzer::analyze(call);
         assert!(effect.calls());
@@ -848,15 +863,29 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         let store1 = builder.store(
+            MemoryId::from_raw_parts(0, 0),
             4,
             0,
             4,
             builder.const_(Literal::I32(0)),
             builder.const_(Literal::I32(1)),
         );
-        let load = builder.load(4, false, 0, 4, builder.const_(Literal::I32(4)), Type::I32);
+        let load = builder.load(
+            MemoryId::from_raw_parts(0, 0),
+            4,
+            false,
+            0,
+            4,
+            builder.const_(Literal::I32(4)),
+            Type::I32,
+        );
         let operands = bumpalo::vec![in &bump;];
-        let call = builder.call("bar", operands, Type::I32, false);
+        let call = builder.call(
+            FuncId::from_raw_parts(0, 0), /* bar */
+            operands,
+            Type::I32,
+            false,
+        );
 
         let list = bumpalo::vec![in &bump; store1, load, call];
         let block = builder.block(None, list, Type::I32);
@@ -874,7 +903,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         let condition = builder.const_(Literal::I32(1));
-        let g0_id = unsafe { std::mem::transmute(0u64) };
+        let g0_id: GlobalId = Id::from_raw_parts(0, 0);
         let true_branch = builder.global_set(g0_id, builder.const_(Literal::I32(1)));
         let false_branch = builder.local_set(0, builder.const_(Literal::I32(2)));
 
@@ -927,6 +956,7 @@ mod tests {
 
         let nop = builder.nop();
         let store = builder.store(
+            MemoryId::from_raw_parts(0, 0),
             4,
             0,
             4,
@@ -934,8 +964,21 @@ mod tests {
             builder.const_(Literal::I32(1)),
         );
         let operands = bumpalo::vec![in &bump;];
-        let call = builder.call("foo", operands, Type::I32, false);
-        let load = builder.load(4, false, 0, 4, builder.const_(Literal::I32(0)), Type::I32);
+        let call = builder.call(
+            FuncId::from_raw_parts(0, 0), /* foo */
+            operands,
+            Type::I32,
+            false,
+        );
+        let load = builder.load(
+            MemoryId::from_raw_parts(0, 0),
+            4,
+            false,
+            0,
+            4,
+            builder.const_(Literal::I32(0)),
+            Type::I32,
+        );
 
         let exprs = vec![nop, store, call, load];
 
@@ -962,6 +1005,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         let body = builder.store(
+            MemoryId::from_raw_parts(0, 0),
             4,
             0,
             4,
@@ -1001,7 +1045,12 @@ mod tests {
 
         // Drop of call (has side effects)
         let operands = bumpalo::vec![in &bump;];
-        let call = builder.call("foo", operands, Type::I32, false);
+        let call = builder.call(
+            FuncId::from_raw_parts(0, 0), /* foo */
+            operands,
+            Type::I32,
+            false,
+        );
         let drop2 = builder.drop(call);
         let effect2 = EffectAnalyzer::analyze(drop2);
         assert!(effect2.calls());
@@ -1013,7 +1062,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         let condition = builder.const_(Literal::I32(1));
-        let g0_id = unsafe { std::mem::transmute(0u64) };
+        let g0_id: GlobalId = Id::from_raw_parts(0, 0);
         let if_true = builder.global_get(g0_id, Type::I32);
         let if_false = builder.local_get(1, Type::I32);
         let select = builder.select(condition, if_true, if_false, Type::I32);
@@ -1031,9 +1080,19 @@ mod tests {
 
         let condition = builder.const_(Literal::I32(1));
         let operands1 = bumpalo::vec![in &bump;];
-        let if_true = builder.call("foo", operands1, Type::I32, false);
+        let if_true = builder.call(
+            FuncId::from_raw_parts(0, 0), /* foo */
+            operands1,
+            Type::I32,
+            false,
+        );
         let operands2 = bumpalo::vec![in &bump;];
-        let if_false = builder.call("bar", operands2, Type::I32, false);
+        let if_false = builder.call(
+            FuncId::from_raw_parts(0, 0), /* bar */
+            operands2,
+            Type::I32,
+            false,
+        );
         let select = builder.select(condition, if_true, if_false, Type::I32);
 
         let effect = EffectAnalyzer::analyze(select);
@@ -1047,7 +1106,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         let delta = builder.const_(Literal::I32(1));
-        let grow = builder.memory_grow(delta);
+        let grow = builder.memory_grow(MemoryId::from_raw_parts(0, 0), delta);
 
         let effect = EffectAnalyzer::analyze(grow);
         assert!(effect.contains(Effect::GROWS));
@@ -1059,7 +1118,7 @@ mod tests {
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
 
-        let size = builder.memory_size();
+        let size = builder.memory_size(MemoryId::from_raw_parts(0, 0));
 
         let effect = EffectAnalyzer::analyze(size);
         assert!(effect.reads_memory());
@@ -1082,6 +1141,7 @@ mod tests {
 
         // Nested: if (cond) { loop { store; break; } }
         let store = builder.store(
+            MemoryId::from_raw_parts(0, 0),
             4,
             0,
             4,
@@ -1121,7 +1181,12 @@ mod tests {
 
         // Unary wrapping a call
         let operands = bumpalo::vec![in &bump;];
-        let call = builder.call("foo", operands, Type::I32, false);
+        let call = builder.call(
+            FuncId::from_raw_parts(0, 0), /* foo */
+            operands,
+            Type::I32,
+            false,
+        );
         let unary = builder.unary(crate::ir::ops::UnaryOp::EqZInt32, call, Type::I32);
 
         let effect = EffectAnalyzer::analyze(unary);
@@ -1133,10 +1198,15 @@ mod tests {
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
 
-        let g0_id = unsafe { std::mem::transmute(0u64) };
+        let g0_id: GlobalId = Id::from_raw_parts(0, 0);
         let left = builder.global_get(g0_id, Type::I32);
         let operands = bumpalo::vec![in &bump;];
-        let right = builder.call("foo", operands, Type::I32, false);
+        let right = builder.call(
+            FuncId::from_raw_parts(0, 0), /* foo */
+            operands,
+            Type::I32,
+            false,
+        );
         let binary = builder.binary(crate::ir::ops::BinaryOp::AddInt32, left, right, Type::I32);
 
         let effect = EffectAnalyzer::analyze(binary);
@@ -1225,6 +1295,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         let store = builder.store(
+            MemoryId::from_raw_parts(0, 0),
             4,
             0,
             4,
@@ -1244,7 +1315,12 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         let operands = bumpalo::vec![in &bump;];
-        let call = builder.call("foo", operands, Type::I32, false);
+        let call = builder.call(
+            FuncId::from_raw_parts(0, 0), /* foo */
+            operands,
+            Type::I32,
+            false,
+        );
         let ret = builder.return_(Some(call));
 
         let effect = EffectAnalyzer::analyze(ret);
@@ -1258,9 +1334,19 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         let operands1 = bumpalo::vec![in &bump;];
-        let condition = builder.call("should_break", operands1, Type::I32, false);
+        let condition = builder.call(
+            FuncId::from_raw_parts(0, 0), /* should_break */
+            operands1,
+            Type::I32,
+            false,
+        );
         let operands2 = bumpalo::vec![in &bump;];
-        let value = builder.call("get_value", operands2, Type::I32, false);
+        let value = builder.call(
+            FuncId::from_raw_parts(0, 0), /* get_value */
+            operands2,
+            Type::I32,
+            false,
+        );
         let br = builder.break_("loop", Some(condition), Some(value), Type::I32);
 
         let effect = EffectAnalyzer::analyze(br);
@@ -1289,12 +1375,20 @@ mod tests {
 
         // Load from address 0
         let ptr1 = builder.const_(Literal::I32(0));
-        let load = builder.load(4, false, 0, 4, ptr1, Type::I32);
+        let load = builder.load(
+            MemoryId::from_raw_parts(0, 0),
+            4,
+            false,
+            0,
+            4,
+            ptr1,
+            Type::I32,
+        );
 
         // Store to address 0
         let ptr2 = builder.const_(Literal::I32(0));
         let value = builder.const_(Literal::I32(42));
-        let store = builder.store(4, 0, 4, ptr2, value);
+        let store = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, value, ptr2);
 
         let load_effect = EffectAnalyzer::analyze(load);
         let store_effect = EffectAnalyzer::analyze(store);
@@ -1316,7 +1410,7 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // Read global 0
-        let g0_id = unsafe { std::mem::transmute(0u64) };
+        let g0_id: GlobalId = Id::from_raw_parts(0, 0);
         let global_get = builder.global_get(g0_id, Type::I32);
 
         // Write to global 0
@@ -1345,7 +1439,7 @@ mod tests {
         let local_set = builder.local_set(0, builder.const_(Literal::I32(10)));
 
         // GlobalSet (writes globals, doesn't trap if value is pure)
-        let g1_id = unsafe { std::mem::transmute(1u64) };
+        let g1_id: GlobalId = Id::from_raw_parts(1, 0);
         let global_set = builder.global_set(g1_id, builder.const_(Literal::I32(20)));
 
         let local_effect = EffectAnalyzer::analyze(local_set);
@@ -1369,7 +1463,12 @@ mod tests {
 
         // Call has arbitrary effects
         let operands = bumpalo::vec![in &bump;];
-        let call = builder.call("arbitrary", operands, Type::I32, false);
+        let call = builder.call(
+            FuncId::from_raw_parts(0, 0), /* arbitrary */
+            operands,
+            Type::I32,
+            false,
+        );
         let call_effect = EffectAnalyzer::analyze(call);
 
         // Call should interfere with NONE
@@ -1439,6 +1538,7 @@ mod tests {
 
         // Inner block with memory write
         let store = builder.store(
+            MemoryId::from_raw_parts(0, 0),
             4,
             0,
             4,
@@ -1469,10 +1569,18 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // First: memory read
-        let load = builder.load(4, false, 0, 4, builder.const_(Literal::I32(0)), Type::I32);
+        let load = builder.load(
+            MemoryId::from_raw_parts(0, 0),
+            4,
+            false,
+            0,
+            4,
+            builder.const_(Literal::I32(0)),
+            Type::I32,
+        );
 
         // Second: global write
-        let g1_id = unsafe { std::mem::transmute(1u64) };
+        let g1_id: GlobalId = Id::from_raw_parts(1, 0);
         let global_set = builder.global_set(g1_id, builder.const_(Literal::I32(42)));
 
         // Third: local write
@@ -1499,6 +1607,7 @@ mod tests {
 
         // Loop body with side effect (memory write)
         let _store = builder.store(
+            MemoryId::from_raw_parts(0, 0),
             4,
             0,
             4,
@@ -1507,6 +1616,7 @@ mod tests {
         );
 
         let body = builder.store(
+            MemoryId::from_raw_parts(0, 0),
             4,
             0,
             4,
@@ -1561,6 +1671,7 @@ mod tests {
 
         // First store to address 0
         let store1 = builder.store(
+            MemoryId::from_raw_parts(0, 0),
             4,
             0,
             4,
@@ -1571,6 +1682,7 @@ mod tests {
 
         // Second store to same address (overwrites first)
         let store2 = builder.store(
+            MemoryId::from_raw_parts(0, 0),
             4,
             0,
             4,
@@ -1601,6 +1713,7 @@ mod tests {
 
         // Store to memory
         let store = builder.store(
+            MemoryId::from_raw_parts(0, 0),
             4,
             0,
             4,
@@ -1611,11 +1724,17 @@ mod tests {
 
         // Call (may have arbitrary effects)
         let operands = bumpalo::vec![in &bump;];
-        let call = builder.call("mayWrite", operands, Type::NONE, false);
+        let call = builder.call(
+            FuncId::from_raw_parts(0, 0), /* mayWrite */
+            operands,
+            Type::NONE,
+            false,
+        );
         let call_effect = EffectAnalyzer::analyze(call);
 
         // Second store to same location
         let store2 = builder.store(
+            MemoryId::from_raw_parts(0, 0),
             4,
             0,
             4,
@@ -1667,7 +1786,7 @@ mod tests {
         let set_effect = EffectAnalyzer::analyze(set1);
 
         // GlobalGet (reads global, doesn't trap)
-        let g1_id = unsafe { std::mem::transmute(1u64) };
+        let g1_id: GlobalId = Id::from_raw_parts(1, 0);
         let global_get = builder.global_get(g1_id, Type::I32);
         let global_effect = EffectAnalyzer::analyze(global_get);
 

@@ -1,5 +1,5 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
-use crate::ir::module::{Global, GlobalKind, Module, GlobalId};
+use crate::ir::module::{Global, GlobalId, GlobalKind, Module};
 use crate::ir::visitor::Visitor;
 use crate::ir::{Literal, Type};
 use crate::passes::Pass;
@@ -22,13 +22,11 @@ impl Pass for I64ToI32Lowering {
             name: global_name,
             type_: Type::I32,
             mutable: true,
-            kind: GlobalKind::Local {
-                init: global_init,
-            },
+            kind: GlobalKind::Local { init: global_init },
         });
 
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 let mut visitor = I64LoweringVisitor {
                     allocator: module.allocator,
                     global_id,
@@ -109,7 +107,7 @@ mod tests {
         let mut pass = I64ToI32Lowering;
         pass.run(&mut module);
 
-        let func = module.get_function("test_func").unwrap();
+        let func = module.get_function(0.into() /* test_func */).unwrap();
         let body = func.body.unwrap();
 
         match body.kind {

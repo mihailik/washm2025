@@ -17,8 +17,8 @@ impl Pass for TypeSSA {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for func in &mut module.functions {
-            if let Some(mut body) = func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(mut body) = func.body() {
                 // 1. Build SSA
                 let cfg = ControlFlowGraph::build(func, body);
                 let dom = DominanceTree::build(&cfg);
@@ -54,7 +54,7 @@ impl Pass for TypeSSA {
                 // 3. Apply refinements
                 let mut applier = TypeRefiner { refinements };
                 applier.visit(&mut body);
-                func.body = Some(body);
+                *func.body_mut() = Some(body);
             }
         }
     }

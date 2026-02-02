@@ -1,5 +1,5 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{ExportKind, ImportKind, Module};
+use crate::ir::module::{ExportKind, Module};
 use crate::ir::visitor::ReadOnlyVisitor;
 use crate::passes::Pass;
 use std::collections::HashSet;
@@ -14,9 +14,9 @@ impl Pass for PrintCallGraph {
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         println!("Call Graph:");
-        for func in &module.functions {
+        for (_, func) in &module.functions {
             let mut collector = CallCollector::default();
-            if let Some(body) = func.body {
+            if let Some(body) = func.body() {
                 collector.visit(body);
             }
 
@@ -59,18 +59,17 @@ impl Pass for PrintFunctionMap {
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         println!("Function Map:");
-        for (i, func) in module.functions.iter().enumerate() {
+        for (id, func) in &module.functions {
             let mut exports = Vec::new();
             for export in &module.exports {
-                if let ExportKind::Function(index) = export.kind {
-                    let num_func_imports = module.imports.iter().filter(|i| matches!(i.kind, crate::ir::module::ImportKind::Function(_, _))).count();
-                    if index == (num_func_imports + i) as u32 {
+                if let ExportKind::Function(export_id) = export.kind {
+                    if export_id == id {
                         exports.push(&export.name);
                     }
                 }
             }
 
-            print!("  [{}] {}", i, func.name);
+            print!("  [{:?}] {}", id, func.name);
             if !exports.is_empty() {
                 print!(
                     " (exports: {})",

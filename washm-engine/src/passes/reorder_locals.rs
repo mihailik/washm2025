@@ -13,8 +13,8 @@ impl Pass for ReorderLocals {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for func in &mut module.functions {
-            if func.vars.is_empty() {
+        for (_, func) in &mut module.functions {
+            if func.vars().is_empty() {
                 continue;
             }
 
@@ -33,12 +33,12 @@ impl Pass for ReorderLocals {
             // In our Module IR, vars is a Vec<Type>.
             // We want to sort them by type.
             let mut indexed_vars: Vec<(usize, crate::ir::Type)> =
-                func.vars.iter().cloned().enumerate().collect();
+                func.vars().iter().cloned().enumerate().collect();
             // Group by type for better compression
             indexed_vars.sort_by_key(|&(_, ty)| ty);
 
             let mut remap = HashMap::new();
-            let mut new_vars = Vec::with_capacity(func.vars.len());
+            let mut new_vars = Vec::with_capacity(func.vars().len());
 
             for (new_idx, (old_idx, ty)) in indexed_vars.into_iter().enumerate() {
                 let old_local_idx = (num_params + old_idx) as u32;
@@ -47,10 +47,10 @@ impl Pass for ReorderLocals {
                 new_vars.push(ty);
             }
 
-            func.vars = new_vars;
+            *func.vars_mut() = new_vars;
 
             // 2. Update all local.get/set/tee in the body
-            if let Some(mut body) = func.body {
+            if let Some(mut body) = func.body() {
                 let mut updater = LocalRemapper { remap: &remap };
                 updater.visit(&mut body);
             }

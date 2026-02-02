@@ -13,26 +13,37 @@ impl Pass for SafeHeap {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for func in &mut module.functions {
-            if func.body.is_none() {
+        let memory_id = module.memories.iter().next().map(|(id, _)| id);
+        let memory = if let Some(id) = memory_id {
+            id
+        } else {
+            return;
+        };
+
+        for (_, func) in &mut module.functions {
+            if func.body().is_none() {
                 continue;
             }
 
             // Calculate param count (Assuming MVP/single-value for now as Type iteration is not exposed)
-            let param_count = if func.params == Type::NONE { 0 } else { 1 };
+            let param_count = if func.params == Type::NONE {
+                0
+            } else {
+                func.params.tuple_len()
+            };
 
-            let ptr_local_idx = func.vars.len() as u32 + param_count;
-            func.vars.push(Type::I32); // ptr
+            let ptr_local_idx = func.vars().len() as u32 + param_count as u32;
+            func.vars_mut().push(Type::I32); // ptr
 
             // Value locals: i32, i64, f32, f64. V128 not supported in this simple pass yet.
             let val_i32_idx = ptr_local_idx + 1;
-            func.vars.push(Type::I32);
+            func.vars_mut().push(Type::I32);
             let val_i64_idx = val_i32_idx + 1;
-            func.vars.push(Type::I64);
+            func.vars_mut().push(Type::I64);
             let val_f32_idx = val_i64_idx + 1;
-            func.vars.push(Type::F32);
+            func.vars_mut().push(Type::F32);
             let val_f64_idx = val_f32_idx + 1;
-            func.vars.push(Type::F64);
+            func.vars_mut().push(Type::F64);
 
             let mut rewriter = SafeHeapRewriter {
                 ptr_local: ptr_local_idx,
@@ -40,10 +51,11 @@ impl Pass for SafeHeap {
                 val_i64: val_i64_idx,
                 val_f32: val_f32_idx,
                 val_f64: val_f64_idx,
+                memory,
                 allocator: module.allocator,
             };
 
-            if let Some(body) = &mut func.body {
+            if let Some(body) = func.body_mut() {
                 rewriter.visit_expr(body);
             }
         }
@@ -56,6 +68,7 @@ struct SafeHeapRewriter<'a> {
     val_i64: u32,
     val_f32: u32,
     val_f64: u32,
+    memory: crate::ir::MemoryId,
     allocator: &'a bumpalo::Bump,
 }
 
@@ -74,6 +87,7 @@ impl<'a> SafeHeapRewriter<'a> {
                 align,
                 bytes,
                 signed,
+                memory,
             } => {
                 let ptr_expr = *ptr; // The original pointer expression
                 let signed_val = *signed;
@@ -88,6 +102,7 @@ impl<'a> SafeHeapRewriter<'a> {
 
                 let new_load = Expression {
                     kind: ExpressionKind::Load {
+                        memory: self.memory,
                         ptr: ExprRef::new(local_get_ptr),
                         offset: *offset,
                         align: *align,
@@ -121,6 +136,7 @@ impl<'a> SafeHeapRewriter<'a> {
                 offset,
                 align,
                 bytes,
+                memory,
             } => {
                 let ptr_expr = *ptr;
                 let value_expr = *value;
@@ -175,6 +191,7 @@ impl<'a> SafeHeapRewriter<'a> {
 
                 let new_store = Expression {
                     kind: ExpressionKind::Store {
+                        memory: self.memory,
                         ptr: ExprRef::new(get_ptr),
                         value: ExprRef::new(get_val),
                         offset: *offset,
@@ -219,7 +236,9 @@ impl<'a> SafeHeapRewriter<'a> {
 
         // 2. Get memory size in bytes
         let mem_size_pages = self.allocator.alloc(Expression {
-            kind: ExpressionKind::MemorySize,
+            kind: ExpressionKind::MemorySize {
+                memory: self.memory,
+            },
             type_: Type::I32,
         });
 
@@ -327,7 +346,7 @@ impl<'a> SafeHeapRewriter<'a> {
                     self.visit_expr(v);
                 }
             }
-            ExpressionKind::MemoryGrow { delta } => {
+            ExpressionKind::MemoryGrow { delta, .. } => {
                 self.visit_expr(delta);
             }
             ExpressionKind::AtomicRMW { ptr, value, .. } => {
@@ -354,7 +373,7 @@ impl<'a> SafeHeapRewriter<'a> {
                 self.visit_expr(expected);
                 self.visit_expr(timeout);
             }
-            ExpressionKind::AtomicNotify { ptr, count } => {
+            ExpressionKind::AtomicNotify { ptr, count, memory } => {
                 self.visit_expr(ptr);
                 self.visit_expr(count);
             }
@@ -377,6 +396,15 @@ mod tests {
         let allocator = Bump::new();
         let mut module = Module::new(&allocator);
 
+        let mem_id = module.add_memory(crate::ir::module::Memory {
+            name: "mem".to_string(),
+            limits: crate::ir::module::MemoryLimits {
+                initial: 1,
+                maximum: None,
+            },
+            kind: crate::ir::module::MemoryKind::Local,
+        });
+
         let load_ptr = allocator.alloc(Expression {
             kind: ExpressionKind::Const(Literal::I32(0)),
             type_: Type::I32,
@@ -384,6 +412,7 @@ mod tests {
 
         let load = allocator.alloc(Expression {
             kind: ExpressionKind::Load {
+                memory: mem_id,
                 bytes: 4,
                 signed: false,
                 offset: 0,
@@ -400,16 +429,16 @@ mod tests {
             vec![],
             Some(ExprRef::new(load)),
         );
-        module.add_function(func);
+        let test_func_id = module.add_function(func);
 
         let mut pass = SafeHeap;
         pass.run(&mut module);
 
-        assert!(module.get_function("test_func").is_some());
+        assert!(module.get_function(test_func_id).is_some());
 
         // Inspect body to see if it's a Block now
-        let func = module.get_function("test_func").unwrap();
-        let body = func.body.as_ref().unwrap();
+        let func = module.get_function(test_func_id).unwrap();
+        let body = func.body().unwrap();
 
         match &body.kind {
             ExpressionKind::Block { list, .. } => {

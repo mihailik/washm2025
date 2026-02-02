@@ -22,8 +22,8 @@ impl Pass for MergeBlocks {
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         let allocator = module.allocator();
 
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 let mut merger = BlockMerger { allocator };
                 merger.visit(body);
             }
@@ -190,7 +190,9 @@ mod tests {
         pass.run(&mut module);
 
         // Should be flattened to single block
-        let body = module.functions[0].body.as_ref().unwrap();
+        let func_id = module.functions.iter().next().unwrap().0;
+        let binding = module.functions[func_id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 1);
             assert!(matches!(list[0].kind, ExpressionKind::Const(_)));
@@ -227,7 +229,9 @@ mod tests {
         pass.run(&mut module);
 
         // Should remain unchanged
-        let body = module.functions[0].body.as_ref().unwrap();
+        let func_id = module.functions.iter().next().unwrap().0;
+        let binding = module.functions[func_id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 2);
         } else {
@@ -268,7 +272,9 @@ mod tests {
         pass.run(&mut module);
 
         // Should NOT merge due to different names
-        let body = module.functions[0].body.as_ref().unwrap();
+        let func_id = module.functions.iter().next().unwrap().0;
+        let binding = module.functions[func_id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, name } = &body.kind {
             assert_eq!(list.len(), 1);
             assert_eq!(*name, Some("outer"));
@@ -318,7 +324,9 @@ mod tests {
         let mut pass = MergeBlocks;
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let func_id = module.functions.iter().next().unwrap().0;
+        let binding = module.functions[func_id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 4);
             assert!(matches!(
@@ -371,7 +379,9 @@ mod tests {
         pass.run(&mut module);
 
         // Should become: (block (call $foo) (i32.eqz (i32.const 1)))
-        let body = module.functions[0].body.as_ref().unwrap();
+        let func_id = module.functions.iter().next().unwrap().0;
+        let binding = module.functions[func_id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 2);
             assert!(matches!(list[0].kind, ExpressionKind::Nop)); // The call
@@ -417,7 +427,9 @@ mod tests {
         pass.run(&mut module);
 
         // Should become: (block (call $foo) (drop (i32.const 1)))
-        let body = module.functions[0].body.as_ref().unwrap();
+        let func_id = module.functions.iter().next().unwrap().0;
+        let binding = module.functions[func_id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 2);
             assert!(matches!(list[0].kind, ExpressionKind::Nop));

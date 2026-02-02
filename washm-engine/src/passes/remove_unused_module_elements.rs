@@ -1,7 +1,8 @@
 use crate::analysis::usage::UsageTracker;
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{ExportKind, GlobalKind, ImportKind, Module};
+use crate::ir::module::{ExportKind, GlobalKind, Module, TableKind};
 use crate::ir::visitor::Visitor;
+use crate::ir::FuncId;
 use crate::ir::Type;
 use crate::passes::Pass;
 use std::collections::HashMap;
@@ -16,103 +17,34 @@ impl Pass for RemoveUnusedModuleElements {
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         let tracker = UsageTracker::analyze(module);
 
-        // 1. Determine which elements to keep and compute remapping
+        // 1. Remove unused elements from arenas
+        module
+            .functions
+            .retain(|id, _| tracker.functions.contains(&id));
+        module.globals.retain(|id, _| tracker.globals.contains(&id));
+        module.tables.retain(|id, _| tracker.tables.contains(&id));
+        module
+            .memories
+            .retain(|id, _| tracker.memories.contains(&id));
 
-        // Functions (Imports + Defined)
-        let mut func_remap = HashMap::new();
-        let mut new_functions = Vec::new();
-        let mut new_imports = Vec::new();
-
-        let mut current_func_idx = 0;
-        let mut next_func_idx = 0;
-
-        let old_imports = std::mem::take(&mut module.imports);
-
-        for import in old_imports {
-            match import.kind {
-                ImportKind::Function(_, _) => {
-                    if tracker.functions.contains(&import.name) {
-                        func_remap.insert(current_func_idx, next_func_idx);
-                        next_func_idx += 1;
-                        new_imports.push(import);
-                    }
-                    current_func_idx += 1;
-                }
-                ImportKind::Memory(..) => {
-                    if tracker.memories {
-                        new_imports.push(import);
-                    }
-                }
-                ImportKind::Table(..) => {
-                    if tracker.tables {
-                        new_imports.push(import);
-                    }
-                }
-            }
-        }
-
-        let old_functions = std::mem::take(&mut module.functions);
-        for func in old_functions {
-            if tracker.functions.contains(&func.name) {
-                func_remap.insert(current_func_idx, next_func_idx);
-                next_func_idx += 1;
-                new_functions.push(func);
-            }
-            current_func_idx += 1;
-        }
-        module.functions = new_functions;
-        module.imports = new_imports;
-
-        // Globals (deallocate unused)
-        let to_remove: Vec<_> = module
-            .globals
-            .iter()
-            .filter(|(id, _)| !tracker.globals.contains(&id.cast()))
-            .map(|(id, _)| id)
+        // 2. Filter elements and data segments (they are still Vec)
+        let old_elements = std::mem::take(&mut module.elements);
+        module.elements = old_elements
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| tracker.element_segments.contains(&(*i as u32)))
+            .map(|(_, e)| e)
             .collect();
-        for id in to_remove {
-            module.globals.dealloc(id);
-        }
 
-        // Memories & Tables
-        if !tracker.memories {
-            module.memory = None;
-            module.data.clear();
-        }
-        if !tracker.tables {
-            module.table = None;
-            module.elements.clear();
-        }
+        let old_data = std::mem::take(&mut module.data);
+        module.data = old_data
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| tracker.data_segments.contains(&(*i as u32)))
+            .map(|(_, d)| d)
+            .collect();
 
-        // Segments remapping (Data)
-        let mut data_remap = HashMap::new();
-        if tracker.memories {
-            let old_data = std::mem::take(&mut module.data);
-            let mut next_data_idx = 0;
-            for (i, data) in old_data.into_iter().enumerate() {
-                if tracker.data_segments.contains(&(i as u32)) {
-                    data_remap.insert(i as u32, next_data_idx);
-                    next_data_idx += 1;
-                    module.data.push(data);
-                }
-            }
-        }
-
-        // Segments remapping (Elements)
-        let mut elem_remap = HashMap::new();
-        if tracker.tables {
-            let old_elements = std::mem::take(&mut module.elements);
-            let mut next_elem_idx = 0;
-            for (i, elem) in old_elements.into_iter().enumerate() {
-                if tracker.element_segments.contains(&(i as u32)) {
-                    elem_remap.insert(i as u32, next_elem_idx);
-                    next_elem_idx += 1;
-                    module.elements.push(elem);
-                }
-            }
-        }
-
-        // --- Types Pruning and Remapping ---
+        // 3. Types pruning (still using u32 indices)
         let mut new_types = Vec::new();
         let mut type_remap = HashMap::new();
         let old_types = std::mem::take(&mut module.types);
@@ -124,7 +56,8 @@ impl Pass for RemoveUnusedModuleElements {
         }
         module.types = new_types;
 
-        for func in &mut module.functions {
+        // Remap types in functions
+        for (_, func) in &mut module.functions {
             if let Some(type_idx) = &mut func.type_idx {
                 if let Some(&new_idx) = type_remap.get(type_idx) {
                     *type_idx = new_idx;
@@ -132,61 +65,43 @@ impl Pass for RemoveUnusedModuleElements {
             }
         }
 
-        // 2. Update references in the module
-
+        // 4. Update references in the module
         // Exports
-        module.exports.retain_mut(|export| match &mut export.kind {
-            ExportKind::Function(index) => {
-                if let Some(&new_idx) = func_remap.get(index) {
-                    *index = new_idx;
-                    true
-                } else {
-                    false
-                }
-            }
-            ExportKind::Global(id) => tracker.globals.contains(id),
-            ExportKind::Table(_) => tracker.tables,
-            ExportKind::Memory(_) => tracker.memories,
+        module.exports.retain(|export| match export.kind {
+            ExportKind::Function(id) => tracker.functions.contains(&id),
+            ExportKind::Global(id) => tracker.globals.contains(&id),
+            ExportKind::Table(id) => tracker.tables.contains(&id),
+            ExportKind::Memory(id) => tracker.memories.contains(&id),
         });
 
         // Start
-        if let Some(start_idx) = module.start {
-            if let Some(&new_idx) = func_remap.get(&start_idx) {
-                module.start = Some(new_idx);
-            } else {
+        if let Some(start_id) = module.start {
+            if !tracker.functions.contains(&start_id) {
                 module.start = None;
             }
         }
 
         // Update all expressions in the module
         let mut updater = IndexUpdater {
-            data_remap: &data_remap,
-            elem_remap: &elem_remap,
             type_remap: &type_remap,
         };
 
-        for func in &mut module.functions {
-            if let Some(mut body) = func.body {
-                updater.visit(&mut body);
+        for (_, func) in &mut module.functions {
+            if let Some(body_expr) = &mut func.body {
+                updater.visit(body_expr);
             }
         }
 
         for (_, global) in &mut module.globals {
-            if let GlobalKind::Local { init } = &mut global.kind {
+            if let crate::ir::module::GlobalKind::Local { init } = &mut global.kind {
                 updater.visit(init);
             }
         }
 
         for elem in &mut module.elements {
             updater.visit(&mut elem.offset);
-            elem.func_indices.retain_mut(|idx| {
-                if let Some(&new_idx) = func_remap.get(idx) {
-                    *idx = new_idx;
-                    true
-                } else {
-                    false
-                }
-            });
+            elem.func_indices
+                .retain(|id| tracker.functions.contains(id));
         }
 
         for data in &mut module.data {
@@ -196,8 +111,6 @@ impl Pass for RemoveUnusedModuleElements {
 }
 
 struct IndexUpdater<'a> {
-    data_remap: &'a HashMap<u32, u32>,
-    elem_remap: &'a HashMap<u32, u32>,
     type_remap: &'a HashMap<u32, u32>,
 }
 
@@ -209,19 +122,6 @@ impl<'a, 'b> Visitor<'b> for IndexUpdater<'a> {
         self.remap_type(&mut expr.type_);
 
         match &mut expr.kind {
-            ExpressionKind::GlobalGet { .. } | ExpressionKind::GlobalSet { .. } => {
-                // GlobalId is stable, no remapping needed!
-            }
-            ExpressionKind::MemoryInit { segment, .. } | ExpressionKind::DataDrop { segment } => {
-                if let Some(&new_idx) = self.data_remap.get(segment) {
-                    *segment = new_idx;
-                }
-            }
-            ExpressionKind::TableInit { segment, .. } | ExpressionKind::ElemDrop { segment } => {
-                if let Some(&new_idx) = self.elem_remap.get(segment) {
-                    *segment = new_idx;
-                }
-            }
             ExpressionKind::CallIndirect { type_, .. } => {
                 self.remap_type(type_);
             }
@@ -245,6 +145,7 @@ mod tests {
     use super::*;
     use crate::ir::expression::IrBuilder;
     use crate::ir::module::{Function, Global, Module};
+    use crate::ir::FuncId;
     use crate::ir::{Literal, Type};
     use bumpalo::collections::Vec as BumpVec;
     use bumpalo::Bump;
@@ -262,23 +163,36 @@ mod tests {
         // Func 1: Exported (Used)
         let func1 = Function::new("exported".to_string(), Type::NONE, Type::NONE, vec![], None);
         module.add_function(func1);
-        module.export_function(1, "main".to_string());
+        module.export_function(FuncId::from_raw_parts(1, 0), "main".to_string());
 
         // Func 2: Called by Func 1 (Used)
         let func2 = Function::new("called".to_string(), Type::NONE, Type::NONE, vec![], None);
         module.add_function(func2);
 
         // Body of Func 1 calls Func 2
-        let call = builder.call("called", BumpVec::new_in(&bump), Type::NONE, false);
-        module.functions[1].body = Some(call);
+        let call = builder.call(
+            FuncId::from_raw_parts(2, 0),
+            BumpVec::new_in(&bump),
+            Type::NONE,
+            false,
+        );
+        module
+            .functions
+            .get_mut(FuncId::from_raw_parts(1, 0))
+            .unwrap()
+            .body_mut()
+            .replace(call);
 
         let mut pass = RemoveUnusedModuleElements;
         pass.run(&mut module);
 
         // Func 0 removed. 1 stays. 2 stays.
         assert_eq!(module.functions.len(), 2);
-        assert_eq!(module.functions[0].name, "exported");
-        assert_eq!(module.functions[1].name, "called");
+        let mut ids = module.functions.ids();
+        let f0_id = ids.next().unwrap();
+        let f1_id = ids.next().unwrap();
+        assert_eq!(module.functions[f0_id].name, "exported");
+        assert_eq!(module.functions[f1_id].name, "called");
 
         // Check Export index updated
         assert_eq!(
@@ -286,7 +200,7 @@ mod tests {
                 ExportKind::Function(idx) => idx,
                 _ => panic!("Expected Function export"),
             },
-            0
+            f0_id.cast()
         );
     }
 
@@ -337,7 +251,7 @@ mod tests {
             Some(get),
         );
         module.add_function(func);
-        module.export_function(0, "user".to_string());
+        module.export_function(FuncId::from_raw_parts(0, 0), "user".to_string());
 
         let mut pass = RemoveUnusedModuleElements;
         pass.run(&mut module);
@@ -360,7 +274,8 @@ mod tests {
         );
 
         // Check Code index updated
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[FuncId::from_raw_parts(0, 0)].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::GlobalGet { id } = &body.kind {
             assert_eq!(*id, g1_id.cast());
         } else {
@@ -377,7 +292,7 @@ mod tests {
         module.types.push(crate::ir::module::FuncType {
             params: Type::I32,
             results: Type::I32,
-        }); // Type 0
+        }); // Type FuncId::from_raw_parts(0, 0)
         module.types.push(crate::ir::module::FuncType {
             params: Type::F64,
             results: Type::F64,
@@ -390,8 +305,8 @@ mod tests {
         // Function 0 (Exported) uses Type 1
         let mut func = Function::new("f0".to_string(), Type::F64, Type::F64, vec![], None);
         func.type_idx = Some(1);
-        module.add_function(func);
-        module.export_function(0, "f0".to_string());
+        let f0_id = module.add_function(func);
+        module.export_function(f0_id, "f0".to_string());
 
         // Function 1 (Unused) uses Type 2
         let mut func2 = Function::new("f1".to_string(), Type::I64, Type::I64, vec![], None);
@@ -409,7 +324,7 @@ mod tests {
         assert_eq!(module.types[0].params, Type::F64);
 
         // Function 0's type_idx should be remapped from 1 to 0.
-        assert_eq!(module.functions[0].type_idx, Some(0));
+        assert_eq!(module.functions[f0_id].type_idx, Some(0));
     }
 
     #[test]
@@ -419,11 +334,13 @@ mod tests {
         let builder = IrBuilder::new(&bump);
 
         // Import 0: Function (Used)
-        module.add_import(crate::ir::module::Import {
-            module: "m".to_string(),
-            name: "f".to_string(),
-            kind: ImportKind::Function(Type::NONE, Type::NONE),
-        });
+        let f_id = module.add_function(Function::new_import(
+            "f".to_string(),
+            "m".to_string(),
+            "f".to_string(),
+            Type::NONE,
+            Type::NONE,
+        ));
 
         // Global 0 (Unused)
         module.add_global(crate::ir::module::Global {
@@ -448,7 +365,7 @@ mod tests {
         });
 
         // Add code that uses Function Import and Global Import
-        let call = builder.call("f", BumpVec::new_in(&bump), Type::NONE, false);
+        let call = builder.call(f_id, BumpVec::new_in(&bump), Type::NONE, false);
         let get = builder.global_get(g_used_id, Type::I32);
 
         let mut block_list = BumpVec::new_in(&bump);
@@ -463,16 +380,19 @@ mod tests {
             vec![],
             Some(body),
         );
-        module.add_function(func);
-        module.export_function(1, "main".to_string()); // Func 1 is defined func
+        let main_id = module.add_function(func);
+        module.export_function(main_id, "main".to_string()); // main_id is defined func
 
         let mut pass = RemoveUnusedModuleElements;
         pass.run(&mut module);
 
-        // Import 1 should be gone.
-        // new_imports: [Import 0 (f)]
-        // (Global imports are tracked in module.globals, not module.imports)
-        assert_eq!(module.imports.len(), 1);
-        assert_eq!(module.imports[0].name, "f");
+        // Import should be kept because it is used.
+        let imports: Vec<_> = module
+            .functions
+            .iter()
+            .filter(|(_, f)| f.is_import())
+            .collect();
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].1.name, "f");
     }
 }

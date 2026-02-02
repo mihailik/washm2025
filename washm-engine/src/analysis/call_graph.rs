@@ -31,19 +31,20 @@ impl CallGraph {
         let mut graph = Self::new();
 
         // Initialize nodes for all functions
-        for func in &module.functions {
+        for (_, func) in &module.functions {
             graph.calls.insert(func.name.clone(), HashSet::new());
             graph.callers.insert(func.name.clone(), HashSet::new());
         }
 
-        for func in &module.functions {
-            if let Some(body) = &func.body {
+        for (_, func) in &module.functions {
+            if let Some(body) = func.body() {
                 let caller_name = func.name.clone();
                 let mut visitor = CallGraphBuilder {
                     caller: caller_name,
                     graph: &mut graph,
+                    module,
                 };
-                visitor.visit(*body);
+                visitor.visit(body);
             }
         }
         graph
@@ -84,16 +85,17 @@ impl CallGraph {
     }
 }
 
-struct CallGraphBuilder<'a> {
+struct CallGraphBuilder<'a, 'm> {
     caller: String,
     graph: &'a mut CallGraph,
+    module: &'m Module<'a>,
 }
 
-impl<'a, 'b> ReadOnlyVisitor<'a> for CallGraphBuilder<'b> {
+impl<'a, 'b, 'm> ReadOnlyVisitor<'a> for CallGraphBuilder<'b, 'm> {
     fn visit_expression(&mut self, expr: ExprRef<'a>) {
         if let ExpressionKind::Call { target, .. } = &expr.kind {
             // Record call
-            let target_name = target.to_string();
+            let target_name = self.module.functions[*target].name.clone();
 
             self.graph
                 .calls

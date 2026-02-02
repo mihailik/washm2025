@@ -17,8 +17,8 @@ impl Pass for PrecomputePropagate {
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         let evaluator = Evaluator::new(module.allocator);
 
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 // We need to run this until convergence or a fixed number of times
                 // since propagating a constant might enable further folding
                 for _ in 0..3 {
@@ -158,8 +158,10 @@ mod tests {
         pass.run(&mut module);
 
         // Check if the add was folded to 52
-        let func = &module.functions[0];
-        let body = func.body.as_ref().unwrap();
+        let func_id = module.functions.iter().next().unwrap().0;
+        let func = &module.functions[func_id];
+        let binding = func.body();
+        let body = binding.as_ref().unwrap();
 
         if let ExpressionKind::Block { list, .. } = &body.kind {
             let last = list.last().unwrap();

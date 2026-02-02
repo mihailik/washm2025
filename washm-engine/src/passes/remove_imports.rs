@@ -1,9 +1,9 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
-use crate::ir::module::{ImportKind, Module};
+use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
-use crate::ir::{Literal, Type};
+use crate::ir::{FuncId, Literal, Type};
 use crate::passes::Pass;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub struct RemoveImports;
 
@@ -13,38 +13,41 @@ impl Pass for RemoveImports {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        // 1. Identify imported functions
-        let mut imported_functions = HashSet::new();
-        let mut imported_sigs = std::collections::HashMap::new();
+        // 1. Identify imported functions that can be removed
+        let mut to_replace = HashSet::new();
+        let mut imported_sigs = HashMap::new();
+        let mut preserved = HashSet::new();
 
-        for import in &module.imports {
-            if let ImportKind::Function(_params, results) = import.kind {
-                imported_functions.insert(import.name.clone());
-                imported_sigs.insert(import.name.clone(), results);
+        for segment in &module.elements {
+            for &id in &segment.func_indices {
+                preserved.insert(id);
+            }
+        }
+        for export in &module.exports {
+            if let crate::ir::module::ExportKind::Function(id) = export.kind {
+                preserved.insert(id);
+            }
+        }
+        if let Some(id) = module.start {
+            preserved.insert(id);
+        }
+
+        for (id, func) in &module.functions {
+            if func.is_import() && !preserved.contains(&id) {
+                to_replace.insert(id);
+                imported_sigs.insert(id, func.results);
             }
         }
 
-        if imported_functions.is_empty() {
+        if to_replace.is_empty() {
             return;
         }
 
-        // 2. Identify functions used in tables (to preserve imports if they are indirect targets)
-        let mut indirect_names = HashSet::new();
-        for segment in &module.elements {
-            for &idx in &segment.func_indices {
-                if (idx as usize) < module.imports.len() {
-                    if let Some(import) = module.imports.get(idx as usize) {
-                        indirect_names.insert(import.name.clone());
-                    }
-                }
-            }
-        }
-
         // 3. Walk all function bodies and replace calls to imports
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 let mut visitor = CallReplacer {
-                    imported_functions: &imported_functions,
+                    to_replace: &to_replace,
                     imported_sigs: &imported_sigs,
                     bump: module.allocator,
                 };
@@ -52,76 +55,51 @@ impl Pass for RemoveImports {
             }
         }
 
-        // 4. Remove imports that are not in indirect_names and build remapping
-        let mut func_remap = std::collections::HashMap::new();
-        let mut current_func_idx = 0;
-        let mut next_func_idx = 0;
-
-        let old_imports = std::mem::take(&mut module.imports);
-        for import in old_imports {
-            if let ImportKind::Function(_, _) = import.kind {
-                let keep = if imported_functions.contains(&import.name) {
-                    indirect_names.contains(&import.name)
-                } else {
-                    true
-                };
-
-                if keep {
-                    func_remap.insert(current_func_idx, next_func_idx);
-                    next_func_idx += 1;
-                    module.imports.push(import);
+        // 4. Remove from module.imports
+        module.imports.retain(|imp| {
+            if let crate::ir::module::ImportKind::Function(..) = &imp.kind {
+                for &id in &to_replace {
+                    let f = &module.functions[id];
+                    if let Some(i) = &f.import {
+                        if i.module == imp.module && i.name == imp.name {
+                            return false;
+                        }
+                    }
                 }
-                current_func_idx += 1;
-            } else {
-                module.imports.push(import);
+            }
+            true
+        });
+
+        // 5. Remove the imports from the module
+        let to_remove_ids = to_replace.clone();
+
+        // Collect names of functions being removed to sync with module.imports
+        let mut to_remove_names = HashSet::new();
+        for &id in &to_remove_ids {
+            let func = &module.functions[id];
+            if let Some(import) = &func.import {
+                to_remove_names.insert((import.module.clone(), import.name.clone()));
             }
         }
 
-        // Add defined functions to the remap
-        for _ in 0..module.functions.len() {
-            func_remap.insert(current_func_idx, next_func_idx);
-            current_func_idx += 1;
-            next_func_idx += 1;
-        }
+        module
+            .functions
+            .retain(|id, _| !to_remove_ids.contains(&id));
 
-        // 5. Update references that use indices (Elements, Exports, Start)
-        for segment in &mut module.elements {
-            segment.func_indices.retain_mut(|idx| {
-                if let Some(&new_idx) = func_remap.get(idx) {
-                    *idx = new_idx;
-                    true
-                } else {
-                    false
-                }
-            });
-        }
-
-        module.exports.retain_mut(|export| {
-            if let crate::ir::module::ExportKind::Function(idx) = &mut export.kind {
-                if let Some(&new_idx) = func_remap.get(idx) {
-                    *idx = new_idx;
-                    true
-                } else {
-                    false
-                }
+        // Sync with legacy imports vector
+        module.imports.retain(|import| {
+            if let crate::ir::module::ImportKind::Function(..) = &import.kind {
+                !to_remove_names.contains(&(import.module.clone(), import.name.clone()))
             } else {
                 true
             }
         });
-
-        if let Some(start_idx) = module.start {
-            if let Some(&new_idx) = func_remap.get(&start_idx) {
-                module.start = Some(new_idx);
-            } else {
-                module.start = None;
-            }
-        }
     }
 }
 
 struct CallReplacer<'a, 'b> {
-    imported_functions: &'b HashSet<String>,
-    imported_sigs: &'b std::collections::HashMap<String, Type>,
+    to_replace: &'b HashSet<FuncId>,
+    imported_sigs: &'b HashMap<FuncId, Type>,
     bump: &'a bumpalo::Bump,
 }
 
@@ -130,11 +108,11 @@ impl<'a, 'b> Visitor<'a> for CallReplacer<'a, 'b> {
         self.visit_children(expr);
 
         if let ExpressionKind::Call { target, .. } = &expr.kind {
-            if self.imported_functions.contains(*target) {
+            if self.to_replace.contains(target) {
                 // Found a call to an imported function
                 let result_type = self
                     .imported_sigs
-                    .get(*target)
+                    .get(target)
                     .copied()
                     .unwrap_or(Type::NONE);
 
@@ -187,15 +165,17 @@ mod tests {
         let mut module = Module::new(&bump);
 
         // Add import
-        module.add_import(Import {
-            module: "env".to_string(),
-            name: "imported_func".to_string(),
-            kind: ImportKind::Function(Type::NONE, Type::NONE),
-        });
+        let imported_func_id = module.add_function(Function::new_import(
+            "imported_func".to_string(),
+            "env".to_string(),
+            "imported_func".to_string(),
+            Type::NONE,
+            Type::NONE,
+        ));
 
         // Add caller function
         let builder = IrBuilder::new(&bump);
-        let call = builder.call("imported_func", BumpVec::new_in(&bump), Type::NONE, false);
+        let call = builder.call(imported_func_id, BumpVec::new_in(&bump), Type::NONE, false);
 
         let func = Function::new(
             "caller".to_string(),
@@ -214,7 +194,8 @@ mod tests {
         assert!(module.imports.is_empty(), "Import should be removed");
 
         // Check if call is replaced by Nop
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         assert!(
             matches!(body.kind, ExpressionKind::Nop),
             "Call should be replaced by Nop"
@@ -232,15 +213,11 @@ mod tests {
             name: "imported_func_i32".to_string(),
             kind: ImportKind::Function(Type::NONE, Type::I32),
         });
+        let imported_func_id = module.functions.iter().last().unwrap().0;
 
         // Add caller function
         let builder = IrBuilder::new(&bump);
-        let call = builder.call(
-            "imported_func_i32",
-            BumpVec::new_in(&bump),
-            Type::I32,
-            false,
-        );
+        let call = builder.call(imported_func_id, BumpVec::new_in(&bump), Type::I32, false);
         let drop = builder.drop(call); // We drop it to form a valid block if needed, but here it's the body
 
         let func = Function::new(
@@ -260,7 +237,8 @@ mod tests {
         assert!(module.imports.is_empty(), "Import should be removed");
 
         // Check if call is replaced by Const
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         // Body is Drop(Call) -> Drop(Const)
         if let ExpressionKind::Drop { value } = &body.kind {
             assert!(
@@ -278,18 +256,29 @@ mod tests {
         let mut module = Module::new(&bump);
 
         // Add import
-        module.add_import(Import {
-            module: "env".to_string(),
-            name: "imported_func".to_string(),
-            kind: ImportKind::Function(Type::NONE, Type::NONE),
+        let f_id = module.add_function(Function::new_import(
+            "imported_func".to_string(),
+            "env".to_string(),
+            "imported_func".to_string(),
+            Type::NONE,
+            Type::NONE,
+        ));
+
+        let table_id = module.add_table(crate::ir::module::Table {
+            name: "table".to_string(),
+            limits: crate::ir::module::TableLimits {
+                element_type: Type::FUNCREF,
+                initial: 1,
+                maximum: None,
+            },
+            kind: crate::ir::module::TableKind::Local,
         });
 
         // Add to table
-        // Index 0 matches the first import
         module.add_element_segment(ElementSegment {
-            table_index: 0,
+            table_index: table_id,
             offset: Expression::const_expr(&bump, Literal::I32(0), Type::I32),
-            func_indices: vec![0],
+            func_indices: vec![f_id],
         });
 
         // Run pass
@@ -298,7 +287,11 @@ mod tests {
 
         // Check if import is preserved
         assert_eq!(
-            module.imports.len(),
+            module
+                .functions
+                .iter()
+                .filter(|(_, f)| f.is_import())
+                .count(),
             1,
             "Import should be preserved because it is in table"
         );

@@ -19,17 +19,14 @@ impl Pass for Flatten {
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         let allocator = module.allocator;
-        // We must iterate using indices or collect to avoid borrow checker issues
-        // because we pass &mut Function to Flattener which might want to access module later (though it doesn't now)
-        // Actually, we can just iterate over functions.
-        for i in 0..module.functions.len() {
-            let func = &mut module.functions[i];
-            if let Some(mut body) = func.body {
+
+        for (_, func) in &mut module.functions {
+            if let Some(mut body) = func.body() {
                 // If the body is a block with a result, turn that into a return
                 if body.type_.is_concrete() {
                     let builder = IrBuilder::new(allocator);
                     body = builder.return_(Some(body));
-                    func.body = Some(body);
+                    *func.body_mut() = Some(body);
                 }
 
                 let mut flattener = Flattener {
@@ -43,7 +40,7 @@ impl Pass for Flatten {
 
                 // The body itself may have preludes
                 let final_body = flattener.get_preludes_with_expression(body, body);
-                module.functions[i].body = Some(final_body);
+                *func.body_mut() = Some(final_body);
             }
         }
     }
@@ -444,7 +441,9 @@ mod tests {
         pass.run(&mut module);
 
         // Should remain unchanged
-        assert!(module.functions[0].body.is_some());
+        assert!(module.functions[module.functions.iter().next().unwrap().0]
+            .body()
+            .is_some());
     }
 
     #[test]
@@ -476,7 +475,9 @@ mod tests {
         let mut pass = Flatten;
         pass.run(&mut module);
 
-        let body = module.functions[0].body.unwrap();
+        let body = module.functions[module.functions.iter().next().unwrap().0]
+            .body()
+            .unwrap();
 
         // The body should now be a block containing the flattened logic
         // It should start with (local.set 0 (i32.const 42))

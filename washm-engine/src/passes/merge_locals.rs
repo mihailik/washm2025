@@ -17,8 +17,8 @@ impl Pass for MergeLocals {
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         let stats = ModuleStats::collect(module);
 
-        for func in &mut module.functions {
-            if func.vars.is_empty() {
+        for (_, func) in &mut module.functions {
+            if func.vars().is_empty() {
                 continue;
             }
 
@@ -35,7 +35,7 @@ impl Pass for MergeLocals {
             let mut new_vars = Vec::new();
             let mut remap = HashMap::new();
 
-            for (i, &ty) in func.vars.iter().enumerate() {
+            for (i, &ty) in func.vars().iter().enumerate() {
                 let old_idx = (num_params + i) as u32;
                 let used = local_usage
                     .map(|u| u.get(&old_idx).copied().unwrap_or(0) > 0)
@@ -48,9 +48,9 @@ impl Pass for MergeLocals {
                 }
             }
 
-            if new_vars.len() < func.vars.len() {
-                func.vars = new_vars;
-                if let Some(mut body) = func.body {
+            if new_vars.len() < func.vars().len() {
+                *func.vars_mut() = new_vars;
+                if let Some(mut body) = func.body() {
                     let mut updater = LocalRemapper { remap: &remap };
                     updater.visit(&mut body);
                 }
@@ -96,6 +96,8 @@ mod tests {
         module.add_function(func);
         let mut pass = MergeLocals;
         pass.run(&mut module);
-        assert!(module.functions[0].body.is_some());
+        assert!(module.functions[module.functions.iter().next().unwrap().0]
+            .body()
+            .is_some());
     }
 }

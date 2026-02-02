@@ -20,8 +20,8 @@ impl Pass for Simplify {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 self.visit(body);
             }
         }
@@ -163,9 +163,7 @@ fn are_expressions_equal<'a>(left: &Expression<'a>, right: &Expression<'a>) -> b
         (ExpressionKind::LocalGet { index: i1 }, ExpressionKind::LocalGet { index: i2 }) => {
             i1 == i2
         }
-        (ExpressionKind::GlobalGet { id: i1 }, ExpressionKind::GlobalGet { id: i2 }) => {
-            i1 == i2
-        }
+        (ExpressionKind::GlobalGet { id: i1 }, ExpressionKind::GlobalGet { id: i2 }) => i1 == i2,
         (ExpressionKind::Const(l1), ExpressionKind::Const(l2)) => l1 == l2,
         _ => false, // Conservative: assume not equal for complex expressions
     }
@@ -215,12 +213,13 @@ mod tests {
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = Simplify;
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
 
         // Body should now be Const(0)
         match body.kind {
@@ -262,12 +261,13 @@ mod tests {
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = Simplify;
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
 
         match body.kind {
             ExpressionKind::Const(Literal::I32(0)) => {} // OK
@@ -319,12 +319,13 @@ mod tests {
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = Simplify;
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
 
         match body.kind {
             ExpressionKind::Const(Literal::I32(42)) => {} // OK
@@ -376,12 +377,13 @@ mod tests {
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = Simplify;
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
 
         match body.kind {
             ExpressionKind::Const(Literal::I32(99)) => {} // OK
@@ -433,12 +435,13 @@ mod tests {
 
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = Simplify;
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
 
         match body.kind {
             ExpressionKind::Const(Literal::I32(42)) => {} // OK

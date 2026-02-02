@@ -28,8 +28,8 @@ impl Pass for GUFA {
         // 3. Mark unreachable functions for removal
         // A function is unreachable if it's not reachable from any export or start function.
         let mut to_remove = HashSet::new();
-        for (i, func) in module.functions.iter().enumerate() {
-            if !analysis.reachable_functions.contains(&i) {
+        for (id, func) in &module.functions {
+            if !analysis.reachable_functions.contains(&id) {
                 // Don't remove if it's exported (GlobalAnalysis should already include exports as roots)
                 to_remove.insert(func.name.clone());
             }

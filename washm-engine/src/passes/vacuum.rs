@@ -1,6 +1,7 @@
 use crate::analysis::effects::EffectAnalyzer;
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::Module;
+use crate::ir::FuncId;
 use crate::ir::{Literal, Type};
 use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
@@ -17,10 +18,10 @@ impl Pass for Vacuum {
         let mut optimizer = VacuumOptimizer {
             bump: module.allocator,
         };
-        for func in &mut module.functions {
-            if let Some(mut body) = func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(mut body) = func.body() {
                 optimizer.process(&mut body);
-                func.body = Some(body);
+                *func.body_mut() = Some(body);
             }
         }
     }
@@ -176,7 +177,7 @@ impl<'a> VacuumOptimizer<'a> {
             | ExpressionKind::LocalTee { value, .. }
             | ExpressionKind::GlobalSet { value, .. }
             | ExpressionKind::Load { ptr: value, .. }
-            | ExpressionKind::MemoryGrow { delta: value } => {
+            | ExpressionKind::MemoryGrow { delta: value, .. } => {
                 self.process(value);
             }
             ExpressionKind::Binary { left, right, .. }
@@ -214,6 +215,7 @@ mod tests {
     use super::*;
     use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
     use crate::ir::module::Function;
+    use crate::ir::FuncId;
     use crate::ir::{Literal, Type};
     use bumpalo::collections::Vec as BumpVec;
     use bumpalo::Bump;
@@ -245,7 +247,7 @@ mod tests {
         }));
 
         let mut module = Module::new(&bump);
-        module.add_function(Function::new(
+        let func_id = module.add_function(Function::new(
             "t".into(),
             Type::NONE,
             Type::I32,
@@ -256,7 +258,8 @@ mod tests {
         let mut pass = Vacuum;
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[func_id].body();
+        let body = binding.as_ref().unwrap();
         assert!(matches!(body.kind, ExpressionKind::Const(_)));
     }
 }

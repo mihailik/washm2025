@@ -97,7 +97,7 @@ pub trait Visitor<'a> {
                     self.visit(operand);
                 }
             }
-            ExpressionKind::MemoryGrow { delta } => {
+            ExpressionKind::MemoryGrow { delta, .. } => {
                 self.visit(delta);
             }
             ExpressionKind::AtomicRMW { ptr, value, .. } => {
@@ -276,7 +276,7 @@ pub trait Visitor<'a> {
             | ExpressionKind::Nop
             | ExpressionKind::LocalGet { .. }
             | ExpressionKind::GlobalGet { .. }
-            | ExpressionKind::MemorySize
+            | ExpressionKind::MemorySize { .. }
             | ExpressionKind::AtomicFence
             | ExpressionKind::DataDrop { .. }
             | ExpressionKind::TableSize { .. }
@@ -393,7 +393,7 @@ pub trait ReadOnlyVisitor<'a> {
                     self.visit(*operand);
                 }
             }
-            ExpressionKind::MemoryGrow { delta } => {
+            ExpressionKind::MemoryGrow { delta, .. } => {
                 self.visit(*delta);
             }
             ExpressionKind::AtomicRMW { ptr, value, .. } => {
@@ -572,7 +572,7 @@ pub trait ReadOnlyVisitor<'a> {
             | ExpressionKind::Nop
             | ExpressionKind::LocalGet { .. }
             | ExpressionKind::GlobalGet { .. }
-            | ExpressionKind::MemorySize
+            | ExpressionKind::MemorySize { .. }
             | ExpressionKind::AtomicFence
             | ExpressionKind::DataDrop { .. }
             | ExpressionKind::TableSize { .. }

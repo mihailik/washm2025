@@ -1,5 +1,6 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::Module;
+use crate::ir::FuncId;
 use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
 
@@ -11,8 +12,8 @@ impl Pass for PostEmscripten {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for func in &mut module.functions {
-            if let Some(mut body) = func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(mut body) = func.body() {
                 optimize(&mut body);
             }
         }
@@ -85,6 +86,7 @@ mod tests {
     use super::*;
     use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
     use crate::ir::module::Function;
+    use crate::ir::FuncId;
     use crate::ir::Type;
     use bumpalo::collections::Vec as BumpVec;
     use bumpalo::Bump;
@@ -114,6 +116,6 @@ mod tests {
         let mut pass = PostEmscripten;
         pass.run(&mut module);
 
-        assert!(module.get_function("test_func").is_some());
+        assert!(module.get_function(FuncId::from_raw_parts(0, 0)).is_some());
     }
 }

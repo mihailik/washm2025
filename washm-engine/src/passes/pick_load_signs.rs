@@ -18,8 +18,8 @@ impl Pass for PickLoadSigns {
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         let allocator = module.allocator;
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 let mut picker = LoadSignPicker {
                     builder: IrBuilder::new(allocator),
                 };
@@ -81,21 +81,30 @@ mod tests {
     fn test_pick_load_signs_optimization() {
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
+        let mut module = Module::new(&bump);
+
+        let mem_id = module.add_memory(crate::ir::module::Memory {
+            name: "mem".to_string(),
+            limits: crate::ir::module::MemoryLimits {
+                initial: 1,
+                maximum: None,
+            },
+            kind: crate::ir::module::MemoryKind::Local,
+        });
 
         // (i32.load8_s (i32.const 0)) & 0xFF
         let ptr = builder.const_(Literal::I32(0));
-        let load = builder.load(1, true, 0, 1, ptr, Type::I32);
+        let load = builder.load(mem_id, 1, true, 0, 1, ptr, Type::I32);
         let mask = builder.const_(Literal::I32(0xFF));
         let and = builder.binary(BinaryOp::AndInt32, load, mask, Type::I32);
 
         let func = Function::new("test".to_string(), Type::NONE, Type::I32, vec![], Some(and));
-        let mut module = Module::new(&bump);
-        module.add_function(func);
+        let test_id = module.add_function(func);
 
         let mut pass = PickLoadSigns;
         pass.run(&mut module);
 
-        let body = module.functions[0].body.unwrap();
+        let body = module.functions[test_id].body().unwrap();
 
         // Should be just Load8U
         match body.kind {

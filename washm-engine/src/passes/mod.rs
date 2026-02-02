@@ -771,7 +771,7 @@ mod tests {
         }
 
         fn run<'a>(&mut self, module: &mut Module<'a>) {
-            for func in &mut module.functions {
+            for (_, func) in &mut module.functions {
                 func.name.push_str("_visited");
             }
         }
@@ -793,7 +793,10 @@ mod tests {
         runner.add(MockPass);
         runner.run(&mut module);
 
-        assert_eq!(module.functions[0].name, "test_visited");
+        assert_eq!(
+            module.functions[module.functions.iter().next().unwrap().0].name,
+            "test_visited"
+        );
     }
 
     #[test]
@@ -809,7 +812,8 @@ mod tests {
             }
             fn run<'a>(&mut self, module: &mut Module<'a>) {
                 // Break module validity: Change function return type but not body
-                if let Some(func) = module.functions.get_mut(0) {
+                let first_id = module.functions.iter().next().unwrap().0;
+                if let Some(func) = module.functions.get_mut(first_id) {
                     func.results = Type::F32;
                 }
             }

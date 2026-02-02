@@ -17,14 +17,14 @@ impl Pass for LICM {
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         let allocator = module.allocator();
-        for func in &mut module.functions {
-            if let Some(mut body) = func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(mut body) = func.body() {
                 let mut hoister = LoopInvariantHoister {
                     allocator,
-                    vars: &mut func.vars,
+                    vars: func.vars_mut(),
                 };
                 hoister.visit(&mut body);
-                func.body = Some(body);
+                *func.body_mut() = Some(body);
             }
         }
     }
@@ -196,7 +196,9 @@ mod tests {
         module.add_function(func);
         let mut pass = LICM;
         pass.run(&mut module);
-        assert!(module.functions[0].body.is_some());
+        assert!(module.functions[module.functions.iter().next().unwrap().0]
+            .body()
+            .is_some());
     }
 
     #[test]
@@ -230,7 +232,9 @@ mod tests {
         pass.run(&mut module);
 
         // After LICM, the body should be a block [hoist, loop]
-        let body = module.functions[0].body.unwrap();
+        let body = module.functions[module.functions.iter().next().unwrap().0]
+            .body()
+            .unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 2, "Should have hoisted one expression");
             // list[0] should be a local.set for the hoisted 'add'

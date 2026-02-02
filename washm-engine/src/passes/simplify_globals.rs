@@ -1,6 +1,7 @@
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
 use crate::ir::module::{ExportKind, Module};
 use crate::ir::visitor::Visitor;
+use crate::ir::FuncId;
 use crate::ir::Literal;
 use crate::passes::Pass;
 use std::collections::{HashMap, HashSet};
@@ -64,10 +65,10 @@ impl SimplifyGlobals {
             changed: false,
             allocator: module.allocator,
         };
-        for func in &mut module.functions {
-            if let Some(mut body) = func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(mut body) = func.body() {
                 folder.visit(&mut body);
-                func.body = Some(body);
+                *func.body_mut() = Some(body);
             }
         }
         folder.changed
@@ -97,15 +98,19 @@ impl SimplifyGlobals {
         (progress, to_remove_sets)
     }
 
-    fn apply_set_removal<'a>(&self, module: &mut Module<'a>, to_remove: HashSet<crate::ir::GlobalId>) {
+    fn apply_set_removal<'a>(
+        &self,
+        module: &mut Module<'a>,
+        to_remove: HashSet<crate::ir::GlobalId>,
+    ) {
         let mut remover = GlobalSetRemover {
             to_remove,
             builder: IrBuilder::new(module.allocator),
         };
-        for func in &mut module.functions {
-            if let Some(mut body) = func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(mut body) = func.body() {
                 remover.visit(&mut body);
-                func.body = Some(body);
+                *func.body_mut() = Some(body);
             }
         }
     }
@@ -167,8 +172,8 @@ impl SimplifyGlobals {
         {
             let globals = &module.globals;
             let allocator = module.allocator;
-            for func in &mut module.functions {
-                if let Some(mut body) = func.body {
+            for (_, func) in &mut module.functions {
+                if let Some(mut body) = func.body() {
                     let mut applier = ConstantCodeApplier {
                         globals,
                         constant_globals: &constant_globals,
@@ -177,7 +182,7 @@ impl SimplifyGlobals {
                         replaced: false,
                     };
                     applier.visit(&mut body);
-                    func.body = Some(body);
+                    *func.body_mut() = Some(body);
                     if applier.replaced {
                         changed = true;
                     }
@@ -233,8 +238,8 @@ impl<'a> GlobalUsageTracker<'a> {
     }
 
     fn track(&mut self) {
-        for func in &self.module.functions {
-            if let Some(body) = func.body {
+        for (_, func) in &self.module.functions {
+            if let Some(body) = func.body() {
                 self.visit_usage(body);
             }
         }
@@ -283,7 +288,11 @@ impl<'a> GlobalUsageTracker<'a> {
         }
     }
 
-    fn is_read_only_to_write(&self, condition: ExprRef<'a>, code: ExprRef<'a>) -> Option<crate::ir::GlobalId> {
+    fn is_read_only_to_write(
+        &self,
+        condition: ExprRef<'a>,
+        code: ExprRef<'a>,
+    ) -> Option<crate::ir::GlobalId> {
         if let ExpressionKind::GlobalSet { id, value } = &code.kind {
             if let ExpressionKind::Const(_) = &value.kind {
                 if self.expression_reads_global(condition, *id) {
@@ -311,7 +320,10 @@ impl<'a> GlobalUsageTracker<'a> {
 }
 
 struct SingleUseFolder<'a, 'b, 'c> {
-    globals: &'b crate::collections::id_arena::IdArena<crate::ir::module::Global<'a>>,
+    globals: &'b crate::collections::id_arena::IdArena<
+        crate::ir::module::GlobalMarker,
+        crate::ir::module::Global<'a>,
+    >,
     infos: &'c HashMap<crate::ir::GlobalId, GlobalInfo>,
     changed: bool,
     allocator: &'a bumpalo::Bump,
@@ -372,7 +384,10 @@ impl<'a, 'b> Visitor<'a> for GlobalConstantApplier<'a, 'b> {
 }
 
 struct ConstantCodeApplier<'a, 'b, 'c> {
-    globals: &'b crate::collections::id_arena::IdArena<crate::ir::module::Global<'a>>,
+    globals: &'b crate::collections::id_arena::IdArena<
+        crate::ir::module::GlobalMarker,
+        crate::ir::module::Global<'a>,
+    >,
     constant_globals: &'c HashSet<crate::ir::GlobalId>,
     curr_constants: HashMap<crate::ir::GlobalId, Literal>,
     builder: IrBuilder<'a>,
@@ -434,6 +449,7 @@ impl<'a, 'b, 'c> Visitor<'a> for ConstantCodeApplier<'a, 'b, 'c> {
 mod tests {
     use super::*;
     use crate::ir::module::{Function, Global, Module};
+    use crate::ir::FuncId;
     use crate::ir::{Literal, Type};
     use bumpalo::Bump;
 
@@ -462,7 +478,9 @@ mod tests {
             Some(body),
         ));
         SimplifyGlobals::default().run(&mut module);
-        let body = module.functions[0].body.unwrap();
+        let body = module.functions[FuncId::from_raw_parts(0, 0)]
+            .body()
+            .unwrap();
         if let ExpressionKind::Const(Literal::I32(42)) = &body.kind {
             return;
         }
@@ -498,7 +516,9 @@ mod tests {
             Some(block),
         ));
         SimplifyGlobals::default().run(&mut module);
-        let body = module.functions[0].body.unwrap();
+        let body = module.functions[FuncId::from_raw_parts(0, 0)]
+            .body()
+            .unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             if let ExpressionKind::Return { value: Some(val) } = &list[1].kind {
                 if let ExpressionKind::Const(Literal::I32(100)) = &val.kind {
@@ -546,7 +566,9 @@ mod tests {
         // It should be removed because it's "read-only-to-write" (logic from C++ SimplifyGlobals).
         SimplifyGlobals::default().run(&mut module);
 
-        let body = module.functions[0].body.unwrap();
+        let body = module.functions[FuncId::from_raw_parts(0, 0)]
+            .body()
+            .unwrap();
         // The GlobalSet should be replaced by a Drop(1) or similar if removed.
         if let ExpressionKind::If { if_true, .. } = &body.kind {
             if let ExpressionKind::Drop { value } = &if_true.kind {

@@ -13,11 +13,11 @@ impl Pass for RemoveUnusedNames {
 
     fn run(&mut self, module: &mut Module) {
         let mut optimizer = NameOptimizer;
-        for func in &mut module.functions {
-            if let Some(mut body) = func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(mut body) = func.body() {
                 let mut used_names = HashSet::new();
                 optimizer.process(&mut body, &mut used_names);
-                func.body = Some(body);
+                *func.body_mut() = Some(body);
             }
         }
     }
@@ -101,7 +101,7 @@ impl NameOptimizer {
             | ExpressionKind::Unary { value, .. }
             | ExpressionKind::Drop { value }
             | ExpressionKind::Load { ptr: value, .. }
-            | ExpressionKind::MemoryGrow { delta: value } => {
+            | ExpressionKind::MemoryGrow { delta: value, .. } => {
                 self.process(value, used_names);
             }
             ExpressionKind::Binary { left, right, .. }
@@ -187,7 +187,8 @@ mod tests {
         let mut pass = RemoveUnusedNames;
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { name, .. } = &body.kind {
             assert!(name.is_none());
         } else {
@@ -229,7 +230,8 @@ mod tests {
         let mut pass = RemoveUnusedNames;
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { name, .. } = &body.kind {
             assert_eq!(name.unwrap(), "used");
         } else {

@@ -12,8 +12,8 @@ impl Pass for DCE {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 self.visit(body);
             }
         }
@@ -103,7 +103,8 @@ mod tests {
         let mut pass = DCE;
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 2, "Expected 2 instructions after DCE");
             assert_eq!(list[0].type_, Type::I32);

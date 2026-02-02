@@ -300,7 +300,7 @@ impl<'a> CFGBuilder<'a> {
                     self.visit(*ptr);
                     self.visit(*value);
                 }
-                ExpressionKind::MemoryGrow { delta } => self.visit(*delta),
+                ExpressionKind::MemoryGrow { delta, .. } => self.visit(*delta),
                 ExpressionKind::AtomicRMW { ptr, value, .. } => {
                     self.visit(*ptr);
                     self.visit(*value);
@@ -325,7 +325,7 @@ impl<'a> CFGBuilder<'a> {
                     self.visit(*expected);
                     self.visit(*timeout);
                 }
-                ExpressionKind::AtomicNotify { ptr, count } => {
+                ExpressionKind::AtomicNotify { ptr, count, .. } => {
                     self.visit(*ptr);
                     self.visit(*count);
                 }

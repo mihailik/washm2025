@@ -13,8 +13,22 @@ pub struct FuncMarker;
 pub type FuncId = Id<FuncMarker>;
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct TableMarker;
+pub type TableId = Id<TableMarker>;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct MemoryMarker;
+pub type MemoryId = Id<MemoryMarker>;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct LocalMarker;
 pub type LocalId = Id<LocalMarker>;
+
+#[derive(Debug, Clone)]
+pub struct FunctionImport {
+    pub module: String,
+    pub name: String,
+}
 
 #[derive(Debug)]
 pub struct Function<'a> {
@@ -25,6 +39,7 @@ pub struct Function<'a> {
     pub vars: Vec<Type>,
     pub body: Option<ExprRef<'a>>,
     pub local_names: Vec<String>,
+    pub import: Option<FunctionImport>,
 }
 
 impl<'a> Function<'a> {
@@ -35,15 +50,16 @@ impl<'a> Function<'a> {
         vars: Vec<Type>,
         body: Option<ExprRef<'a>>,
     ) -> Self {
-        let total_locals = params.tuple_len() + vars.len();
+        let local_names = vec![String::new(); params.tuple_len() + vars.len()];
         Self {
             name,
-            type_idx: None,
             params,
             results,
             vars,
             body,
-            local_names: vec![String::new(); total_locals],
+            type_idx: None,
+            local_names,
+            import: None,
         }
     }
 
@@ -55,20 +71,78 @@ impl<'a> Function<'a> {
         vars: Vec<Type>,
         body: Option<ExprRef<'a>>,
     ) -> Self {
-        let total_locals = params.tuple_len() + vars.len();
+        let local_names = vec![String::new(); params.tuple_len() + vars.len()];
         Self {
             name,
-            type_idx: Some(type_idx),
             params,
             results,
             vars,
             body,
-            local_names: vec![String::new(); total_locals],
+            type_idx: Some(type_idx),
+            local_names,
+            import: None,
         }
     }
 
+    pub fn new_import(
+        name: String,
+        module: String,
+        field: String,
+        params: Type,
+        results: Type,
+    ) -> Self {
+        Self {
+            name,
+            params,
+            results,
+            vars: Vec::new(),
+            body: None,
+            type_idx: None,
+            local_names: Vec::new(),
+            import: Some(FunctionImport {
+                module,
+                name: field,
+            }),
+        }
+    }
+
+    pub fn body(&self) -> Option<ExprRef<'a>> {
+        self.body
+    }
+
+    pub fn body_mut(&mut self) -> &mut Option<ExprRef<'a>> {
+        &mut self.body
+    }
+
+    pub fn vars(&self) -> &[Type] {
+        &self.vars
+    }
+
+    pub fn vars_mut(&mut self) -> &mut Vec<Type> {
+        &mut self.vars
+    }
+
+    pub fn local_names(&self) -> &[String] {
+        &self.local_names
+    }
+
+    pub fn local_names_mut(&mut self) -> &mut Vec<String> {
+        &mut self.local_names
+    }
+
+    pub fn is_import(&self) -> bool {
+        self.import.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn new_for_test(mut f: Function<'a>) -> Self {
+        f.import = None;
+        f
+    }
+
     pub fn add_var(&mut self, type_: Type) -> u32 {
-        let index = (self.params.tuple_len() + self.vars.len()) as u32;
+        let params_len = self.params.tuple_len();
+        let index = (params_len + self.vars.len()) as u32;
         self.vars.push(type_);
         self.local_names.push(String::new());
         index
@@ -88,6 +162,39 @@ impl<'a> Function<'a> {
 pub struct MemoryLimits {
     pub initial: u32,         // Initial size in 64KB pages
     pub maximum: Option<u32>, // Optional maximum size
+}
+
+#[derive(Debug)]
+pub struct Memory {
+    pub name: String,
+    pub limits: MemoryLimits,
+    pub kind: MemoryKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum MemoryKind {
+    Local,
+    Import { module: String, field: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableLimits {
+    pub element_type: Type,   // Element type (funcref in MVP)
+    pub initial: u32,         // Initial size
+    pub maximum: Option<u32>, // Optional maximum size
+}
+
+#[derive(Debug)]
+pub struct Table {
+    pub name: String,
+    pub limits: TableLimits,
+    pub kind: TableKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum TableKind {
+    Import { module: String, field: String },
+    Local,
 }
 
 #[derive(Debug)]
@@ -126,17 +233,11 @@ impl<'a> GlobalKind<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub struct Export {
-    pub name: String,
-    pub kind: ExportKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExportKind {
-    Function(u32),
-    Table(u32),
-    Memory(u32),
-    Global(GlobalId),
+pub enum ImportKind {
+    Function(Type, Type),
+    Table(TableLimits),
+    Memory(MemoryLimits),
+    Global(Type, bool),
 }
 
 #[derive(Debug, Clone)]
@@ -146,38 +247,38 @@ pub struct Import {
     pub kind: ImportKind,
 }
 
+#[derive(Debug, Clone)]
+pub struct Export {
+    pub name: String,
+    pub kind: ExportKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportKind {
+    Function(FuncId),
+    Table(TableId),
+    Memory(MemoryId),
+    Global(GlobalId),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FuncType {
     pub params: Type,  // Parameter types
     pub results: Type, // Result types
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum ImportKind {
-    Function(Type, Type),          // params, results
-    Table(Type, u32, Option<u32>), // elem_type, min, max
-    Memory(MemoryLimits),
-}
-
 #[derive(Debug)]
 pub struct DataSegment<'a> {
-    pub memory_index: u32,   // Memory index (usually 0 in MVP)
+    pub memory_index: MemoryId,
     pub offset: ExprRef<'a>, // Offset expression (where in memory)
     pub data: Vec<u8>,       // The actual data bytes
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct TableLimits {
-    pub element_type: Type,   // Element type (funcref in MVP)
-    pub initial: u32,         // Initial size
-    pub maximum: Option<u32>, // Optional maximum size
-}
-
 #[derive(Debug)]
 pub struct ElementSegment<'a> {
-    pub table_index: u32,       // Table index (usually 0 in MVP)
-    pub offset: ExprRef<'a>,    // Offset expression (where in table)
-    pub func_indices: Vec<u32>, // Function indices to initialize
+    pub table_index: TableId,
+    pub offset: ExprRef<'a>,       // Offset expression (where in table)
+    pub func_indices: Vec<FuncId>, // Function indices to initialize
 }
 
 #[derive(Debug)]
@@ -185,12 +286,12 @@ pub struct Module<'a> {
     pub allocator: &'a bumpalo::Bump,
     pub features: FeatureSet,
     pub types: Vec<FuncType>, // Type section
+    pub functions: IdArena<FuncMarker, Function<'a>>,
+    pub tables: IdArena<TableMarker, Table>,
+    pub memories: IdArena<MemoryMarker, Memory>,
+    pub globals: IdArena<GlobalMarker, Global<'a>>,
     pub imports: Vec<Import>,
-    pub functions: Vec<Function<'a>>,
-    pub table: Option<TableLimits>, // Table section (MVP: single table)
-    pub globals: IdArena<Global<'a>>,
-    pub memory: Option<MemoryLimits>,
-    pub start: Option<u32>, // Start function index
+    pub start: Option<FuncId>, // Start function index
     pub exports: Vec<Export>,
     pub elements: Vec<ElementSegment<'a>>, // Element section
     pub data: Vec<DataSegment<'a>>,
@@ -204,11 +305,11 @@ impl<'a> Module<'a> {
             allocator,
             features: FeatureSet::DEFAULT,
             types: Vec::new(),
-            imports: Vec::new(),
-            functions: Vec::new(),
-            table: None,
+            functions: IdArena::new(),
+            tables: IdArena::new(),
+            memories: IdArena::new(),
             globals: IdArena::new(),
-            memory: None,
+            imports: Vec::new(),
             start: None,
             exports: Vec::new(),
             elements: Vec::new(),
@@ -222,32 +323,128 @@ impl<'a> Module<'a> {
         self.allocator
     }
 
-    pub fn add_import(&mut self, import: Import) {
+    pub fn add_function(&mut self, func: Function<'a>) -> FuncId {
+        self.functions.alloc(func).cast()
+    }
+
+    pub fn get_function(&self, id: FuncId) -> Option<&Function<'a>> {
+        self.functions.get(id.cast())
+    }
+
+    pub fn get_function_mut(&mut self, id: FuncId) -> Option<&mut Function<'a>> {
+        self.functions.get_mut(id.cast())
+    }
+
+    pub fn get_function_by_name(&self, name: &str) -> Option<(FuncId, &Function<'a>)> {
+        self.functions
+            .iter()
+            .find(|(_, f)| f.name == name)
+            .map(|(id, f)| (id.cast(), f))
+    }
+
+    pub fn add_table(&mut self, table: Table) -> TableId {
+        self.tables.alloc(table).cast()
+    }
+
+    pub fn set_table(&mut self, initial: u32, maximum: Option<u32>) {
+        self.tables.alloc(Table {
+            name: String::new(),
+            limits: TableLimits {
+                element_type: Type::FUNCREF,
+                initial,
+                maximum,
+            },
+            kind: TableKind::Local,
+        });
+    }
+
+    pub fn get_table(&self, id: TableId) -> Option<&Table> {
+        self.tables.get(id.cast())
+    }
+
+    pub fn add_memory(&mut self, memory: Memory) -> MemoryId {
+        self.memories.alloc(memory).cast()
+    }
+
+    pub fn get_memory(&self, id: MemoryId) -> Option<&Memory> {
+        self.memories.get(id.cast())
+    }
+
+    pub fn set_memory(&mut self, pages: u32, max: Option<u32>) {
+        self.memories.alloc(Memory {
+            name: String::new(),
+            limits: MemoryLimits {
+                initial: pages,
+                maximum: max,
+            },
+            kind: MemoryKind::Local,
+        });
+    }
+
+    pub fn add_import(&mut self, import: Import) -> u32 {
+        let id = self.imports.len() as u32;
+
+        match &import.kind {
+            ImportKind::Function(params, results) => {
+                let func_id = self.functions.push(Function {
+                    name: import.name.clone(),
+                    params: *params,
+                    results: *results,
+                    vars: Vec::new(),
+                    body: None,
+                    type_idx: None,
+                    local_names: Vec::new(),
+                    import: Some(FunctionImport {
+                        module: import.module.clone(),
+                        name: import.name.clone(),
+                    }),
+                });
+                // We return the func_id cast to u32 for now if needed,
+                // but usually we want to return the import index.
+            }
+            ImportKind::Table(limits) => {
+                self.tables.alloc(crate::ir::module::Table {
+                    name: import.name.clone(),
+                    limits: limits.clone(),
+                    kind: crate::ir::module::TableKind::Import {
+                        module: import.module.clone(),
+                        field: import.name.clone(),
+                    },
+                });
+            }
+            ImportKind::Memory(limits) => {
+                self.memories.alloc(crate::ir::module::Memory {
+                    name: import.name.clone(),
+                    limits: limits.clone(),
+                    kind: crate::ir::module::MemoryKind::Import {
+                        module: import.module.clone(),
+                        field: import.name.clone(),
+                    },
+                });
+            }
+            ImportKind::Global(type_, mutable) => {
+                self.globals.alloc(crate::ir::module::Global {
+                    name: import.name.clone(),
+                    type_: *type_,
+                    mutable: *mutable,
+                    kind: crate::ir::module::GlobalKind::Import {
+                        module: import.module.clone(),
+                        field: import.name.clone(),
+                    },
+                });
+            }
+        }
+
         self.imports.push(import);
-    }
-
-    pub fn add_function(&mut self, func: Function<'a>) {
-        self.functions.push(func);
-    }
-
-    pub fn get_function(&self, name: &str) -> Option<&Function<'a>> {
-        self.functions.iter().find(|f| f.name == name)
-    }
-
-    pub fn get_function_mut(&mut self, name: &str) -> Option<&mut Function<'a>> {
-        self.functions.iter_mut().find(|f| f.name == name)
-    }
-
-    pub fn set_memory(&mut self, initial: u32, maximum: Option<u32>) {
-        self.memory = Some(MemoryLimits { initial, maximum });
+        id
     }
 
     pub fn add_export(&mut self, name: String, kind: ExportKind) {
         self.exports.push(Export { name, kind });
     }
 
-    pub fn export_function(&mut self, func_index: u32, export_name: String) {
-        self.add_export(export_name, ExportKind::Function(func_index));
+    pub fn export_function(&mut self, id: FuncId, export_name: String) {
+        self.add_export(export_name, ExportKind::Function(id));
     }
 
     pub fn add_global(&mut self, global: Global<'a>) -> GlobalId {
@@ -259,7 +456,10 @@ impl<'a> Module<'a> {
     }
 
     pub fn get_global_by_name(&self, name: &str) -> Option<(GlobalId, &Global<'a>)> {
-        self.globals.iter().find(|(_, g)| g.name == name).map(|(id, g)| (id.cast(), g))
+        self.globals
+            .iter()
+            .find(|(_, g)| g.name == name)
+            .map(|(id, g)| (id.cast(), g))
     }
 
     pub fn export_global(&mut self, id: GlobalId, export_name: String) {
@@ -270,16 +470,8 @@ impl<'a> Module<'a> {
         self.data.push(segment);
     }
 
-    pub fn set_start(&mut self, func_index: u32) {
-        self.start = Some(func_index);
-    }
-
-    pub fn set_table(&mut self, element_type: Type, initial: u32, maximum: Option<u32>) {
-        self.table = Some(TableLimits {
-            element_type,
-            initial,
-            maximum,
-        });
+    pub fn set_start(&mut self, id: FuncId) {
+        self.start = Some(id);
     }
 
     pub fn add_element_segment(&mut self, segment: ElementSegment<'a>) {

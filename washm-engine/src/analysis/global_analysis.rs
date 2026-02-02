@@ -1,10 +1,8 @@
 use crate::analysis::call_graph::CallGraph;
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::Module;
-use crate::ir::{Literal, GlobalId};
+use crate::ir::{FuncId, GlobalId, Literal};
 use std::collections::{HashMap, HashSet};
-
-pub type FunctionId = usize;
 
 pub struct GlobalAnalysis {
     /// Globals that are immutable (imported or constant) or effectively constant (written once at init)
@@ -29,7 +27,7 @@ pub struct GlobalAnalysis {
     pub non_init_written: HashSet<GlobalId>,
 
     /// Which functions are reachable from exports
-    pub reachable_functions: HashSet<FunctionId>,
+    pub reachable_functions: HashSet<FuncId>,
 }
 
 impl GlobalAnalysis {
@@ -57,8 +55,8 @@ impl GlobalAnalysis {
     }
 
     fn analyze_usage(&mut self, module: &Module) {
-        for func in &module.functions {
-            if let Some(body) = func.body {
+        for (_, func) in &module.functions {
+            if let Some(body) = func.body() {
                 self.visit_usage(module, body);
             }
         }
@@ -236,39 +234,43 @@ impl GlobalAnalysis {
     }
 
     fn analyze_reachability(&mut self, module: &Module, call_graph: &CallGraph) {
-        // Map function name to index
-        let mut name_to_index: HashMap<&str, usize> = HashMap::new();
-        for (i, func) in module.functions.iter().enumerate() {
-            name_to_index.insert(&func.name, i);
-        }
-
         // Roots: exports, start function, table elements?
         let mut roots = HashSet::new();
 
         // 1. Exports
         for export in &module.exports {
             if let crate::ir::module::ExportKind::Function(idx) = export.kind {
-                roots.insert(idx as usize);
+                roots.insert(idx);
+            }
+        }
+
+        // 2. Start
+        if let Some(start) = module.start {
+            roots.insert(start);
+        }
+
+        // 3. Elements
+        for segment in module.elements.iter() {
+            for &func_id in &segment.func_indices {
+                roots.insert(func_id);
             }
         }
 
         // Compute reachability
         let mut visited = HashSet::new();
-        let mut worklist: Vec<usize> = roots.into_iter().collect();
+        let mut worklist: Vec<FuncId> = roots.into_iter().collect();
 
         while let Some(func_id) = worklist.pop() {
             if !visited.contains(&func_id) {
                 visited.insert(func_id);
                 self.reachable_functions.insert(func_id);
 
-                // Get function name to lookup in CallGraph
-                if let Some(func) = module.functions.get(func_id) {
-                    if let Some(callees) = call_graph.calls.get(&func.name) {
-                        for callee_name in callees {
-                            if let Some(&callee_idx) = name_to_index.get(callee_name.as_str()) {
-                                if !visited.contains(&callee_idx) {
-                                    worklist.push(callee_idx);
-                                }
+                let func = &module.functions[func_id];
+                if let Some(callees) = call_graph.calls.get(&func.name) {
+                    for callee_name in callees {
+                        if let Some((callee_id, _)) = module.get_function_by_name(callee_name) {
+                            if !visited.contains(&callee_id) {
+                                worklist.push(callee_id);
                             }
                         }
                     }
@@ -291,9 +293,13 @@ mod tests {
         let bump = Bump::new();
         let builder = IrBuilder::new(&bump);
 
+        // Dummy IDs for builder.call (will update after adding to module)
+        let f1_placeholder: FuncId = 1.into();
+        let f2_placeholder: FuncId = 2.into();
+
         // Func 0: Exported, calls Func 1
         let call1 = builder.call(
-            "func1",
+            f1_placeholder,
             bumpalo::collections::Vec::new_in(&bump),
             Type::NONE,
             false,
@@ -308,7 +314,7 @@ mod tests {
 
         // Func 1: Called by Func 0, calls Func 2
         let call2 = builder.call(
-            "func2",
+            f2_placeholder,
             bumpalo::collections::Vec::new_in(&bump),
             Type::NONE,
             false,
@@ -342,20 +348,30 @@ mod tests {
         );
 
         let mut module = Module::new(&bump);
-        module.add_function(func0);
-        module.add_function(func1);
-        module.add_function(func2_def);
-        module.add_function(func3);
+        let f0_id = module.add_function(func0);
+        let f1_id = module.add_function(func1);
+        let f2_id = module.add_function(func2_def);
+        let f3_id = module.add_function(func3);
+
+        // Patch placeholder IDs
+        if let ExpressionKind::Call { target, .. } = &mut module.functions[f0_id].body.unwrap().kind
+        {
+            *target = f1_id;
+        }
+        if let ExpressionKind::Call { target, .. } = &mut module.functions[f1_id].body.unwrap().kind
+        {
+            *target = f2_id;
+        }
 
         // Export func0
-        module.export_function(0, "main".to_string());
+        module.export_function(f0_id, "main".to_string());
 
         let call_graph = CallGraph::build(&module);
         let analysis = GlobalAnalysis::analyze(&module, &call_graph);
 
-        assert!(analysis.reachable_functions.contains(&0));
-        assert!(analysis.reachable_functions.contains(&1));
-        assert!(analysis.reachable_functions.contains(&2));
-        assert!(!analysis.reachable_functions.contains(&3));
+        assert!(analysis.reachable_functions.contains(&f0_id));
+        assert!(analysis.reachable_functions.contains(&f1_id));
+        assert!(analysis.reachable_functions.contains(&f2_id));
+        assert!(!analysis.reachable_functions.contains(&f3_id));
     }
 }

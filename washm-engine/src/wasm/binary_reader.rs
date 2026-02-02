@@ -1,7 +1,7 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind, IrBuilder};
 use crate::ir::module::{
-    DataSegment, ElementSegment, Export, ExportKind, Function, Import, ImportKind, MemoryLimits,
-    Module, TableLimits,
+    DataSegment, ElementSegment, Export, ExportKind, FuncId, Function, GlobalId, MemoryId,
+    MemoryLimits, Module, TableId, TableLimits,
 };
 use crate::ir::{HeapType, Literal, Type};
 use bumpalo::collections::Vec as BumpVec;
@@ -19,6 +19,9 @@ pub struct BinaryReader<'a> {
     next_label_id: u32,
     last_op_was_else: bool,
     import_names: Vec<String>,
+    func_ids: Vec<crate::ir::FuncId>,
+    table_ids: Vec<crate::ir::TableId>,
+    memory_ids: Vec<crate::ir::MemoryId>,
     global_ids: Vec<crate::ir::GlobalId>,
 }
 
@@ -63,6 +66,9 @@ impl<'a> BinaryReader<'a> {
             next_label_id: 0,
             last_op_was_else: false,
             import_names: Vec::new(),
+            func_ids: Vec::new(),
+            table_ids: Vec::new(),
+            memory_ids: Vec::new(),
             global_ids: Vec::new(),
         }
     }
@@ -171,9 +177,9 @@ impl<'a> BinaryReader<'a> {
     pub fn parse_module(&mut self) -> Result<Module<'a>> {
         let mut module = Module::new(self.bump);
         let mut function_section = Vec::new();
-        let mut memory_section = None;
-        let mut table_section = None;
-        let mut start_section = None;
+        let mut memory_section: Option<Vec<wasmparser::MemoryType>> = None;
+        let mut table_section: Option<Vec<wasmparser::TableType>> = None;
+        let mut start_section: Option<u32> = None;
         let mut code_section = Vec::new();
 
         let this = self as *mut Self;
@@ -204,57 +210,85 @@ impl<'a> BinaryReader<'a> {
                 Payload::ImportSection(reader) => {
                     for imports in reader {
                         let imports = imports?;
-                        let mut process_import = |module_name: &str,
-                                                  field_name: &str,
-                                                  ty: TypeRef|
-                         -> Result<()> {
-                            let kind = match ty {
-                                TypeRef::Func(type_idx) => {
-                                    let func_type = unsafe {
-                                        (&(*this).types)
-                                            .get(type_idx as usize)
-                                            .ok_or(ParseError::InvalidType)?
-                                    };
-                                    let params = Self::types_to_type(&func_type.0);
-                                    let results = Self::types_to_type(&func_type.1);
-                                    unsafe {
-                                        (*this).all_function_types.push(type_idx);
-                                        (*this).import_names.push(field_name.to_string());
-                                    }
-                                    ImportKind::Function(params, results)
-                                }
-                                TypeRef::Table(table_type) => ImportKind::Table(
-                                    Self::valtype_to_type(ValType::Ref(table_type.element_type)),
-                                    table_type.initial as u32,
-                                    table_type.maximum.map(|m| m as u32),
-                                ),
-                                TypeRef::Memory(memory_type) => ImportKind::Memory(MemoryLimits {
-                                    initial: memory_type.initial as u32,
-                                    maximum: memory_type.maximum.map(|m| m as u32),
-                                }),
-                                TypeRef::Global(global_type) => {
-                                    let id = module.add_global(crate::ir::module::Global {
-                                        name: field_name.to_string(),
-                                        type_: Self::valtype_to_type(global_type.content_type),
-                                        mutable: global_type.mutable,
-                                        kind: crate::ir::module::GlobalKind::Import {
-                                            module: module_name.to_string(),
-                                            field: field_name.to_string(),
-                                        },
-                                    });
-                                    unsafe { (*this).global_ids.push(id) };
-                                    return Ok(());
-                                }
-                                _ => return Ok(()),
-                            };
+                        let mut process_import =
+                            |module_name: &str, field_name: &str, ty: TypeRef| -> Result<()> {
+                                match ty {
+                                    TypeRef::Func(type_idx) => {
+                                        let func_type = unsafe {
+                                            (&(*this).types)
+                                                .get(type_idx as usize)
+                                                .ok_or(ParseError::InvalidType)?
+                                        };
+                                        let params = Self::types_to_type(&func_type.0);
+                                        let results = Self::types_to_type(&func_type.1);
 
-                            module.add_import(Import {
-                                module: module_name.to_string(),
-                                name: field_name.to_string(),
-                                kind,
-                            });
-                            Ok(())
-                        };
+                                        let id = module.add_function(
+                                            crate::ir::module::Function::new_import(
+                                                field_name.to_string(),
+                                                module_name.to_string(),
+                                                field_name.to_string(),
+                                                params,
+                                                results,
+                                            ),
+                                        );
+                                        self.func_ids.push(id);
+
+                                        unsafe {
+                                            (*this).all_function_types.push(type_idx);
+                                            (*this).import_names.push(field_name.to_string());
+                                        }
+                                    }
+                                    TypeRef::Table(table_type) => {
+                                        let limits = crate::ir::module::TableLimits {
+                                            element_type: Self::valtype_to_type(ValType::Ref(
+                                                table_type.element_type,
+                                            )),
+                                            initial: table_type.initial as u32,
+                                            maximum: table_type.maximum.map(|m| m as u32),
+                                        };
+                                        let id = module.add_table(crate::ir::module::Table {
+                                            name: field_name.to_string(),
+                                            limits: limits.clone(),
+                                            kind: crate::ir::module::TableKind::Import {
+                                                module: module_name.to_string(),
+                                                field: field_name.to_string(),
+                                            },
+                                        });
+                                        self.table_ids.push(id);
+                                    }
+                                    TypeRef::Memory(memory_type) => {
+                                        let limits = crate::ir::module::MemoryLimits {
+                                            initial: memory_type.initial as u32,
+                                            maximum: memory_type.maximum.map(|m| m as u32),
+                                        };
+                                        let id = module.add_memory(crate::ir::module::Memory {
+                                            name: field_name.to_string(),
+                                            limits: limits.clone(),
+                                            kind: crate::ir::module::MemoryKind::Import {
+                                                module: module_name.to_string(),
+                                                field: field_name.to_string(),
+                                            },
+                                        });
+                                        self.memory_ids.push(id);
+                                    }
+                                    TypeRef::Global(global_type) => {
+                                        let ty = Self::valtype_to_type(global_type.content_type);
+                                        let mutable = global_type.mutable;
+                                        let id = module.add_global(crate::ir::module::Global {
+                                            name: field_name.to_string(),
+                                            type_: ty,
+                                            mutable,
+                                            kind: crate::ir::module::GlobalKind::Import {
+                                                module: module_name.to_string(),
+                                                field: field_name.to_string(),
+                                            },
+                                        });
+                                        self.global_ids.push(id);
+                                    }
+                                    _ => {}
+                                };
+                                Ok(())
+                            };
 
                         match imports {
                             wasmparser::Imports::Single(_, import) => {
@@ -276,31 +310,61 @@ impl<'a> BinaryReader<'a> {
                     }
                 }
                 Payload::FunctionSection(reader) => {
-                    for type_idx in reader {
+                    for (i, type_idx) in reader.into_iter().enumerate() {
                         let type_idx = type_idx?;
                         function_section.push(type_idx);
                         unsafe { (*this).all_function_types.push(type_idx) };
+
+                        let func_type = unsafe {
+                            (&(*this).types)
+                                .get(type_idx as usize)
+                                .ok_or(ParseError::InvalidType)?
+                        };
+                        let params = Self::types_to_type(&func_type.0);
+                        let results = Self::types_to_type(&func_type.1);
+
+                        let id = module.add_function(Function {
+                            name: format!("func_{}", i),
+                            params,
+                            results,
+                            type_idx: Some(type_idx),
+                            vars: Vec::new(),
+                            body: None,
+                            local_names: Vec::new(),
+                            import: None,
+                        });
+                        self.func_ids.push(id);
                     }
                 }
                 Payload::TableSection(reader) => {
-                    for table in reader {
+                    for (i, table) in reader.into_iter().enumerate() {
                         let table = table?;
-                        table_section = Some(TableLimits {
-                            element_type: Self::valtype_to_type(ValType::Ref(
-                                table.ty.element_type,
-                            )),
-                            initial: table.ty.initial as u32,
-                            maximum: table.ty.maximum.map(|m| m as u32),
+                        let id = module.add_table(crate::ir::module::Table {
+                            name: format!("table_{}", i),
+                            limits: TableLimits {
+                                element_type: Self::valtype_to_type(ValType::Ref(
+                                    table.ty.element_type,
+                                )),
+                                initial: table.ty.initial as u32,
+                                maximum: table.ty.maximum.map(|m| m as u32),
+                            },
+                            kind: crate::ir::module::TableKind::Local,
                         });
+                        self.table_ids.push(id);
                     }
                 }
                 Payload::MemorySection(reader) => {
-                    for memory in reader {
+                    for (i, memory) in reader.into_iter().enumerate() {
                         let memory = memory?;
-                        memory_section = Some(MemoryLimits {
-                            initial: memory.initial as u32,
-                            maximum: memory.maximum.map(|m| m as u32),
+                        let id = module.add_memory(crate::ir::module::Memory {
+                            name: format!("memory_{}", i),
+                            limits: MemoryLimits {
+                                initial: memory.initial as u32,
+                                maximum: memory.maximum.map(|m| m as u32),
+                            },
+                            kind: crate::ir::module::MemoryKind::Local,
                         });
+                        self.memory_ids.push(id);
                     }
                 }
                 Payload::GlobalSection(reader) => {
@@ -310,7 +374,7 @@ impl<'a> BinaryReader<'a> {
                         let mutable = global.ty.mutable;
 
                         let init = unsafe {
-                            (*this).parse_expression(global.init_expr.get_operators_reader())
+                            (*this).parse_expression(global.init_expr.get_operators_reader(), &module)
                         }?;
                         let name = format!("global_{}", i);
 
@@ -330,14 +394,30 @@ impl<'a> BinaryReader<'a> {
                         let export = export?;
                         let kind = match export.kind {
                             wasmparser::ExternalKind::Func => {
-                                ExportKind::Function(export.index)
+                                let id =
+                                    self.func_ids.get(export.index as usize).copied().ok_or(
+                                        ParseError::InvalidIndex("func export", export.index),
+                                    )?;
+                                ExportKind::Function(id)
                             }
-                            wasmparser::ExternalKind::Table => ExportKind::Table(export.index),
-                            wasmparser::ExternalKind::Memory => ExportKind::Memory(export.index),
-                            wasmparser::ExternalKind::Global => {
-                                let id = self.global_ids.get(export.index as usize).copied().ok_or(
-                                    ParseError::InvalidIndex("global export", export.index),
+                            wasmparser::ExternalKind::Table => {
+                                let id = self.table_ids.get(export.index as usize).copied().ok_or(
+                                    ParseError::InvalidIndex("table export", export.index),
                                 )?;
+                                ExportKind::Table(id)
+                            }
+                            wasmparser::ExternalKind::Memory => {
+                                let id =
+                                    self.memory_ids.get(export.index as usize).copied().ok_or(
+                                        ParseError::InvalidIndex("memory export", export.index),
+                                    )?;
+                                ExportKind::Memory(id)
+                            }
+                            wasmparser::ExternalKind::Global => {
+                                let id =
+                                    self.global_ids.get(export.index as usize).copied().ok_or(
+                                        ParseError::InvalidIndex("global export", export.index),
+                                    )?;
                                 ExportKind::Global(id)
                             }
                             _ => continue,
@@ -349,7 +429,12 @@ impl<'a> BinaryReader<'a> {
                     }
                 }
                 Payload::StartSection { func, .. } => {
-                    start_section = Some(func);
+                    let id = self
+                        .func_ids
+                        .get(func as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("start func", func))?;
+                    module.set_start(id);
                 }
                 Payload::ElementSection(reader) => {
                     for element in reader {
@@ -358,7 +443,7 @@ impl<'a> BinaryReader<'a> {
                             wasmparser::ElementKind::Active {
                                 ref offset_expr, ..
                             } => unsafe {
-                                (*this).parse_expression(offset_expr.get_operators_reader())
+                                (*this).parse_expression(offset_expr.get_operators_reader(), &module)
                             }?,
                             _ => None,
                         };
@@ -367,19 +452,30 @@ impl<'a> BinaryReader<'a> {
                         match element.items {
                             wasmparser::ElementItems::Functions(funcs) => {
                                 for f in funcs {
-                                    func_indices.push(f?);
+                                    let f_idx = f?;
+                                    let id =
+                                        self.func_ids.get(f_idx as usize).copied().ok_or(
+                                            ParseError::InvalidIndex("element func", f_idx),
+                                        )?;
+                                    func_indices.push(id);
                                 }
                             }
                             _ => {}
                         }
 
+                        let table_index = match element.kind {
+                            wasmparser::ElementKind::Active { table_index, .. } => {
+                                let idx = table_index.unwrap_or(0);
+                                self.table_ids
+                                    .get(idx as usize)
+                                    .copied()
+                                    .ok_or(ParseError::InvalidIndex("element table", idx))?
+                            }
+                            _ => return Err(ParseError::InvalidSection), // Passive/Declarative not handled yet
+                        };
+
                         module.elements.push(ElementSegment {
-                            table_index: match element.kind {
-                                wasmparser::ElementKind::Active { table_index, .. } => {
-                                    table_index.unwrap_or(0)
-                                }
-                                _ => 0,
-                            },
+                            table_index,
                             offset: offset.ok_or(ParseError::UnexpectedEof)?,
                             func_indices,
                         });
@@ -396,7 +492,8 @@ impl<'a> BinaryReader<'a> {
                         }
                     }
 
-                    let expr = unsafe { (*this).parse_expression(body.get_operators_reader()?) }?;
+                    let expr =
+                        unsafe { (*this).parse_expression(body.get_operators_reader()?, &module) }?;
                     code_section.push((locals, expr));
                 }
                 Payload::DataSection(reader) => {
@@ -406,18 +503,22 @@ impl<'a> BinaryReader<'a> {
                             wasmparser::DataKind::Active {
                                 ref offset_expr, ..
                             } => unsafe {
-                                (*this).parse_expression(offset_expr.get_operators_reader())
+                                (*this).parse_expression(offset_expr.get_operators_reader(), &module)
                             }?,
                             _ => None,
                         };
 
+                        let memory_index = match data.kind {
+                            wasmparser::DataKind::Active { memory_index, .. } => {
+                                self.memory_ids.get(memory_index as usize).copied().ok_or(
+                                    ParseError::InvalidIndex("data memory", memory_index as u32),
+                                )?
+                            }
+                            _ => return Err(ParseError::InvalidSection),
+                        };
+
                         module.data.push(DataSegment {
-                            memory_index: match data.kind {
-                                wasmparser::DataKind::Active { memory_index, .. } => {
-                                    memory_index as u32
-                                }
-                                _ => 0,
-                            },
+                            memory_index,
                             offset: offset.ok_or(ParseError::UnexpectedEof)?,
                             data: data.data.to_vec(),
                         });
@@ -437,49 +538,31 @@ impl<'a> BinaryReader<'a> {
             });
         }
 
-        module.memory = memory_section;
-        module.table = table_section;
-        module.start = start_section;
-
         // Combine function signatures with code
-        let mut code_iter = code_section.into_iter();
-
-        for (i, &type_idx) in function_section.iter().enumerate() {
-            let Some((locals, body)) = code_iter.next() else {
-                break;
-            };
-
-            let func_type = self
-                .types
-                .get(type_idx as usize)
-                .cloned()
-                .unwrap_or((vec![], vec![]));
-
-            let params = Self::types_to_type(&func_type.0);
-            let results = Self::types_to_type(&func_type.1);
-
-            let func = Function::with_type_idx(
-                format!("func_{}", i),
-                type_idx,
-                params,
-                results,
-                locals,
-                body,
-            );
-            module.add_function(func);
+        let num_func_imports = self.func_ids.len() - function_section.len();
+        for (i, (locals, expr)) in code_section.into_iter().enumerate() {
+            let func_id = self.func_ids[num_func_imports + i];
+            let func = module.get_function_mut(func_id).unwrap();
+            func.vars = locals;
+            func.body = expr;
         }
 
         Ok(module)
     }
 
-    fn parse_expression(&mut self, mut reader: OperatorsReader) -> Result<Option<ExprRef<'a>>> {
-        self.parse_expression_impl(&mut reader, &mut Vec::new())
+    fn parse_expression(
+        &mut self,
+        mut reader: OperatorsReader,
+        module: &Module<'a>,
+    ) -> Result<Option<ExprRef<'a>>> {
+        self.parse_expression_impl(&mut reader, &mut Vec::new(), module)
     }
 
     fn parse_expression_impl(
         &mut self,
         reader: &mut OperatorsReader,
         label_stack: &mut Vec<Option<String>>,
+        module: &Module<'a>,
     ) -> Result<Option<ExprRef<'a>>> {
         let builder = IrBuilder::new(self.bump);
         let mut stack: Vec<ExprRef<'a>> = Vec::new();
@@ -508,7 +591,7 @@ impl<'a> BinaryReader<'a> {
                     let name = self.make_label_name();
                     label_stack.push(Some(name.clone()));
 
-                    if let Some(body) = self.parse_expression_impl(reader, label_stack)? {
+                    if let Some(body) = self.parse_expression_impl(reader, label_stack, module)? {
                         label_stack.pop();
                         let block_expr = builder.block(
                             Some(self.bump.alloc_str(&name)),
@@ -531,7 +614,7 @@ impl<'a> BinaryReader<'a> {
                     let name = self.make_label_name();
                     label_stack.push(Some(name.clone()));
 
-                    if let Some(body) = self.parse_expression_impl(reader, label_stack)? {
+                    if let Some(body) = self.parse_expression_impl(reader, label_stack, module)? {
                         label_stack.pop();
                         let loop_expr =
                             builder.loop_(Some(self.bump.alloc_str(&name)), body, result_type);
@@ -548,11 +631,11 @@ impl<'a> BinaryReader<'a> {
                     let name = self.make_label_name();
                     label_stack.push(Some(name.clone()));
                     let if_true = self
-                        .parse_expression_impl(reader, label_stack)?
+                        .parse_expression_impl(reader, label_stack, module)?
                         .ok_or(ParseError::UnexpectedEof)?;
 
                     let if_false = if self.last_op_was_else {
-                        self.parse_expression_impl(reader, label_stack)?
+                        self.parse_expression_impl(reader, label_stack, module)?
                     } else {
                         None
                     };
@@ -685,15 +768,15 @@ impl<'a> BinaryReader<'a> {
                     }
                     operands.reverse();
 
-                    let func_name = if (function_index as usize) < self.import_names.len() {
-                        bumpalo::format!(in self.bump, "{}", self.import_names[function_index as usize]).into_bump_str()
-                    } else {
-                        bumpalo::format!(in self.bump, "func_{}", function_index).into_bump_str()
-                    };
+                    let func_id = self
+                        .func_ids
+                        .get(function_index as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("call func", function_index))?;
 
                     let result_type = Self::types_to_type(&func_type.1);
 
-                    let call_expr = builder.call(func_name, operands, result_type, false);
+                    let call_expr = builder.call(func_id, operands, result_type, false);
                     stack.push(call_expr);
                 }
                 Operator::CallIndirect {
@@ -718,18 +801,14 @@ impl<'a> BinaryReader<'a> {
                     }
                     operands.reverse();
 
-                    let table_name = self.bump.alloc_str(&table_index.to_string());
+                    let table_id = self
+                        .table_ids
+                        .get(table_index as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("call_indirect table", table_index))?;
 
-                    let call_expr = Expression::new(
-                        self.bump,
-                        ExpressionKind::CallIndirect {
-                            table: table_name,
-                            target,
-                            operands,
-                            type_: sig_type,
-                        },
-                        result_type,
-                    );
+                    let call_expr =
+                        builder.call_indirect(table_id, target, operands, sig_type, result_type);
                     stack.push(call_expr);
                 }
                 Operator::LocalGet { local_index } => {
@@ -745,17 +824,31 @@ impl<'a> BinaryReader<'a> {
                     stack.push(builder.local_tee(local_index, value, value_type));
                 }
                 Operator::GlobalGet { global_index } => {
-                    let id = self.global_ids.get(global_index as usize).copied().ok_or(ParseError::InvalidSection)?;
+                    let id = self
+                        .global_ids
+                        .get(global_index as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidSection)?;
                     stack.push(builder.global_get(id, Type::I32)); // TODO: track actual type
                 }
                 Operator::GlobalSet { global_index } => {
-                    let id = self.global_ids.get(global_index as usize).copied().ok_or(ParseError::InvalidSection)?;
+                    let id = self
+                        .global_ids
+                        .get(global_index as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidSection)?;
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     stack.push(builder.global_set(id, value));
                 }
                 Operator::I32Load { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         4,
                         false,
                         memarg.offset as u32,
@@ -766,7 +859,13 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I64Load { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         8,
                         false,
                         memarg.offset as u32,
@@ -777,7 +876,13 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F32Load { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         4,
                         false,
                         memarg.offset as u32,
@@ -788,7 +893,13 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F64Load { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         8,
                         false,
                         memarg.offset as u32,
@@ -799,7 +910,13 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I32Load8S { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         1,
                         true,
                         memarg.offset as u32,
@@ -810,7 +927,13 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I32Load8U { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         1,
                         false,
                         memarg.offset as u32,
@@ -821,7 +944,13 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I32Load16S { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         2,
                         true,
                         memarg.offset as u32,
@@ -832,7 +961,13 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I32Load16U { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         2,
                         false,
                         memarg.offset as u32,
@@ -843,7 +978,13 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I64Load8S { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         1,
                         true,
                         memarg.offset as u32,
@@ -854,7 +995,13 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I64Load8U { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         1,
                         false,
                         memarg.offset as u32,
@@ -865,7 +1012,13 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I64Load16S { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         2,
                         true,
                         memarg.offset as u32,
@@ -876,7 +1029,13 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I64Load16U { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         2,
                         false,
                         memarg.offset as u32,
@@ -887,7 +1046,13 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I64Load32S { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         4,
                         true,
                         memarg.offset as u32,
@@ -898,7 +1063,13 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I64Load32U { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.load(
+                        memory,
                         4,
                         false,
                         memarg.offset as u32,
@@ -910,7 +1081,13 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32Store { memarg } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
+                        memory,
                         4,
                         memarg.offset as u32,
                         memarg.align as u32,
@@ -921,7 +1098,13 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Store { memarg } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
+                        memory,
                         8,
                         memarg.offset as u32,
                         memarg.align as u32,
@@ -932,7 +1115,13 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Store { memarg } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
+                        memory,
                         4,
                         memarg.offset as u32,
                         memarg.align as u32,
@@ -943,7 +1132,13 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Store { memarg } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
+                        memory,
                         8,
                         memarg.offset as u32,
                         memarg.align as u32,
@@ -954,7 +1149,13 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32Store8 { memarg } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
+                        memory,
                         1,
                         memarg.offset as u32,
                         memarg.align as u32,
@@ -965,7 +1166,13 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32Store16 { memarg } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
+                        memory,
                         2,
                         memarg.offset as u32,
                         memarg.align as u32,
@@ -976,7 +1183,13 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Store8 { memarg } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
+                        memory,
                         1,
                         memarg.offset as u32,
                         memarg.align as u32,
@@ -987,7 +1200,13 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Store16 { memarg } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
+                        memory,
                         2,
                         memarg.offset as u32,
                         memarg.align as u32,
@@ -998,7 +1217,13 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Store32 { memarg } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let memory = self
+                        .memory_ids
+                        .get(0)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", 0))?;
                     stack.push(builder.store(
+                        memory,
                         4,
                         memarg.offset as u32,
                         memarg.align as u32,
@@ -1006,12 +1231,22 @@ impl<'a> BinaryReader<'a> {
                         value,
                     ));
                 }
-                Operator::MemorySize { .. } => {
-                    stack.push(builder.memory_size());
+                Operator::MemorySize { mem, .. } => {
+                    let memory = self
+                        .memory_ids
+                        .get(mem as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", mem as u32))?;
+                    stack.push(builder.memory_size(memory));
                 }
-                Operator::MemoryGrow { .. } => {
+                Operator::MemoryGrow { mem, .. } => {
                     let delta = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.memory_grow(delta));
+                    let memory = self
+                        .memory_ids
+                        .get(mem as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", mem as u32))?;
+                    stack.push(builder.memory_grow(memory, delta));
                 }
                 Operator::I32Const { value } => {
                     stack.push(builder.const_(Literal::I32(value)));
@@ -2098,21 +2333,41 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::MemoryInit { data_index, mem } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let offset = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let src = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let dest = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.memory_init(data_index, dest, offset, size));
+                    let memory = self
+                        .memory_ids
+                        .get(mem as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", mem))?;
+                    stack.push(builder.memory_init(memory, data_index, dest, src, size));
                 }
                 Operator::MemoryCopy { dst_mem, src_mem } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let src = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let dest = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.memory_copy(dest, src, size));
+                    let dst_id = self
+                        .memory_ids
+                        .get(dst_mem as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", dst_mem))?;
+                    let src_id = self
+                        .memory_ids
+                        .get(src_mem as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", src_mem))?;
+                    stack.push(builder.memory_copy(dst_id, src_id, dest, src, size));
                 }
                 Operator::MemoryFill { mem } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let dest = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.memory_fill(dest, value, size));
+                    let memory = self
+                        .memory_ids
+                        .get(mem as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("memory", mem))?;
+                    stack.push(builder.memory_fill(memory, dest, value, size));
                 }
                 Operator::RefNull { hty } => {
                     let ty = match hty {
@@ -2136,9 +2391,12 @@ impl<'a> BinaryReader<'a> {
                     stack.push(builder.ref_is_null(val));
                 }
                 Operator::RefFunc { function_index } => {
-                    let func_name =
-                        bumpalo::format!(in self.bump, "func_{}", function_index).into_bump_str();
-                    stack.push(builder.ref_func(func_name));
+                    let func_id = self
+                        .func_ids
+                        .get(function_index as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("function", function_index))?;
+                    stack.push(builder.ref_func(func_id));
                 }
                 Operator::RefEq => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2147,37 +2405,52 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::TableGet { table } => {
                     let index = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let table_index = table;
-                    let table_name = self.bump.alloc_str(&table_index.to_string());
-                    stack.push(builder.table_get(table_name, index, Type::ANYREF));
-                    // TODO: actual type
+                    let table_id = self
+                        .table_ids
+                        .get(table as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("table", table))?;
+                    let ty = module.tables[table_id].limits.element_type;
+                    stack.push(builder.table_get(table_id, index, ty));
                 }
                 Operator::TableSet { table } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let index = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let table_index = table;
-                    let table_name = self.bump.alloc_str(&table_index.to_string());
-                    stack.push(builder.table_set(table_name, index, value));
+                    let table_id = self
+                        .table_ids
+                        .get(table as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("table", table))?;
+                    stack.push(builder.table_set(table_id, index, value));
                 }
                 Operator::TableSize { table } => {
-                    let table_index = table;
-                    let table_name = self.bump.alloc_str(&table_index.to_string());
-                    stack.push(builder.table_size(table_name));
+                    let table_id = self
+                        .table_ids
+                        .get(table as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("table", table))?;
+                    stack.push(builder.table_size(table_id));
                 }
                 Operator::TableGrow { table } => {
                     let delta = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let table_index = table;
-                    let table_name = self.bump.alloc_str(&table_index.to_string());
-                    stack.push(builder.table_grow(table_name, delta, value));
+                    let table_id = self
+                        .table_ids
+                        .get(table as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("table", table))?;
+                    stack.push(builder.table_grow(table_id, value, delta));
                 }
                 Operator::TableFill { table } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let dest = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let table_index = table;
-                    let table_name = self.bump.alloc_str(&table_index.to_string());
-                    stack.push(builder.table_fill(table_name, dest, value, size));
+                    let table_id = self
+                        .table_ids
+                        .get(table as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("table", table))?;
+                    stack.push(builder.table_fill(table_id, dest, value, size));
                 }
                 Operator::TableCopy {
                     dst_table,
@@ -2186,16 +2459,28 @@ impl<'a> BinaryReader<'a> {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let src = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let dest = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let dst_name = self.bump.alloc_str(&dst_table.to_string());
-                    let src_name = self.bump.alloc_str(&src_table.to_string());
-                    stack.push(builder.table_copy(dst_name, src_name, dest, src, size));
+                    let dst_id = self
+                        .table_ids
+                        .get(dst_table as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("table", dst_table))?;
+                    let src_id = self
+                        .table_ids
+                        .get(src_table as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("table", src_table))?;
+                    stack.push(builder.table_copy(dst_id, src_id, dest, src, size));
                 }
                 Operator::TableInit { elem_index, table } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let offset = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let dest = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let table_name = self.bump.alloc_str(&table.to_string());
-                    stack.push(builder.table_init(table_name, elem_index, dest, offset, size));
+                    let table_id = self
+                        .table_ids
+                        .get(table as usize)
+                        .copied()
+                        .ok_or(ParseError::InvalidIndex("table", table))?;
+                    stack.push(builder.table_init(table_id, elem_index, dest, offset, size));
                 }
                 Operator::ElemDrop { elem_index } => {
                     stack.push(builder.elem_drop(elem_index));
@@ -2347,10 +2632,10 @@ mod tests {
         let module = reader.parse_module().expect("Failed to parse module");
 
         assert_eq!(module.functions.len(), 1);
-        let func = &module.functions[0];
+        let func = &module.functions.iter().next().unwrap().1;
         assert_eq!(func.results, Type::I32);
 
-        if let Some(body) = &func.body {
+        if let Some(body) = func.body() {
             match &body.kind {
                 ExpressionKind::Const(Literal::I32(42)) => {} // Success
                 _ => panic!("Expected i32.const 42, got {:?}", body.kind),
@@ -2387,7 +2672,7 @@ mod tests {
         let module = reader.parse_module().expect("Failed to parse module");
 
         assert_eq!(module.functions.len(), 1);
-        let func = &module.functions[0];
+        let func = &module.functions.iter().next().unwrap().1;
 
         let expected_params = crate::ir::type_store::intern_tuple(vec![Type::I32, Type::I32]);
         assert_eq!(func.params, expected_params);

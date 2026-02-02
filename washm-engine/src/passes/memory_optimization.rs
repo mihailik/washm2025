@@ -1,6 +1,7 @@
 use crate::analysis::effects::{Effect, EffectAnalyzer};
+use crate::collections::id_arena::Id;
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
-use crate::ir::module::Module;
+use crate::ir::module::{MemoryId, Module};
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
 use crate::passes::Pass;
@@ -56,8 +57,8 @@ impl Pass for MemoryOptimization {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 self.visit(body);
             }
         }
@@ -313,9 +314,7 @@ fn are_pointers_equal(ptr1: &Expression, ptr2: &Expression) -> bool {
         }
 
         // Same global
-        (ExpressionKind::GlobalGet { id: n1 }, ExpressionKind::GlobalGet { id: n2 }) => {
-            n1 == n2
-        }
+        (ExpressionKind::GlobalGet { id: n1 }, ExpressionKind::GlobalGet { id: n2 }) => n1 == n2,
 
         // Binary operations with same structure
         (
@@ -401,6 +400,7 @@ mod tests {
         }));
         let store1 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::Store {
+                memory: Id::from_raw_parts(0, 0),
                 bytes: 4,
                 offset: 0,
                 align: 4,
@@ -420,6 +420,7 @@ mod tests {
         }));
         let store2 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::Store {
+                memory: Id::from_raw_parts(0, 0),
                 bytes: 4,
                 offset: 0,
                 align: 4,
@@ -447,12 +448,13 @@ mod tests {
         );
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = MemoryOptimization::new();
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 1);
             if let ExpressionKind::Store { value, .. } = &list[0].kind {
@@ -486,6 +488,7 @@ mod tests {
         }));
         let store1 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::Store {
+                memory: Id::from_raw_parts(0, 0),
                 bytes: 4,
                 offset: 0,
                 align: 4,
@@ -505,6 +508,7 @@ mod tests {
         }));
         let store2 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::Store {
+                memory: Id::from_raw_parts(0, 0),
                 bytes: 4,
                 offset: 0,
                 align: 4,
@@ -532,12 +536,13 @@ mod tests {
         );
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = MemoryOptimization::new();
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 2);
         }
@@ -564,6 +569,7 @@ mod tests {
             let v = make_expr(bump, val);
             ExprRef::new(bump.alloc(Expression {
                 kind: ExpressionKind::Store {
+                    memory: Id::from_raw_parts(0, 0),
                     bytes: 4,
                     offset: 0,
                     align: 4,
@@ -597,12 +603,13 @@ mod tests {
         );
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = MemoryOptimization::new();
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 1);
             if let ExpressionKind::Store { value, .. } = &list[0].kind {
@@ -639,6 +646,7 @@ mod tests {
 
         let store1 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::Store {
+                memory: Id::from_raw_parts(0, 0),
                 bytes: 4,
                 offset: 0,
                 align: 4,
@@ -658,6 +666,7 @@ mod tests {
         }));
         let store2 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::Store {
+                memory: Id::from_raw_parts(0, 0),
                 bytes: 4,
                 offset: 0,
                 align: 4,
@@ -685,12 +694,13 @@ mod tests {
         );
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = MemoryOptimization::new();
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             // UnaryOp::EqZInt32 no longer traps by default in our updated EffectAnalyzer,
             // so the redundant store is now optimized away.
@@ -744,12 +754,13 @@ mod tests {
         );
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = MemoryOptimization::new();
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 1);
             if let ExpressionKind::LocalSet { value, .. } = &list[0].kind {
@@ -780,6 +791,7 @@ mod tests {
         }));
         let store1 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::Store {
+                memory: Id::from_raw_parts(0, 0),
                 bytes: 4,
                 offset: 0,
                 align: 4,
@@ -799,6 +811,7 @@ mod tests {
         }));
         let store2 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::Store {
+                memory: Id::from_raw_parts(0, 0),
                 bytes: 4,
                 offset: 0,
                 align: 4,
@@ -826,13 +839,14 @@ mod tests {
         );
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         // Run in rigorous mode - adjacent stores should still optimize
         let mut pass = MemoryOptimization::new().with_rigorous(true);
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(
                 list.len(),
@@ -858,6 +872,7 @@ mod tests {
         }));
         let store1 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::Store {
+                memory: Id::from_raw_parts(0, 0),
                 bytes: 4,
                 offset: 0,
                 align: 4,
@@ -878,6 +893,7 @@ mod tests {
         }));
         let store2 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::Store {
+                memory: Id::from_raw_parts(0, 0),
                 bytes: 4,
                 offset: 0,
                 align: 4,
@@ -905,12 +921,13 @@ mod tests {
         );
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = MemoryOptimization::new();
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(
                 list.len(),
@@ -937,6 +954,7 @@ mod tests {
         }));
         let store1 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::Store {
+                memory: Id::from_raw_parts(0, 0),
                 bytes: 4,
                 offset: 0,
                 align: 4,
@@ -949,7 +967,7 @@ mod tests {
         let operands = BumpVec::new_in(&bump);
         let call = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::Call {
-                target: "func",
+                target: Id::from_raw_parts(0, 0),
                 operands,
                 is_return: false,
             },
@@ -966,6 +984,7 @@ mod tests {
         }));
         let store2 = ExprRef::new(bump.alloc(Expression {
             kind: ExpressionKind::Store {
+                memory: Id::from_raw_parts(0, 0),
                 bytes: 4,
                 offset: 0,
                 align: 4,
@@ -994,13 +1013,14 @@ mod tests {
         );
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         // In simple mode, only adjacent pairs are checked - should not optimize
         let mut pass_simple = MemoryOptimization::new();
         pass_simple.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(
                 list.len(),
@@ -1058,12 +1078,13 @@ mod tests {
         );
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = MemoryOptimization::new();
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 2, "Different local indices should not optimize");
         }
@@ -1118,12 +1139,13 @@ mod tests {
         );
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = MemoryOptimization::new();
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 1, "Redundant global.set should be eliminated");
         }

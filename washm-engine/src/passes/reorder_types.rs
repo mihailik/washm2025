@@ -39,20 +39,7 @@ impl Pass for ReorderTypes {
         module.types = new_types;
 
         // Update references
-        for import in &mut module.imports {
-            match &mut import.kind {
-                crate::ir::module::ImportKind::Function(params, results) => {
-                    *params = self.remap_type(*params, &remap);
-                    *results = self.remap_type(*results, &remap);
-                }
-                crate::ir::module::ImportKind::Table(ty, _, _) => {
-                    *ty = self.remap_type(*ty, &remap);
-                }
-                crate::ir::module::ImportKind::Memory(_) => {}
-            }
-        }
-
-        for func in &mut module.functions {
+        for (_, func) in &mut module.functions {
             if let Some(idx) = &mut func.type_idx {
                 if let Some(&new_id) = remap.get(idx) {
                     *idx = new_id;
@@ -60,16 +47,16 @@ impl Pass for ReorderTypes {
             }
             func.params = self.remap_type(func.params, &remap);
             func.results = self.remap_type(func.results, &remap);
-            for var in &mut func.vars {
+            for var in func.vars_mut() {
                 *var = self.remap_type(*var, &remap);
             }
 
-            if let Some(mut body) = func.body {
+            if let Some(body) = func.body_mut() {
                 let mut updater = TypeUpdater {
                     remap: &remap,
                     pass: self,
                 };
-                updater.visit(&mut body);
+                updater.visit(body);
             }
         }
 

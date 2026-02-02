@@ -23,16 +23,17 @@ impl Pass for LocalCSE {
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         let allocator = module.allocator();
 
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            let var_count = func.vars().len() as u32;
+            if let Some(body) = func.body_mut() {
                 let mut cse = CSETransformer {
                     allocator,
                     expr_map: HashMap::new(),
-                    local_counter: func.vars.len() as u32,
+                    local_counter: var_count,
                     new_locals_to_add: Vec::new(),
                 };
                 cse.visit(body);
-                func.vars.extend(cse.new_locals_to_add); // Append new locals
+                func.vars_mut().extend(cse.new_locals_to_add); // Append new locals
             }
         }
     }
@@ -189,7 +190,7 @@ impl<'a> Visitor<'a> for CSETransformer<'a> {
                         self.visit_expression(e);
                     }
                 }
-                ExpressionKind::MemoryGrow { delta } => {
+                ExpressionKind::MemoryGrow { delta, .. } => {
                     self.visit_expression(delta);
                 }
                 ExpressionKind::AtomicRMW { ptr, value, .. } => {
@@ -216,7 +217,7 @@ impl<'a> Visitor<'a> for CSETransformer<'a> {
                     self.visit_expression(expected);
                     self.visit_expression(timeout);
                 }
-                ExpressionKind::AtomicNotify { ptr, count } => {
+                ExpressionKind::AtomicNotify { ptr, count, memory } => {
                     self.visit_expression(ptr);
                     self.visit_expression(count);
                 }
@@ -277,12 +278,23 @@ impl<'a> Visitor<'a> for CSETransformer<'a> {
                     self.visit_expression(offset);
                     self.visit_expression(size);
                 }
-                ExpressionKind::MemoryCopy { dest, src, size } => {
+                ExpressionKind::MemoryCopy {
+                    dest,
+                    src,
+                    size,
+                    dest_memory,
+                    src_memory,
+                } => {
                     self.visit_expression(dest);
                     self.visit_expression(src);
                     self.visit_expression(size);
                 }
-                ExpressionKind::MemoryFill { dest, value, size } => {
+                ExpressionKind::MemoryFill {
+                    dest,
+                    value,
+                    size,
+                    memory,
+                } => {
                     self.visit_expression(dest);
                     self.visit_expression(value);
                     self.visit_expression(size);
@@ -384,7 +396,7 @@ impl<'a> Visitor<'a> for CSETransformer<'a> {
                 | ExpressionKind::RefNull { .. }
                 | ExpressionKind::RefFunc { .. }
                 | ExpressionKind::TableSize { .. }
-                | ExpressionKind::MemorySize
+                | ExpressionKind::MemorySize { .. }
                 | ExpressionKind::DataDrop { .. }
                 | ExpressionKind::ElemDrop { .. }
                 | ExpressionKind::Rethrow { .. }
@@ -464,7 +476,8 @@ mod tests {
         pass.run(&mut module);
 
         // For now, expression should be unchanged (foundation only)
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         assert!(matches!(body.kind, ExpressionKind::Binary { .. }));
     }
 
@@ -516,7 +529,8 @@ mod tests {
         pass.run(&mut module);
 
         // Should preserve structure
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         assert!(matches!(body.kind, ExpressionKind::Binary { .. }));
     }
 }

@@ -33,7 +33,7 @@ impl CostEstimator {
     /// Estimate cost of inlining this function
     pub fn inline_cost(func: &Function) -> Cost {
         let mut calculator = CostCalculator::new(func);
-        if let Some(body) = &func.body {
+        if let Some(body) = &func.body() {
             calculator.visit(*body);
             calculator.analyze_trivial(*body);
         }

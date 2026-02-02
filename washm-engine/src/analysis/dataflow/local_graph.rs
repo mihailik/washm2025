@@ -30,8 +30,8 @@ impl<'a> LocalGraph<'a> {
         // Count total locals: params + vars
         // For now, assume single-value params (Type is not a tuple)
         // TODO: Handle multi-value params properly when tuple types are needed
-        let num_params = if func.params == Type::NONE { 0 } else { 1 };
-        let num_vars = func.vars.len() as u32;
+        let num_params = func.params.tuple_len() as u32;
+        let num_vars = func.vars().len() as u32;
         let num_locals = num_params + num_vars;
 
         let mut graph = LocalGraph {
@@ -46,7 +46,7 @@ impl<'a> LocalGraph<'a> {
         }
 
         // Walk expression tree and record def/use
-        if let Some(body) = func.body {
+        if let Some(body) = func.body() {
             graph.collect_def_use(body);
         }
 

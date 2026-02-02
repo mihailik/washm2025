@@ -36,8 +36,8 @@ impl Pass for LocalSubtyping {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for func in &mut module.functions {
-            if let Some(mut body) = func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(mut body) = func.body() {
                 // 1. Build SSA (infrastructure ready)
                 let cfg = ControlFlowGraph::build(func, body);
                 let dom = DominanceTree::build(&cfg);
@@ -53,7 +53,7 @@ impl Pass for LocalSubtyping {
                 let var_start = func.params.tuple_len() as u32;
 
                 // Update vars
-                for (i, var_type) in func.vars.iter_mut().enumerate() {
+                for (i, var_type) in func.vars_mut().iter_mut().enumerate() {
                     let local_index = var_start + i as u32;
 
                     if let Some(Some(inferred)) = inferred_types.get(&local_index) {
@@ -112,6 +112,9 @@ mod tests {
         pass.run(&mut module);
 
         // Should remain I32
-        assert_eq!(module.functions[0].vars[0], Type::I32);
+        assert_eq!(
+            module.functions[module.functions.iter().next().unwrap().0].vars()[0],
+            Type::I32
+        );
     }
 }

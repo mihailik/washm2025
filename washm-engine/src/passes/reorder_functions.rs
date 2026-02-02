@@ -1,5 +1,8 @@
 use crate::analysis::stats::ModuleStats;
-use crate::ir::module::{ExportKind, ImportKind, Module};
+use crate::collections::IdArena;
+use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::ir::module::{ExportKind, FuncId, FuncMarker, Module};
+use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
 use std::collections::HashMap;
 
@@ -24,24 +27,17 @@ impl Pass for ReorderFunctions {
 
         let stats = ModuleStats::collect(module);
 
-        // 1. Collect and sort the functions
-        let mut sorted_indices: Vec<usize> = (0..module.functions.len()).collect();
+        // 1. Collect and sort the IDs
+        let mut ids: Vec<FuncId> = module.functions.iter().map(|(id, _)| id).collect();
 
         if self.by_name {
-            sorted_indices
-                .sort_by(|&a, &b| module.functions[a].name.cmp(&module.functions[b].name));
+            ids.sort_by(|&a, &b| module.functions[a].name.cmp(&module.functions[b].name));
         } else {
-            sorted_indices.sort_by(|&a, &b| {
-                let count_a = stats
-                    .function_counts
-                    .get(&module.functions[a].name)
-                    .copied()
-                    .unwrap_or(0);
-                let count_b = stats
-                    .function_counts
-                    .get(&module.functions[b].name)
-                    .copied()
-                    .unwrap_or(0);
+            ids.sort_by(|&a, &b| {
+                let name_a = &module.functions[a].name;
+                let name_b = &module.functions[b].name;
+                let count_a = stats.function_counts.get(name_a).copied().unwrap_or(0);
+                let count_b = stats.function_counts.get(name_b).copied().unwrap_or(0);
                 // Sort descending (more frequent first)
                 count_b.cmp(&count_a)
             });
@@ -49,73 +45,80 @@ impl Pass for ReorderFunctions {
 
         // 2. Perform the reordering
         let mut old_to_new = HashMap::new();
+        let mut new_functions = IdArena::new();
 
-        let import_count = module
-            .imports
-            .iter()
-            .filter(|i| matches!(i.kind, ImportKind::Function(_, _)))
-            .count() as u32;
-
-        for (new_idx, &old_idx) in sorted_indices.iter().enumerate() {
-            old_to_new.insert(import_count + old_idx as u32, import_count + new_idx as u32);
+        // Move functions out to avoid multiple borrows
+        let mut functions_map = HashMap::new();
+        let old_ids: Vec<FuncId> = module.functions.iter().map(|(id, _)| id).collect();
+        for id in old_ids {
+            if let Some(f) = module.functions.remove(id.index() as usize) {
+                functions_map.insert(id, f);
+            }
         }
 
-        // Reorder
-        let old_functions = std::mem::take(&mut module.functions);
-
-        let mut options: Vec<Option<crate::ir::module::Function<'a>>> =
-            old_functions.into_iter().map(Some).collect();
-        for &idx in &sorted_indices {
-            module.functions.push(options[idx].take().unwrap());
+        for old_id in ids {
+            if let Some(f) = functions_map.remove(&old_id) {
+                let new_id = new_functions.alloc(f);
+                old_to_new.insert(old_id, new_id);
+            }
         }
+        module.functions = new_functions;
 
-        // 3. Update all references to function indices
+        // 3. Update all references to function IDs
         // Exports
         for export in &mut module.exports {
-            if let ExportKind::Function(idx) = &mut export.kind {
-                if let Some(&new_idx) = old_to_new.get(idx) {
-                    *idx = new_idx;
+            if let ExportKind::Function(id) = &mut export.kind {
+                if let Some(&new_id) = old_to_new.get(id) {
+                    *id = new_id;
                 }
             }
         }
 
         // Start
-        if let Some(start_idx) = &mut module.start {
-            if let Some(&new_idx) = old_to_new.get(start_idx) {
-                *start_idx = new_idx;
+        if let Some(start_id) = &mut module.start {
+            if let Some(&new_id) = old_to_new.get(start_id) {
+                *start_id = new_id;
             }
         }
 
         // Elements (Tables)
         for elem in &mut module.elements {
-            for idx in &mut elem.func_indices {
-                if let Some(&new_idx) = old_to_new.get(idx) {
-                    *idx = new_idx;
+            for id in &mut elem.func_indices {
+                if let Some(&new_id) = old_to_new.get(id) {
+                    *id = new_id;
                 }
+            }
+        }
+
+        // Body updates
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
+                let mut updater = FunctionIdUpdater { remap: &old_to_new };
+                updater.visit(body);
             }
         }
     }
 }
 
-// Helper trait to allow "taking" from a Vec of Functions
-#[allow(dead_code)]
-trait TakeFunction<'a> {
-    fn take(&mut self) -> crate::ir::module::Function<'a>;
+struct FunctionIdUpdater<'a> {
+    remap: &'a HashMap<FuncId, FuncId>,
 }
 
-impl<'a> TakeFunction<'a> for crate::ir::module::Function<'a> {
-    fn take(&mut self) -> crate::ir::module::Function<'a> {
-        std::mem::replace(
-            self,
-            crate::ir::module::Function {
-                name: String::new(),
-                type_idx: None,
-                params: crate::ir::Type::NONE,
-                results: crate::ir::Type::NONE,
-                vars: Vec::new(),
-                body: None,
-                local_names: Vec::new(),
-            },
-        )
+impl<'a, 'b> Visitor<'b> for FunctionIdUpdater<'a> {
+    fn visit_expression(&mut self, expr: &mut ExprRef<'b>) {
+        match &mut expr.kind {
+            ExpressionKind::Call { target, .. } => {
+                if let Some(&new_id) = self.remap.get(target) {
+                    *target = new_id;
+                }
+            }
+            ExpressionKind::RefFunc { func } => {
+                if let Some(&new_id) = self.remap.get(func) {
+                    *func = new_id;
+                }
+            }
+            _ => {}
+        }
+        self.visit_children(expr);
     }
 }

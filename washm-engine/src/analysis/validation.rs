@@ -1,7 +1,7 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
 use crate::ir::module::{ExportKind, Function, Module};
 use crate::ir::visitor::ReadOnlyVisitor;
-use crate::ir::Type;
+use crate::ir::{FuncId, MemoryId, TableId, Type};
 use std::collections::HashSet;
 
 pub struct Validator<'a, 'm> {
@@ -9,64 +9,45 @@ pub struct Validator<'a, 'm> {
     current_function: Option<&'m Function<'a>>,
     valid: bool,
     errors: Vec<String>,
-    // Caches for index spaces
-    func_imports: Vec<&'m crate::ir::module::Import>,
-    memory_import: Option<&'m crate::ir::module::Import>,
 }
 
 impl<'a, 'm> Validator<'a, 'm> {
     pub fn new(module: &'m Module<'a>) -> Self {
-        let mut func_imports = Vec::new();
-        let mut memory_import = None;
-
-        for import in &module.imports {
-            match import.kind {
-                crate::ir::module::ImportKind::Function(..) => func_imports.push(import),
-                crate::ir::module::ImportKind::Memory(..) => memory_import = Some(import),
-                _ => {}
-            }
-        }
-
         Self {
             module,
             current_function: None,
             valid: true,
             errors: Vec::new(),
-            func_imports,
-            memory_import,
         }
     }
 
     pub fn validate(mut self) -> (bool, Vec<String>) {
         // Validate each function
-        for (func_idx, func) in self.module.functions.iter().enumerate() {
+        for (func_id, func) in self.module.functions.iter() {
             self.current_function = Some(func);
-            let context = format!("Function '{}' (index {}): ", func.name, func_idx);
+            let context = format!("Function '{}' (ID {:?}): ", func.name, func_id);
 
             // Validate type_idx if present
-            if let Some(type_idx) = func.type_idx {
-                if (type_idx as usize) >= self.module.types.len() {
-                    self.fail(&format!(
-                        "{}Type index {} out of bounds (module has {} types)",
-                        context,
-                        type_idx,
-                        self.module.types.len()
-                    ));
-                } else {
+            if let Some(type_id) = func.type_idx {
+                if let Some(func_type) = self.module.types.get(type_id as usize) {
                     // Verify that the function signature matches the type
-                    let func_type = &self.module.types[type_idx as usize];
                     if func_type.params != func.params || func_type.results != func.results {
                         self.fail(&format!(
-                            "{}Signature mismatch with type {}. Expected ({:?} -> {:?}), got ({:?} -> {:?})",
-                            context, type_idx, func_type.params, func_type.results, func.params, func.results
+                            "{}Signature mismatch with type {:?}. Expected ({:?} -> {:?}), got ({:?} -> {:?})",
+                            context, type_id, func_type.params, func_type.results, func.params, func.results
                         ));
                     }
+                } else {
+                    self.fail(&format!(
+                        "{}Type index {:?} does not exist",
+                        context, type_id,
+                    ));
                 }
             }
 
             // Check body if present
-            if let Some(body) = &func.body {
-                self.visit(*body);
+            if let Some(body) = func.body() {
+                self.visit(body);
 
                 // Check return type
                 if body.type_ != func.results {
@@ -89,140 +70,74 @@ impl<'a, 'm> Validator<'a, 'm> {
             }
 
             match export.kind {
-                ExportKind::Function(idx) => {
-                    let total_funcs = self.func_imports.len() + self.module.functions.len();
-                    if (idx as usize) >= total_funcs {
-                        self.fail(&format!("Exported function index {} out of bounds", idx));
+                ExportKind::Function(id) => {
+                    if self.module.functions.get(id).is_none() {
+                        self.fail(&format!("Exported function {:?} does not exist", id));
                     }
                 }
                 ExportKind::Global(id) => {
-                    if self.module.globals.get(id.cast()).is_none() {
+                    if self.module.globals.get(id).is_none() {
                         self.fail(&format!("Exported global {:?} does not exist", id));
                     }
                 }
-                ExportKind::Memory(idx) => {
-                    let has_memory = self.memory_import.is_some() || self.module.memory.is_some();
-                    if !has_memory {
-                        self.fail("Exported memory but no memory exists");
-                    } else if idx != 0 {
-                        self.fail(&format!(
-                            "Exported memory index {} out of bounds (only 0 allowed)",
-                            idx
-                        ));
+                ExportKind::Memory(id) => {
+                    if self.module.memories.get(id).is_none() {
+                        self.fail(&format!("Exported memory {:?} does not exist", id));
                     }
                 }
-                ExportKind::Table(idx) => {
-                    let has_table = self.module.table.is_some()
-                        || self.module.imports.iter().any(|imp| {
-                            matches!(imp.kind, crate::ir::module::ImportKind::Table(..))
-                        });
-
-                    if !has_table {
-                        self.fail("Exported table but no table exists");
-                    } else if idx != 0 {
-                        self.fail(&format!(
-                            "Exported table index {} out of bounds (only 0 allowed)",
-                            idx
-                        ));
+                ExportKind::Table(id) => {
+                    if self.module.tables.get(id).is_none() {
+                        self.fail(&format!("Exported table {:?} does not exist", id));
                     }
                 }
             }
         }
 
         // Validate data segments
-        for (i, segment) in self.module.data.iter().enumerate() {
+        for segment in &self.module.data {
             // Check memory exists
-            let has_memory = self.memory_import.is_some() || self.module.memory.is_some();
-            if !has_memory {
+            if self.module.memories.get(segment.memory_index).is_none() {
                 self.fail(&format!(
-                    "Data segment {} references memory, but no memory exists",
-                    i
+                    "Data segment references memory {:?}, but it does not exist",
+                    segment.memory_index
                 ));
             }
-
-            // Memory index must be 0 in MVP
-            if segment.memory_index != 0 {
-                self.fail(&format!(
-                    "Data segment {} has invalid memory index {} (only 0 allowed)",
-                    i, segment.memory_index
-                ));
-            }
-
             // Validate offset expression (must be constant)
             // For now, just walk the expression to trigger validation
             self.visit(segment.offset);
         }
 
         // Validate start function
-        if let Some(start_idx) = self.module.start {
-            let total_funcs = self.func_imports.len() + self.module.functions.len();
-            if (start_idx as usize) >= total_funcs {
-                self.fail(&format!(
-                    "Start function index {} out of bounds (total functions: {})",
-                    start_idx, total_funcs
-                ));
-            }
-
-            // Check that start function has no parameters and no results
-            let func_sig = if (start_idx as usize) < self.func_imports.len() {
-                // It's an imported function
-                let import = self.func_imports[start_idx as usize];
-                if let crate::ir::module::ImportKind::Function(params, results) = import.kind {
-                    Some((params, results))
-                } else {
-                    None
+        if let Some(start_id) = self.module.start {
+            if let Some(func) = self.module.functions.get(start_id) {
+                // Check that start function has no parameters and no results
+                if func.params != Type::NONE || func.results != Type::NONE {
+                    self.fail(&format!(
+                        "Start function {:?} must have no parameters and no results, but has ({:?} -> {:?})",
+                        start_id, func.params, func.results
+                    ));
                 }
             } else {
-                // It's a defined function
-                let local_idx = (start_idx as usize) - self.func_imports.len();
-                self.module
-                    .functions
-                    .get(local_idx)
-                    .map(|f| (f.params, f.results))
-            };
-
-            if let Some((params, results)) = func_sig {
-                if params != Type::NONE {
-                    self.fail("Start function must have no parameters");
-                }
-                if results != Type::NONE {
-                    self.fail("Start function must have no results");
-                }
+                self.fail(&format!("Start function {:?} does not exist", start_id));
             }
         }
 
         // Validate element segments
-        for (i, segment) in self.module.elements.iter().enumerate() {
+        for segment in &self.module.elements {
             // Check table exists
-            let has_table = self.module.table.is_some()
-                || self
-                    .module
-                    .imports
-                    .iter()
-                    .any(|imp| matches!(imp.kind, crate::ir::module::ImportKind::Table(..)));
-
-            if !has_table {
+            if self.module.tables.get(segment.table_index).is_none() {
                 self.fail(&format!(
-                    "Element segment {} references table, but no table exists",
-                    i
+                    "Element segment references table {:?}, but it does not exist",
+                    segment.table_index
                 ));
             }
 
-            // Table index must be 0 in MVP
-            if segment.table_index != 0 {
-                self.fail(&format!(
-                    "Element segment {} has invalid table index {} (only 0 allowed)",
-                    i, segment.table_index
-                ));
-            }
-
-            // Validate function indices
-            let total_funcs = self.func_imports.len() + self.module.functions.len();
-            for &func_idx in &segment.func_indices {
-                if (func_idx as usize) >= total_funcs {
+            // Validate function IDs
+            for &func_id in &segment.func_indices {
+                if self.module.functions.get(func_id).is_none() {
                     self.fail(&format!(
-                        "Element segment {} has function index {} out of bounds (total: {})",
-                        i, func_idx, total_funcs
+                        "Element segment has function ID {:?} which does not exist",
+                        func_id
                     ));
                 }
             }
@@ -254,7 +169,7 @@ impl<'a, 'm> Validator<'a, 'm> {
         }
 
         let var_idx = idx - param_len;
-        func.vars.get(var_idx).cloned()
+        func.vars().get(var_idx).cloned()
     }
 }
 
@@ -302,7 +217,7 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
                 }
             }
             ExpressionKind::GlobalGet { id } => {
-                if let Some(g) = self.module.globals.get(id.cast()) {
+                if let Some(g) = self.module.globals.get(*id) {
                     if expr.type_ != g.type_ && expr.type_ != Type::UNREACHABLE {
                         self.fail(&format!(
                             "GlobalGet: Expression type {:?} does not match global type {:?}",
@@ -314,7 +229,7 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
                 }
             }
             ExpressionKind::GlobalSet { id, value } => {
-                if let Some(g) = self.module.globals.get(id.cast()) {
+                if let Some(g) = self.module.globals.get(*id) {
                     if !g.mutable {
                         self.fail(&format!("GlobalSet: Global {:?} is immutable", id));
                     }
@@ -331,38 +246,67 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
             ExpressionKind::Call {
                 target, operands, ..
             } => {
-                let sig = if let Some(func) = self.module.get_function(target) {
-                    Some((func.params, func.results))
-                } else {
-                    self.func_imports
-                        .iter()
-                        .find(|import| import.name == *target) // Assuming field name == internal name
-                        .and_then(|import| {
-                            if let crate::ir::module::ImportKind::Function(params, results) =
-                                import.kind
-                            {
-                                Some((params, results))
-                            } else {
-                                None
-                            }
-                        })
-                };
-
-                if let Some((params, _results)) = sig {
-                    // Check params
-                    // Limitation: Type is single value. If mismatch, fail.
-                    // If multiple operands, we need tuple support in Type.
-                    // For now, simple check.
+                if let Some(func) = self.module.functions.get(*target) {
                     if !operands.is_empty() {
-                        // If we have operands but params is valid (not NONE), check type.
-                        // Assuming 1 param only for now as per minimal parser type support.
                         let op_type = operands[0].type_;
-                        if op_type != params && op_type != Type::UNREACHABLE {
-                            self.fail(&format!("Call to {} param mismatch", target));
+                        if op_type != func.params && op_type != Type::UNREACHABLE {
+                            self.fail(&format!("Call to {:?} param mismatch", target));
                         }
                     }
                 } else {
-                    self.fail(&format!("Call target not found: {}", target));
+                    self.fail(&format!("Call target not found: {:?}", target));
+                }
+            }
+            ExpressionKind::CallIndirect { table, type_, .. } => {
+                // Here 'type_' in CallIndirect is the Type (signature) itself,
+                // but we should check if it's a valid signature in the module if possible.
+                // However, the IR 'type_' is the actual Type object.
+                if self.module.tables.get(*table).is_none() {
+                    self.fail(&format!("CallIndirect: Table {:?} does not exist", table));
+                }
+            }
+            ExpressionKind::MemorySize { memory } => {
+                if self.module.memories.get(*memory).is_none() {
+                    self.fail(&format!("MemorySize: Memory {:?} does not exist", memory));
+                }
+            }
+            ExpressionKind::MemoryGrow { delta, memory } => {
+                if self.module.memories.get(*memory).is_none() {
+                    self.fail(&format!("MemoryGrow: Memory {:?} does not exist", memory));
+                }
+                if delta.type_ != Type::I32 && delta.type_ != Type::UNREACHABLE {
+                    self.fail(&format!(
+                        "MemoryGrow: Delta type {:?} must be I32",
+                        delta.type_
+                    ));
+                }
+            }
+            ExpressionKind::MemoryCopy {
+                dest_memory,
+                src_memory,
+                ..
+            } => {
+                if self.module.memories.get(*dest_memory).is_none() {
+                    self.fail(&format!(
+                        "MemoryCopy: Dest memory {:?} does not exist",
+                        dest_memory
+                    ));
+                }
+                if self.module.memories.get(*src_memory).is_none() {
+                    self.fail(&format!(
+                        "MemoryCopy: Src memory {:?} does not exist",
+                        src_memory
+                    ));
+                }
+            }
+            ExpressionKind::MemoryFill { memory, .. } => {
+                if self.module.memories.get(*memory).is_none() {
+                    self.fail(&format!("MemoryFill: Memory {:?} does not exist", memory));
+                }
+            }
+            ExpressionKind::AtomicNotify { memory, .. } => {
+                if self.module.memories.get(*memory).is_none() {
+                    self.fail(&format!("AtomicNotify: Memory {:?} does not exist", memory));
                 }
             }
             ExpressionKind::Return { .. }
@@ -379,13 +323,9 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
             | ExpressionKind::Break { .. }
             | ExpressionKind::Nop
             | ExpressionKind::Switch { .. }
-            | ExpressionKind::CallIndirect { .. }
-            | ExpressionKind::MemoryGrow { .. }
-            | ExpressionKind::MemorySize
             | ExpressionKind::AtomicRMW { .. }
             | ExpressionKind::AtomicCmpxchg { .. }
             | ExpressionKind::AtomicWait { .. }
-            | ExpressionKind::AtomicNotify { .. }
             | ExpressionKind::AtomicFence
             | ExpressionKind::SIMDExtract { .. }
             | ExpressionKind::SIMDReplace { .. }
@@ -396,8 +336,6 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
             | ExpressionKind::SIMDLoadStoreLane { .. }
             | ExpressionKind::MemoryInit { .. }
             | ExpressionKind::DataDrop { .. }
-            | ExpressionKind::MemoryCopy { .. }
-            | ExpressionKind::MemoryFill { .. }
             | ExpressionKind::TableGet { .. }
             | ExpressionKind::TableSet { .. }
             | ExpressionKind::TableSize { .. }

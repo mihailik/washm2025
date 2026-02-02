@@ -16,42 +16,26 @@ impl Pass for SignaturePruning {
         // 1. Collect usage info for all functions
         let mut pruning_info = HashMap::new();
 
-        let mut exported_names = HashSet::new();
-        let func_import_count = module
-            .imports
-            .iter()
-            .filter(|i| matches!(i.kind, crate::ir::module::ImportKind::Function(_, _)))
-            .count();
-
+        let mut exported_ids = HashSet::new();
         for export in &module.exports {
-            if let crate::ir::module::ExportKind::Function(idx) = export.kind {
-                if idx >= func_import_count as u32 {
-                    let defined_idx = (idx as usize) - func_import_count;
-                    if let Some(f) = module.functions.get(defined_idx) {
-                        exported_names.insert(f.name.clone());
-                    }
-                }
+            if let crate::ir::module::ExportKind::Function(id) = export.kind {
+                exported_ids.insert(id);
             }
         }
 
-        let mut address_taken_names = HashSet::new();
+        let mut address_taken_ids = HashSet::new();
         for elem in &module.elements {
-            for &func_idx in &elem.func_indices {
-                if func_idx >= func_import_count as u32 {
-                    let defined_idx = (func_idx as usize) - func_import_count;
-                    if let Some(f) = module.functions.get(defined_idx) {
-                        address_taken_names.insert(f.name.clone());
-                    }
-                }
+            for &func_id in &elem.func_indices {
+                address_taken_ids.insert(func_id);
             }
         }
 
         let mut candidates = HashSet::new();
-        for func in &module.functions {
-            if !exported_names.contains(&func.name) && !address_taken_names.contains(&func.name) {
+        for (id, func) in &module.functions {
+            if !exported_ids.contains(&id) && !address_taken_ids.contains(&id) {
                 if let Some(params) = get_param_types(func.params) {
-                    candidates.insert(func.name.clone());
-                    pruning_info.insert(func.name.clone(), vec![ParamStatus::Unused; params.len()]);
+                    candidates.insert(id);
+                    pruning_info.insert(id, vec![ParamStatus::Unused; params.len()]);
                 }
             }
         }
@@ -61,44 +45,41 @@ impl Pass for SignaturePruning {
         }
 
         // 2. Scan all function bodies to check for param usage (local.get)
-        for func in &module.functions {
-            if let Some(body) = &func.body {
-                let num_params = if let Some(p) = get_param_types(func.params) {
-                    p.len()
-                } else {
-                    0
-                };
+        for (id, func) in &mut module.functions {
+            let num_params = if let Some(p) = get_param_types(func.params) {
+                p.len()
+            } else {
+                0
+            };
+            if let Some(body) = func.body_mut() {
                 let mut scanner = ParamUsageScanner {
-                    target_func: &func.name,
-                    usage: if candidates.contains(&func.name) {
-                        pruning_info.get_mut(&func.name)
+                    usage: if candidates.contains(&id) {
+                        pruning_info.get_mut(&id)
                     } else {
                         None
                     },
                     num_params,
                 };
-                let mut body_ref = *body;
-                scanner.visit_expression(&mut body_ref);
+                scanner.visit_expression(body);
             }
         }
 
         // 3. Scan all call sites
-        for func in &module.functions {
-            if let Some(body) = &func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 let mut call_scanner = CallSiteScanner {
                     candidates: &candidates,
                     pruning_info: &mut pruning_info,
                 };
-                let mut body_ref = *body;
-                call_scanner.visit_expression(&mut body_ref);
+                call_scanner.visit_expression(body);
             }
         }
 
         // 4. Apply pruning
         let mut pruned_functions = HashSet::new();
 
-        for func in &mut module.functions {
-            if let Some(infos) = pruning_info.get(&func.name) {
+        for (id, func) in &mut module.functions {
+            if let Some(infos) = pruning_info.get(&id) {
                 let old_params_vec = get_param_types(func.params).unwrap_or_default();
                 if old_params_vec.len() != infos.len() {
                     continue;
@@ -134,7 +115,7 @@ impl Pass for SignaturePruning {
                     func.params = new_ty;
                     pruned_functions.insert(func.name.clone());
 
-                    if let Some(body) = &mut func.body {
+                    if let Some(body) = func.body_mut() {
                         let mut remapper = LocalRemapper {
                             param_remap: &remap,
                             const_replacements: &constant_replacements,
@@ -149,8 +130,8 @@ impl Pass for SignaturePruning {
 
         // 5. Update Call Sites
         if !pruned_functions.is_empty() {
-            for func in &mut module.functions {
-                if let Some(body) = &mut func.body {
+            for (_, func) in &mut module.functions {
+                if let Some(body) = func.body_mut() {
                     let mut call_updater = CallUpdater {
                         pruning_info: &pruning_info,
                     };
@@ -193,7 +174,6 @@ enum ParamStatus {
 
 #[allow(dead_code)]
 struct ParamUsageScanner<'a> {
-    target_func: &'a str,
     usage: Option<&'a mut Vec<ParamStatus>>,
     num_params: usize,
 }
@@ -222,8 +202,8 @@ impl<'a, 'b> Visitor<'b> for ParamUsageScanner<'a> {
 }
 
 struct CallSiteScanner<'a> {
-    candidates: &'a HashSet<String>,
-    pruning_info: &'a mut HashMap<String, Vec<ParamStatus>>,
+    candidates: &'a HashSet<crate::ir::FuncId>,
+    pruning_info: &'a mut HashMap<crate::ir::FuncId, Vec<ParamStatus>>,
 }
 
 impl<'a, 'b> Visitor<'b> for CallSiteScanner<'a> {
@@ -232,8 +212,8 @@ impl<'a, 'b> Visitor<'b> for CallSiteScanner<'a> {
             target, operands, ..
         } = &expr.kind
         {
-            if self.candidates.contains(*target) {
-                if let Some(statuses) = self.pruning_info.get_mut(*target) {
+            if self.candidates.contains(target) {
+                if let Some(statuses) = self.pruning_info.get_mut(target) {
                     for (i, op) in operands.iter().enumerate() {
                         if i >= statuses.len() {
                             break;
@@ -315,7 +295,7 @@ impl<'a, 'b> Visitor<'b> for LocalRemapper<'a> {
 }
 
 struct CallUpdater<'a> {
-    pruning_info: &'a HashMap<String, Vec<ParamStatus>>,
+    pruning_info: &'a HashMap<crate::ir::FuncId, Vec<ParamStatus>>,
 }
 
 impl<'a, 'b> Visitor<'b> for CallUpdater<'a> {
@@ -326,7 +306,7 @@ impl<'a, 'b> Visitor<'b> for CallUpdater<'a> {
             target, operands, ..
         } = &mut expr.kind
         {
-            if let Some(statuses) = self.pruning_info.get(*target) {
+            if let Some(statuses) = self.pruning_info.get(target) {
                 let mut new_operands = bumpalo::collections::Vec::new_in(operands.bump());
 
                 for (i, op) in operands.iter().enumerate() {
@@ -369,12 +349,12 @@ mod tests {
             vec![Type::I32, Type::F32],
             Some(nop),
         );
-        module.add_function(func);
+        let callee_id = module.add_function(func);
 
         let builder = IrBuilder::new(&bump);
         let arg1 = builder.const_(Literal::I32(1));
         let args = bumpalo::collections::Vec::from_iter_in([arg1], &bump);
-        let call = builder.call("unused_params", args, Type::NONE, false);
+        let call = builder.call(callee_id, args, Type::NONE, false);
 
         let caller = Function::new(
             "caller".to_string(),
@@ -383,17 +363,17 @@ mod tests {
             vec![],
             Some(call),
         );
-        module.add_function(caller);
-        module.export_function(1, "main".to_string());
+        let caller_id = module.add_function(caller);
+        module.export_function(caller_id, "main".to_string());
 
         let mut pass = SignaturePruning;
         pass.run(&mut module);
 
-        let callee = &module.functions[0];
+        let callee = &module.functions[callee_id];
         assert_eq!(callee.params, Type::NONE);
 
-        let caller = &module.functions[1];
-        if let Some(body) = &caller.body {
+        let caller = &module.functions[caller_id];
+        if let Some(body) = &caller.body() {
             if let ExpressionKind::Call { operands, .. } = &body.kind {
                 assert_eq!(operands.len(), 0);
             } else {
@@ -417,11 +397,11 @@ mod tests {
             vec![Type::I32, Type::I32],
             Some(get0),
         );
-        module.add_function(func);
+        let callee_id = module.add_function(func);
 
         let c1_arg1 = builder.const_(Literal::I32(42));
         let c1_args = bumpalo::collections::Vec::from_iter_in([c1_arg1], &bump);
-        let call1 = builder.call("const_param", c1_args, Type::I32, false);
+        let call1 = builder.call(callee_id, c1_args, Type::I32, false);
         let caller1 = Function::new(
             "caller1".to_string(),
             Type::NONE,
@@ -429,11 +409,11 @@ mod tests {
             vec![],
             Some(call1),
         );
-        module.add_function(caller1);
+        let caller1_id = module.add_function(caller1);
 
         let c2_arg1 = builder.const_(Literal::I32(42));
         let c2_args = bumpalo::collections::Vec::from_iter_in([c2_arg1], &bump);
-        let call2 = builder.call("const_param", c2_args, Type::I32, false);
+        let call2 = builder.call(callee_id, c2_args, Type::I32, false);
         let caller2 = Function::new(
             "caller2".to_string(),
             Type::NONE,
@@ -441,20 +421,26 @@ mod tests {
             vec![],
             Some(call2),
         );
-        module.add_function(caller2);
+        let caller2_id = module.add_function(caller2);
 
-        module.export_function(1, "c1".to_string());
-        module.export_function(2, "c2".to_string());
+        module.export_function(caller1_id, "c1".to_string());
+        module.export_function(caller2_id, "c2".to_string());
 
         let mut pass = SignaturePruning;
         pass.run(&mut module);
 
-        let callee = &module.functions[0];
+        let callee = &module.functions[callee_id];
         assert_eq!(callee.params, Type::NONE);
 
-        if let Some(body) = &callee.body {
+        if let Some(body) = &callee.body() {
             if let ExpressionKind::Const(lit) = &body.kind {
-                assert_eq!(*lit, Literal::I32(42));
+                assert_eq!(
+                    match lit {
+                        Literal::I32(v) => *v,
+                        _ => panic!("Expected I32"),
+                    },
+                    42
+                );
             } else {
                 panic!("Body should be const");
             }

@@ -1,5 +1,5 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{GlobalKind, ImportKind, Module};
+use crate::ir::module::{GlobalKind, Module, TableKind};
 use crate::ir::visitor::ReadOnlyVisitor;
 use std::collections::HashMap;
 
@@ -22,31 +22,59 @@ impl ModuleStats {
             stats.increment_type(ty.results);
         }
 
-        // Count references in imports
-        for import in &module.imports {
-            match import.kind {
-                ImportKind::Function(params, results) => {
-                    stats.increment_type(params);
-                    stats.increment_type(results);
-                }
-                ImportKind::Table(ty, _, _) => {
+        // Count references in functions (including imports)
+        for (_, func) in &module.functions {
+            if let Some(import) = &func.import {
+                stats.increment_type(func.params);
+                stats.increment_type(func.results);
+            } else {
+                stats.increment_type(func.params);
+                stats.increment_type(func.results);
+                for &ty in &func.vars {
                     stats.increment_type(ty);
                 }
-                ImportKind::Memory(_) => {}
+
+                if let Some(body_expr) = &func.body {
+                    let mut visitor = StatsVisitor {
+                        stats: &mut stats,
+                        module,
+                        current_function: Some(func.name.clone()),
+                    };
+                    visitor.visit_expression(*body_expr);
+                }
+            }
+            if let Some(idx) = func.type_idx {
+                *stats.type_counts.entry(idx).or_insert(0) += 1;
             }
         }
+
+        // Count references in tables
+        for (_, table) in &module.tables {
+            stats.increment_type(table.limits.element_type);
+        }
+
+        // Count references in memories
+        // (Memory doesn't have a type that we count usually, just limits)
 
         // Count references in globals
         for (_, global) in &module.globals {
             stats.increment_type(global.type_);
+            if let GlobalKind::Local { init } = &global.kind {
+                let mut visitor = StatsVisitor {
+                    stats: &mut stats,
+                    module,
+                    current_function: None,
+                };
+                visitor.visit_expression(*init);
+            }
         }
 
         // Count references in exports
         for export in &module.exports {
             match export.kind {
-                crate::ir::module::ExportKind::Function(index) => {
-                    if let Some(name) = module_get_func_name(module, index) {
-                        stats.increment_func(&name);
+                crate::ir::module::ExportKind::Function(id) => {
+                    if let Some(func) = module.functions.get(id) {
+                        stats.increment_func(&func.name);
                     }
                 }
                 crate::ir::module::ExportKind::Global(id) => {
@@ -56,51 +84,19 @@ impl ModuleStats {
             }
         }
 
-        // Count references in functions
-        for func in &module.functions {
-            stats.increment_type(func.params);
-            stats.increment_type(func.results);
-            for &ty in &func.vars {
-                stats.increment_type(ty);
-            }
-            if let Some(idx) = func.type_idx {
-                *stats.type_counts.entry(idx).or_insert(0) += 1;
-            }
-
-            if let Some(body) = func.body {
-                let mut visitor = StatsVisitor {
-                    stats: &mut stats,
-                    current_function: Some(func.name.clone()),
-                };
-                visitor.visit_expression(body);
-            }
-        }
-
         // Count references in start function
-        if let Some(start_idx) = module.start {
-            if let Some(name) = module_get_func_name(module, start_idx) {
-                stats.increment_func(&name);
+        if let Some(start_id) = module.start {
+            if let Some(func) = module.functions.get(start_id) {
+                stats.increment_func(&func.name);
             }
         }
 
         // Count references in table elements
         for elem in &module.elements {
-            for &idx in &elem.func_indices {
-                if let Some(name) = module_get_func_name(module, idx) {
-                    stats.increment_func(&name);
+            for &id in &elem.func_indices {
+                if let Some(func) = module.functions.get(id) {
+                    stats.increment_func(&func.name);
                 }
-            }
-        }
-
-        // Count references in global init expressions
-        for (_, global) in module.globals.iter() {
-            stats.increment_type(global.type_);
-            if let crate::ir::module::GlobalKind::Local { init } = &global.kind {
-                let mut visitor = StatsVisitor {
-                    stats: &mut stats,
-                    current_function: None,
-                };
-                visitor.visit_expression(*init);
             }
         }
 
@@ -122,35 +118,20 @@ impl ModuleStats {
     }
 }
 
-fn module_get_func_name(module: &Module, index: u32) -> Option<String> {
-    let mut current_idx = 0;
-    for import in &module.imports {
-        if let ImportKind::Function(_, _) = import.kind {
-            if current_idx == index {
-                return Some(import.name.clone());
-            }
-            current_idx += 1;
-        }
-    }
-
-    let defined_idx = index - current_idx;
-    module
-        .functions
-        .get(defined_idx as usize)
-        .map(|f| f.name.clone())
-}
-
-struct StatsVisitor<'a> {
+struct StatsVisitor<'a, 'b> {
     stats: &'a mut ModuleStats,
+    module: &'a Module<'b>,
     current_function: Option<String>,
 }
 
-impl<'a, 'b> ReadOnlyVisitor<'b> for StatsVisitor<'a> {
-    fn visit_expression(&mut self, expr: ExprRef<'b>) {
+impl<'a, 'b, 'c> ReadOnlyVisitor<'c> for StatsVisitor<'a, 'b> {
+    fn visit_expression(&mut self, expr: ExprRef<'c>) {
         self.stats.increment_type(expr.type_);
         match &expr.kind {
             ExpressionKind::Call { target, .. } | ExpressionKind::RefFunc { func: target } => {
-                self.stats.increment_func(target);
+                if let Some(func) = self.module.functions.get(*target) {
+                    self.stats.increment_func(&func.name);
+                }
             }
             ExpressionKind::GlobalGet { id } | ExpressionKind::GlobalSet { id, .. } => {
                 self.stats.increment_global(*id);

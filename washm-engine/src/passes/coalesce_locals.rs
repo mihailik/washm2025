@@ -14,7 +14,7 @@ impl Pass for CoalesceLocals {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for func in &mut module.functions {
+        for (_, func) in &mut module.functions {
             Self::run_on_func(func);
         }
     }
@@ -148,7 +148,7 @@ impl<'a, 'b> Visitor<'a> for CopyCoalescingVisitor<'b> {
                         self.visit_expression(e);
                     }
                 }
-                ExpressionKind::MemoryGrow { delta } => {
+                ExpressionKind::MemoryGrow { delta, .. } => {
                     self.visit_expression(delta);
                 }
                 ExpressionKind::AtomicRMW { ptr, value, .. } => {
@@ -175,7 +175,7 @@ impl<'a, 'b> Visitor<'a> for CopyCoalescingVisitor<'b> {
                     self.visit_expression(expected);
                     self.visit_expression(timeout);
                 }
-                ExpressionKind::AtomicNotify { ptr, count } => {
+                ExpressionKind::AtomicNotify { ptr, count, .. } => {
                     self.visit_expression(ptr);
                     self.visit_expression(count);
                 }
@@ -236,12 +236,16 @@ impl<'a, 'b> Visitor<'a> for CopyCoalescingVisitor<'b> {
                     self.visit_expression(offset);
                     self.visit_expression(size);
                 }
-                ExpressionKind::MemoryCopy { dest, src, size } => {
+                ExpressionKind::MemoryCopy {
+                    dest, src, size, ..
+                } => {
                     self.visit_expression(dest);
                     self.visit_expression(src);
                     self.visit_expression(size);
                 }
-                ExpressionKind::MemoryFill { dest, value, size } => {
+                ExpressionKind::MemoryFill {
+                    dest, value, size, ..
+                } => {
                     self.visit_expression(dest);
                     self.visit_expression(value);
                     self.visit_expression(size);
@@ -343,7 +347,7 @@ impl<'a, 'b> Visitor<'a> for CopyCoalescingVisitor<'b> {
                 | ExpressionKind::RefNull { .. }
                 | ExpressionKind::RefFunc { .. }
                 | ExpressionKind::TableSize { .. }
-                | ExpressionKind::MemorySize
+                | ExpressionKind::MemorySize { .. }
                 | ExpressionKind::DataDrop { .. }
                 | ExpressionKind::ElemDrop { .. }
                 | ExpressionKind::Rethrow { .. }
@@ -387,8 +391,19 @@ impl<'a, 'b> Visitor<'a> for CopyCoalescingVisitor<'b> {
 
 impl CoalesceLocals {
     pub fn run_on_func(func: &mut Function) {
-        if let Some(body) = &mut func.body {
-            let root = &mut *body;
+        let num_params = Self::count_types(func.params);
+
+        let mut types = Vec::new();
+        Self::append_types(&mut types, func.params);
+        for var_type in func.vars().iter().copied() {
+            Self::append_types(&mut types, var_type);
+        }
+
+        let mut mapping;
+        let mut new_vars;
+
+        if let Some(body) = func.body_mut() {
+            let root = body;
 
             let builder = CFGBuilder::new();
             let mut cfg = builder.build(root);
@@ -396,17 +411,9 @@ impl CoalesceLocals {
 
             let interference = cfg.calculate_interference();
 
-            let num_params = Self::count_types(func.params);
+            mapping = Self::color(num_params as u32, &types, &interference);
 
-            let mut types = Vec::new();
-            Self::append_types(&mut types, func.params);
-            for var_type in func.vars.iter().copied() {
-                Self::append_types(&mut types, var_type);
-            }
-
-            let mut mapping = Self::color(num_params as u32, &types, &interference);
-
-            let mut new_vars = Vec::new();
+            new_vars = Vec::new();
             for (old_idx, &new_idx) in mapping.iter().enumerate() {
                 if new_idx >= num_params as u32 {
                     let internal_idx = (new_idx - num_params as u32) as usize;
@@ -416,23 +423,29 @@ impl CoalesceLocals {
                     new_vars[internal_idx] = types[old_idx];
                 }
             }
-            func.vars = new_vars;
-            // After initial mapping, perform copy coalescing and dead store elimination
 
+            // Remap instructions
             let mut mapper = LocalMapper {
                 mapping: &mut mapping,
             };
             mapper.visit(root);
+
             // Remove dead stores after coalescing and remapping
             Self::eliminate_dead_stores(root);
+        } else {
+            return;
+        }
 
+        // Update vars *after* the mapping visit to avoid borrow conflicts
+        *func.vars_mut() = new_vars;
+
+        if let Some(body) = func.body_mut() {
+            let root = body;
             // Perform copy coalescing after remapping and dead store elimination
             let mut copy_coalescer = CopyCoalescingVisitor {
                 _phantom: std::marker::PhantomData,
             };
             copy_coalescer.visit(root);
-
-            drop(cfg);
         }
     }
 
@@ -592,7 +605,7 @@ impl CoalesceLocals {
                         Self::collect_used_recursive(e, used);
                     }
                 }
-                ExpressionKind::MemoryGrow { delta } => {
+                ExpressionKind::MemoryGrow { delta, .. } => {
                     Self::collect_used_recursive(delta, used);
                 }
                 ExpressionKind::AtomicRMW { ptr, value, .. } => {
@@ -619,7 +632,7 @@ impl CoalesceLocals {
                     Self::collect_used_recursive(expected, used);
                     Self::collect_used_recursive(timeout, used);
                 }
-                ExpressionKind::AtomicNotify { ptr, count } => {
+                ExpressionKind::AtomicNotify { ptr, count, .. } => {
                     Self::collect_used_recursive(ptr, used);
                     Self::collect_used_recursive(count, used);
                 }
@@ -680,12 +693,16 @@ impl CoalesceLocals {
                     Self::collect_used_recursive(offset, used);
                     Self::collect_used_recursive(size, used);
                 }
-                ExpressionKind::MemoryCopy { dest, src, size } => {
+                ExpressionKind::MemoryCopy {
+                    dest, src, size, ..
+                } => {
                     Self::collect_used_recursive(dest, used);
                     Self::collect_used_recursive(src, used);
                     Self::collect_used_recursive(size, used);
                 }
-                ExpressionKind::MemoryFill { dest, value, size } => {
+                ExpressionKind::MemoryFill {
+                    dest, value, size, ..
+                } => {
                     Self::collect_used_recursive(dest, used);
                     Self::collect_used_recursive(value, used);
                     Self::collect_used_recursive(size, used);
@@ -800,7 +817,7 @@ impl CoalesceLocals {
                 | ExpressionKind::RefNull { .. }
                 | ExpressionKind::RefFunc { .. }
                 | ExpressionKind::TableSize { .. }
-                | ExpressionKind::MemorySize
+                | ExpressionKind::MemorySize { .. }
                 | ExpressionKind::DataDrop { .. }
                 | ExpressionKind::ElemDrop { .. }
                 | ExpressionKind::Rethrow { .. }
@@ -915,7 +932,7 @@ impl CoalesceLocals {
                         Self::eliminate_recursive(e, used);
                     }
                 }
-                ExpressionKind::MemoryGrow { delta } => {
+                ExpressionKind::MemoryGrow { delta, .. } => {
                     Self::eliminate_recursive(delta, used);
                 }
                 ExpressionKind::AtomicRMW { ptr, value, .. } => {
@@ -942,7 +959,7 @@ impl CoalesceLocals {
                     Self::eliminate_recursive(expected, used);
                     Self::eliminate_recursive(timeout, used);
                 }
-                ExpressionKind::AtomicNotify { ptr, count } => {
+                ExpressionKind::AtomicNotify { ptr, count, .. } => {
                     Self::eliminate_recursive(ptr, used);
                     Self::eliminate_recursive(count, used);
                 }
@@ -1003,12 +1020,16 @@ impl CoalesceLocals {
                     Self::eliminate_recursive(offset, used);
                     Self::eliminate_recursive(size, used);
                 }
-                ExpressionKind::MemoryCopy { dest, src, size } => {
+                ExpressionKind::MemoryCopy {
+                    dest, src, size, ..
+                } => {
                     Self::eliminate_recursive(dest, used);
                     Self::eliminate_recursive(src, used);
                     Self::eliminate_recursive(size, used);
                 }
-                ExpressionKind::MemoryFill { dest, value, size } => {
+                ExpressionKind::MemoryFill {
+                    dest, value, size, ..
+                } => {
                     Self::eliminate_recursive(dest, used);
                     Self::eliminate_recursive(value, used);
                     Self::eliminate_recursive(size, used);
@@ -1110,7 +1131,7 @@ impl CoalesceLocals {
                 | ExpressionKind::RefNull { .. }
                 | ExpressionKind::RefFunc { .. }
                 | ExpressionKind::TableSize { .. }
-                | ExpressionKind::MemorySize
+                | ExpressionKind::MemorySize { .. }
                 | ExpressionKind::DataDrop { .. }
                 | ExpressionKind::ElemDrop { .. }
                 | ExpressionKind::Rethrow { .. }

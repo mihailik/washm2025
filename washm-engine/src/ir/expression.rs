@@ -1,5 +1,5 @@
 use crate::ir::ops::{BinaryOp, UnaryOp};
-use crate::ir::{Literal, Type, GlobalId};
+use crate::ir::{FuncId, GlobalId, Literal, MemoryId, TableId, Type};
 use bumpalo::collections::Vec as BumpVec;
 use bumpalo::Bump;
 use std::ops::{Deref, DerefMut};
@@ -58,7 +58,7 @@ pub enum ExpressionKind<'a> {
         right: ExprRef<'a>,
     },
     Call {
-        target: &'a str,
+        target: FuncId,
         operands: BumpVec<'a, ExprRef<'a>>,
         is_return: bool,
     },
@@ -107,6 +107,7 @@ pub enum ExpressionKind<'a> {
         if_false: ExprRef<'a>,
     },
     Load {
+        memory: MemoryId,
         bytes: u32,       // 1, 2, 4, or 8
         signed: bool,     // For sub-word loads
         offset: u32,      // Memory offset
@@ -114,6 +115,7 @@ pub enum ExpressionKind<'a> {
         ptr: ExprRef<'a>, // Address to load from
     },
     Store {
+        memory: MemoryId,
         bytes: u32,         // 1, 2, 4, or 8
         offset: u32,        // Memory offset
         align: u32,         // Alignment
@@ -128,17 +130,21 @@ pub enum ExpressionKind<'a> {
         value: Option<ExprRef<'a>>,  // Value passing (nullable)
     },
     CallIndirect {
-        table: &'a str,
+        table: TableId,
         target: ExprRef<'a>, // Function index
         operands: BumpVec<'a, ExprRef<'a>>,
         type_: Type, // Signature
     },
     MemoryGrow {
+        memory: MemoryId,
         delta: ExprRef<'a>,
     },
-    MemorySize,
+    MemorySize {
+        memory: MemoryId,
+    },
     // Atomic operations
     AtomicRMW {
+        memory: MemoryId,
         op: crate::ir::ops::AtomicOp,
         bytes: u32,
         offset: u32,
@@ -146,6 +152,7 @@ pub enum ExpressionKind<'a> {
         value: ExprRef<'a>,
     },
     AtomicCmpxchg {
+        memory: MemoryId,
         bytes: u32,
         offset: u32,
         ptr: ExprRef<'a>,
@@ -153,12 +160,14 @@ pub enum ExpressionKind<'a> {
         replacement: ExprRef<'a>,
     },
     AtomicWait {
+        memory: MemoryId,
         ptr: ExprRef<'a>,
         expected: ExprRef<'a>,
         timeout: ExprRef<'a>,
         expected_type: Type,
     },
     AtomicNotify {
+        memory: MemoryId,
         ptr: ExprRef<'a>,
         count: ExprRef<'a>,
     },
@@ -179,7 +188,7 @@ pub enum ExpressionKind<'a> {
         value: ExprRef<'a>,
     },
     RefFunc {
-        func: &'a str,
+        func: FuncId,
     },
     RefEq {
         left: ExprRef<'a>,
@@ -190,37 +199,37 @@ pub enum ExpressionKind<'a> {
         value: ExprRef<'a>,
     },
     TableGet {
-        table: &'a str,
+        table: TableId,
         index: ExprRef<'a>,
     },
     TableSet {
-        table: &'a str,
+        table: TableId,
         index: ExprRef<'a>,
         value: ExprRef<'a>,
     },
     TableSize {
-        table: &'a str,
+        table: TableId,
     },
     TableGrow {
-        table: &'a str,
+        table: TableId,
         value: ExprRef<'a>,
         delta: ExprRef<'a>,
     },
     TableFill {
-        table: &'a str,
+        table: TableId,
         dest: ExprRef<'a>,
         value: ExprRef<'a>,
         size: ExprRef<'a>,
     },
     TableCopy {
-        dest_table: &'a str,
-        src_table: &'a str,
+        dest_table: TableId,
+        src_table: TableId,
         dest: ExprRef<'a>,
         src: ExprRef<'a>,
         size: ExprRef<'a>,
     },
     TableInit {
-        table: &'a str,
+        table: TableId,
         segment: u32,
         dest: ExprRef<'a>,
         offset: ExprRef<'a>,
@@ -230,6 +239,7 @@ pub enum ExpressionKind<'a> {
         segment: u32,
     },
     MemoryInit {
+        memory: MemoryId,
         segment: u32,
         dest: ExprRef<'a>,
         offset: ExprRef<'a>,
@@ -239,11 +249,14 @@ pub enum ExpressionKind<'a> {
         segment: u32,
     },
     MemoryCopy {
+        dest_memory: MemoryId,
+        src_memory: MemoryId,
         dest: ExprRef<'a>,
         src: ExprRef<'a>,
         size: ExprRef<'a>,
     },
     MemoryFill {
+        memory: MemoryId,
         dest: ExprRef<'a>,
         value: ExprRef<'a>,
         size: ExprRef<'a>,
@@ -380,7 +393,7 @@ impl<'a> ExpressionKind<'a> {
             | ExpressionKind::GlobalSet { value, .. }
             | ExpressionKind::Drop { value }
             | ExpressionKind::Load { ptr: value, .. }
-            | ExpressionKind::MemoryGrow { delta: value }
+            | ExpressionKind::MemoryGrow { delta: value, .. }
             | ExpressionKind::RefIsNull { value }
             | ExpressionKind::RefAs { value, .. }
             | ExpressionKind::RefTest { value, .. }
@@ -421,6 +434,7 @@ impl<'a> ExpressionKind<'a> {
             | ExpressionKind::AtomicNotify {
                 ptr: left,
                 count: right,
+                ..
             }
             | ExpressionKind::SIMDReplace {
                 vec: left,
@@ -541,7 +555,9 @@ impl<'a> ExpressionKind<'a> {
                 f(*offset);
                 f(*size);
             }
-            ExpressionKind::MemoryCopy { dest, src, size }
+            ExpressionKind::MemoryCopy {
+                dest, src, size, ..
+            }
             | ExpressionKind::TableCopy {
                 dest, src, size, ..
             } => {
@@ -583,7 +599,7 @@ impl<'a> ExpressionKind<'a> {
             | ExpressionKind::RefNull { .. }
             | ExpressionKind::RefFunc { .. }
             | ExpressionKind::TableSize { .. }
-            | ExpressionKind::MemorySize
+            | ExpressionKind::MemorySize { .. }
             | ExpressionKind::DataDrop { .. }
             | ExpressionKind::ElemDrop { .. }
             | ExpressionKind::Nop
@@ -772,7 +788,7 @@ impl<'a> IrBuilder<'a> {
 
     pub fn call(
         &self,
-        target: &'a str,
+        target: impl Into<FuncId>,
         operands: BumpVec<'a, ExprRef<'a>>,
         type_: Type,
         is_return: bool,
@@ -780,7 +796,7 @@ impl<'a> IrBuilder<'a> {
         Expression::new(
             self.bump,
             ExpressionKind::Call {
-                target,
+                target: target.into(),
                 operands,
                 is_return,
             },
@@ -790,7 +806,7 @@ impl<'a> IrBuilder<'a> {
 
     pub fn call_indirect(
         &self,
-        table: &'a str,
+        table: impl Into<TableId>,
         target: ExprRef<'a>,
         operands: BumpVec<'a, ExprRef<'a>>,
         sig: Type,
@@ -799,7 +815,7 @@ impl<'a> IrBuilder<'a> {
         Expression::new(
             self.bump,
             ExpressionKind::CallIndirect {
-                table,
+                table: table.into(),
                 target,
                 operands,
                 type_: sig,
@@ -824,14 +840,21 @@ impl<'a> IrBuilder<'a> {
         Expression::new(self.bump, ExpressionKind::LocalTee { index, value }, type_)
     }
 
-    pub fn global_get(&self, id: GlobalId, type_: Type) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::GlobalGet { id: id.cast() }, type_)
-    }
-
-    pub fn global_set(&self, id: GlobalId, value: ExprRef<'a>) -> ExprRef<'a> {
+    pub fn global_get(&self, id: impl Into<GlobalId>, type_: Type) -> ExprRef<'a> {
         Expression::new(
             self.bump,
-            ExpressionKind::GlobalSet { id: id.cast(), value },
+            ExpressionKind::GlobalGet { id: id.into() },
+            type_,
+        )
+    }
+
+    pub fn global_set(&self, id: impl Into<GlobalId>, value: ExprRef<'a>) -> ExprRef<'a> {
+        Expression::new(
+            self.bump,
+            ExpressionKind::GlobalSet {
+                id: id.into(),
+                value,
+            },
             Type::NONE,
         )
     }
@@ -897,6 +920,7 @@ impl<'a> IrBuilder<'a> {
 
     pub fn load(
         &self,
+        memory: impl Into<MemoryId>,
         bytes: u32,
         signed: bool,
         offset: u32,
@@ -907,6 +931,7 @@ impl<'a> IrBuilder<'a> {
         Expression::new(
             self.bump,
             ExpressionKind::Load {
+                memory: memory.into(),
                 bytes,
                 signed,
                 offset,
@@ -919,6 +944,7 @@ impl<'a> IrBuilder<'a> {
 
     pub fn store(
         &self,
+        memory: impl Into<MemoryId>,
         bytes: u32,
         offset: u32,
         align: u32,
@@ -928,6 +954,7 @@ impl<'a> IrBuilder<'a> {
         Expression::new(
             self.bump,
             ExpressionKind::Store {
+                memory: memory.into(),
                 bytes,
                 offset,
                 align,
@@ -968,16 +995,30 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn memory_size(&self) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::MemorySize, Type::I32)
+    pub fn memory_size(&self, memory: impl Into<MemoryId>) -> ExprRef<'a> {
+        Expression::new(
+            self.bump,
+            ExpressionKind::MemorySize {
+                memory: memory.into(),
+            },
+            Type::I32,
+        )
     }
 
-    pub fn memory_grow(&self, delta: ExprRef<'a>) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::MemoryGrow { delta }, Type::I32)
+    pub fn memory_grow(&self, memory: impl Into<MemoryId>, delta: ExprRef<'a>) -> ExprRef<'a> {
+        Expression::new(
+            self.bump,
+            ExpressionKind::MemoryGrow {
+                memory: memory.into(),
+                delta,
+            },
+            Type::I32,
+        )
     }
 
     pub fn atomic_rmw(
         &self,
+        memory: MemoryId,
         op: crate::ir::ops::AtomicOp,
         bytes: u32,
         offset: u32,
@@ -988,6 +1029,7 @@ impl<'a> IrBuilder<'a> {
         Expression::new(
             self.bump,
             ExpressionKind::AtomicRMW {
+                memory,
                 op,
                 bytes,
                 offset,
@@ -1000,6 +1042,7 @@ impl<'a> IrBuilder<'a> {
 
     pub fn atomic_cmpxchg(
         &self,
+        memory: MemoryId,
         bytes: u32,
         offset: u32,
         ptr: ExprRef<'a>,
@@ -1010,6 +1053,7 @@ impl<'a> IrBuilder<'a> {
         Expression::new(
             self.bump,
             ExpressionKind::AtomicCmpxchg {
+                memory,
                 bytes,
                 offset,
                 ptr,
@@ -1022,6 +1066,7 @@ impl<'a> IrBuilder<'a> {
 
     pub fn atomic_wait(
         &self,
+        memory: MemoryId,
         ptr: ExprRef<'a>,
         expected: ExprRef<'a>,
         timeout: ExprRef<'a>,
@@ -1030,6 +1075,7 @@ impl<'a> IrBuilder<'a> {
         Expression::new(
             self.bump,
             ExpressionKind::AtomicWait {
+                memory,
                 ptr,
                 expected,
                 timeout,
@@ -1039,10 +1085,15 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn atomic_notify(&self, ptr: ExprRef<'a>, count: ExprRef<'a>) -> ExprRef<'a> {
+    pub fn atomic_notify(
+        &self,
+        memory: MemoryId,
+        ptr: ExprRef<'a>,
+        count: ExprRef<'a>,
+    ) -> ExprRef<'a> {
         Expression::new(
             self.bump,
-            ExpressionKind::AtomicNotify { ptr, count },
+            ExpressionKind::AtomicNotify { memory, ptr, count },
             Type::I32,
         )
     }
@@ -1053,6 +1104,7 @@ impl<'a> IrBuilder<'a> {
 
     pub fn memory_init(
         &self,
+        memory: MemoryId,
         segment: u32,
         dest: ExprRef<'a>,
         offset: ExprRef<'a>,
@@ -1061,6 +1113,7 @@ impl<'a> IrBuilder<'a> {
         Expression::new(
             self.bump,
             ExpressionKind::MemoryInit {
+                memory,
                 segment,
                 dest,
                 offset,
@@ -1076,35 +1129,49 @@ impl<'a> IrBuilder<'a> {
 
     pub fn memory_copy(
         &self,
+        dest_memory: MemoryId,
+        src_memory: MemoryId,
         dest: ExprRef<'a>,
         src: ExprRef<'a>,
         size: ExprRef<'a>,
     ) -> ExprRef<'a> {
         Expression::new(
             self.bump,
-            ExpressionKind::MemoryCopy { dest, src, size },
+            ExpressionKind::MemoryCopy {
+                dest_memory,
+                src_memory,
+                dest,
+                src,
+                size,
+            },
             Type::NONE,
         )
     }
 
     pub fn memory_fill(
         &self,
+        memory: MemoryId,
         dest: ExprRef<'a>,
         value: ExprRef<'a>,
         size: ExprRef<'a>,
     ) -> ExprRef<'a> {
         Expression::new(
             self.bump,
-            ExpressionKind::MemoryFill { dest, value, size },
+            ExpressionKind::MemoryFill {
+                memory,
+                dest,
+                value,
+                size,
+            },
             Type::NONE,
         )
     }
 
-    pub fn table_get(&self, table: &'a str, index: ExprRef<'a>, type_: Type) -> ExprRef<'a> {
+    pub fn table_get(&self, table: TableId, index: ExprRef<'a>, type_: Type) -> ExprRef<'a> {
         Expression::new(self.bump, ExpressionKind::TableGet { table, index }, type_)
     }
 
-    pub fn table_set(&self, table: &'a str, index: ExprRef<'a>, value: ExprRef<'a>) -> ExprRef<'a> {
+    pub fn table_set(&self, table: TableId, index: ExprRef<'a>, value: ExprRef<'a>) -> ExprRef<'a> {
         Expression::new(
             self.bump,
             ExpressionKind::TableSet {
@@ -1116,13 +1183,13 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn table_size(&self, table: &'a str) -> ExprRef<'a> {
+    pub fn table_size(&self, table: TableId) -> ExprRef<'a> {
         Expression::new(self.bump, ExpressionKind::TableSize { table }, Type::I32)
     }
 
     pub fn table_grow(
         &self,
-        table: &'a str,
+        table: TableId,
         delta: ExprRef<'a>,
         value: ExprRef<'a>,
     ) -> ExprRef<'a> {
@@ -1139,7 +1206,7 @@ impl<'a> IrBuilder<'a> {
 
     pub fn table_fill(
         &self,
-        table: &'a str,
+        table: TableId,
         dest: ExprRef<'a>,
         value: ExprRef<'a>,
         size: ExprRef<'a>,
@@ -1158,8 +1225,8 @@ impl<'a> IrBuilder<'a> {
 
     pub fn table_copy(
         &self,
-        dest_table: &'a str,
-        src_table: &'a str,
+        dest_table: TableId,
+        src_table: TableId,
         dest: ExprRef<'a>,
         src: ExprRef<'a>,
         size: ExprRef<'a>,
@@ -1179,7 +1246,7 @@ impl<'a> IrBuilder<'a> {
 
     pub fn table_init(
         &self,
-        table: &'a str,
+        table: TableId,
         segment: u32,
         dest: ExprRef<'a>,
         offset: ExprRef<'a>,
@@ -1302,7 +1369,7 @@ impl<'a> IrBuilder<'a> {
         Expression::new(self.bump, ExpressionKind::RefIsNull { value }, Type::I32)
     }
 
-    pub fn ref_func(&self, func: &'a str) -> ExprRef<'a> {
+    pub fn ref_func(&self, func: FuncId) -> ExprRef<'a> {
         Expression::new(self.bump, ExpressionKind::RefFunc { func }, Type::FUNCREF)
     }
 
@@ -1499,7 +1566,7 @@ impl<'a> IrBuilder<'a> {
                     new_operands.push(self.deep_clone(*op));
                 }
                 ExpressionKind::Call {
-                    target,
+                    target: *target,
                     operands: new_operands,
                     is_return: *is_return,
                 }
@@ -1557,12 +1624,14 @@ impl<'a> IrBuilder<'a> {
                 if_false: self.deep_clone(*if_false),
             },
             ExpressionKind::Load {
+                memory,
                 bytes,
                 signed,
                 offset,
                 align,
                 ptr,
             } => ExpressionKind::Load {
+                memory: *memory,
                 bytes: *bytes,
                 signed: *signed,
                 offset: *offset,
@@ -1570,12 +1639,14 @@ impl<'a> IrBuilder<'a> {
                 ptr: self.deep_clone(*ptr),
             },
             ExpressionKind::Store {
+                memory,
                 bytes,
                 offset,
                 align,
                 ptr,
                 value,
             } => ExpressionKind::Store {
+                memory: *memory,
                 bytes: *bytes,
                 offset: *offset,
                 align: *align,
@@ -1605,23 +1676,26 @@ impl<'a> IrBuilder<'a> {
                     new_operands.push(self.deep_clone(*op));
                 }
                 ExpressionKind::CallIndirect {
-                    table,
+                    table: *table,
                     target: self.deep_clone(*target),
                     operands: new_operands,
                     type_: *type_,
                 }
             }
-            ExpressionKind::MemoryGrow { delta } => ExpressionKind::MemoryGrow {
+            ExpressionKind::MemoryGrow { memory, delta } => ExpressionKind::MemoryGrow {
+                memory: *memory,
                 delta: self.deep_clone(*delta),
             },
-            ExpressionKind::MemorySize => ExpressionKind::MemorySize,
+            ExpressionKind::MemorySize { memory } => ExpressionKind::MemorySize { memory: *memory },
             ExpressionKind::AtomicRMW {
+                memory,
                 op,
                 bytes,
                 offset,
                 ptr,
                 value,
             } => ExpressionKind::AtomicRMW {
+                memory: *memory,
                 op: *op,
                 bytes: *bytes,
                 offset: *offset,
@@ -1629,12 +1703,14 @@ impl<'a> IrBuilder<'a> {
                 value: self.deep_clone(*value),
             },
             ExpressionKind::AtomicCmpxchg {
+                memory,
                 bytes,
                 offset,
                 ptr,
                 expected,
                 replacement,
             } => ExpressionKind::AtomicCmpxchg {
+                memory: *memory,
                 bytes: *bytes,
                 offset: *offset,
                 ptr: self.deep_clone(*ptr),
@@ -1642,17 +1718,20 @@ impl<'a> IrBuilder<'a> {
                 replacement: self.deep_clone(*replacement),
             },
             ExpressionKind::AtomicWait {
+                memory,
                 ptr,
                 expected,
                 timeout,
                 expected_type,
             } => ExpressionKind::AtomicWait {
+                memory: *memory,
                 ptr: self.deep_clone(*ptr),
                 expected: self.deep_clone(*expected),
                 timeout: self.deep_clone(*timeout),
                 expected_type: *expected_type,
             },
-            ExpressionKind::AtomicNotify { ptr, count } => ExpressionKind::AtomicNotify {
+            ExpressionKind::AtomicNotify { memory, ptr, count } => ExpressionKind::AtomicNotify {
+                memory: *memory,
                 ptr: self.deep_clone(*ptr),
                 count: self.deep_clone(*count),
             },
@@ -1718,23 +1797,39 @@ impl<'a> IrBuilder<'a> {
                 vec: self.deep_clone(*vec),
             },
             ExpressionKind::MemoryInit {
+                memory,
                 segment,
                 dest,
                 offset,
                 size,
             } => ExpressionKind::MemoryInit {
+                memory: *memory,
                 segment: *segment,
                 dest: self.deep_clone(*dest),
                 offset: self.deep_clone(*offset),
                 size: self.deep_clone(*size),
             },
             ExpressionKind::DataDrop { segment } => ExpressionKind::DataDrop { segment: *segment },
-            ExpressionKind::MemoryCopy { dest, src, size } => ExpressionKind::MemoryCopy {
+            ExpressionKind::MemoryCopy {
+                dest_memory,
+                src_memory,
+                dest,
+                src,
+                size,
+            } => ExpressionKind::MemoryCopy {
+                dest_memory: *dest_memory,
+                src_memory: *src_memory,
                 dest: self.deep_clone(*dest),
                 src: self.deep_clone(*src),
                 size: self.deep_clone(*size),
             },
-            ExpressionKind::MemoryFill { dest, value, size } => ExpressionKind::MemoryFill {
+            ExpressionKind::MemoryFill {
+                memory,
+                dest,
+                value,
+                size,
+            } => ExpressionKind::MemoryFill {
+                memory: *memory,
                 dest: self.deep_clone(*dest),
                 value: self.deep_clone(*value),
                 size: self.deep_clone(*size),

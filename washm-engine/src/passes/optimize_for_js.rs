@@ -1,6 +1,7 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
+use crate::ir::FuncId;
 use crate::ir::Literal;
 use crate::passes::Pass;
 
@@ -16,8 +17,8 @@ impl Pass for OptimizeForJS {
             allocator: module.allocator,
         };
 
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 optimizer.visit(body);
             }
         }
@@ -80,6 +81,7 @@ mod tests {
     use super::*;
     use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
     use crate::ir::module::Function;
+    use crate::ir::FuncId;
     use crate::ir::{Literal, Type};
     use bumpalo::collections::Vec as BumpVec;
     use bumpalo::Bump;
@@ -132,8 +134,8 @@ mod tests {
         let mut pass = OptimizeForJS;
         pass.run(&mut module);
 
-        let func = module.get_function("test").unwrap();
-        let body = func.body.unwrap();
+        let func = module.get_function(FuncId::from_raw_parts(0, 0)).unwrap();
+        let body = func.body().unwrap();
 
         assert!(matches!(body.kind, ExpressionKind::Const(Literal::I32(42))));
     }
@@ -158,8 +160,8 @@ mod tests {
         let mut pass = OptimizeForJS;
         pass.run(&mut module);
 
-        let func = module.get_function("test").unwrap();
-        let body = func.body.unwrap();
+        let func = module.get_function(FuncId::from_raw_parts(0, 0)).unwrap();
+        let body = func.body().unwrap();
 
         assert!(matches!(body.kind, ExpressionKind::Nop));
     }
@@ -187,8 +189,8 @@ mod tests {
         let mut pass = OptimizeForJS;
         pass.run(&mut module);
 
-        let func = module.get_function("test").unwrap();
-        let body = func.body.unwrap();
+        let func = module.get_function(FuncId::from_raw_parts(0, 0)).unwrap();
+        let body = func.body().unwrap();
 
         assert!(matches!(body.kind, ExpressionKind::Const(Literal::I32(10))));
     }

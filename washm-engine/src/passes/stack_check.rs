@@ -1,6 +1,7 @@
 use crate::ir::expression::{ExpressionKind, IrBuilder};
-use crate::ir::module::{ImportKind, Module};
+use crate::ir::module::Module;
 use crate::ir::ops::BinaryOp;
+use crate::ir::FuncId;
 use crate::ir::Type;
 use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
@@ -26,8 +27,8 @@ impl Pass for StackCheck {
         }
 
         if let (Some(sp), Some(limit)) = (sp_id, limit_id) {
-            for func in &mut module.functions {
-                if let Some(body) = func.body {
+            for (_, func) in &mut module.functions {
+                if let Some(body) = func.body() {
                     let builder = IrBuilder::new(module.allocator);
 
                     // Create check: if (sp < limit) unreachable
@@ -59,7 +60,7 @@ impl Pass for StackCheck {
                         }
                     };
 
-                    func.body = Some(new_body);
+                    *func.body_mut() = Some(new_body);
                 }
             }
         }
@@ -71,6 +72,7 @@ mod tests {
     use super::*;
     use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
     use crate::ir::module::{Function, Global};
+    use crate::ir::FuncId;
     use crate::ir::{Literal, Type};
     use bumpalo::collections::Vec as BumpVec;
     use bumpalo::Bump;
@@ -121,8 +123,8 @@ mod tests {
         let mut pass = StackCheck;
         pass.run(&mut module);
 
-        let func = module.get_function("test_func").unwrap();
-        let body = func.body.unwrap();
+        let func = module.get_function(FuncId::from_raw_parts(0, 0)).unwrap();
+        let body = func.body().unwrap();
 
         // Verify check was added
         if let ExpressionKind::Block { list, .. } = &body.kind {

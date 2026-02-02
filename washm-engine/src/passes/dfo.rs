@@ -17,8 +17,8 @@ impl Pass for DataFlowOpts {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for func in &mut module.functions {
-            if let Some(mut body) = func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(mut body) = func.body() {
                 // 1. Build CFG
                 let cfg = ControlFlowGraph::build(func, body);
 
@@ -146,7 +146,9 @@ mod tests {
         dfo.run(&mut module);
 
         // Verify that (local.get 0) was replaced by (i32.const 42)
-        let optimized_block = module.functions[0].body.unwrap();
+        let optimized_block = module.functions[module.functions.iter().next().unwrap().0]
+            .body()
+            .unwrap();
         if let ExpressionKind::Block { list, .. } = &optimized_block.kind {
             if let ExpressionKind::LocalSet { value, .. } = &list[1].kind {
                 assert!(matches!(value.kind, ExpressionKind::Const { .. }));

@@ -1,6 +1,6 @@
 use crate::analysis::stats::ModuleStats;
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{ImportKind, Module};
+use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
 use std::collections::HashMap;
@@ -39,39 +39,24 @@ impl Pass for RemoveUnusedTypes {
         module.types = new_types;
 
         // Update references (same logic as ReorderTypes)
-        for import in &mut module.imports {
-            match &mut import.kind {
-                ImportKind::Function(params, results) => {
-                    *params = self.remap_type(*params, &remap);
-                    *results = self.remap_type(*results, &remap);
-                }
-                ImportKind::Table(ty, _, _) => {
-                    *ty = self.remap_type(*ty, &remap);
-                }
-                _ => {}
-            }
-        }
-
-        for func in &mut module.functions {
+        for (_, func) in &mut module.functions {
             if let Some(idx) = &mut func.type_idx {
                 if let Some(&new_id) = remap.get(idx) {
                     *idx = new_id;
-                } else {
-                    // This type was removed! Should not happen if stats are correct.
                 }
             }
             func.params = self.remap_type(func.params, &remap);
             func.results = self.remap_type(func.results, &remap);
-            for var in &mut func.vars {
+            for var in func.vars_mut() {
                 *var = self.remap_type(*var, &remap);
             }
 
-            if let Some(mut body) = func.body {
+            if let Some(body) = func.body_mut() {
                 let mut updater = TypeUpdater {
                     remap: &remap,
                     pass: self,
                 };
-                updater.visit(&mut body);
+                updater.visit(body);
             }
         }
 

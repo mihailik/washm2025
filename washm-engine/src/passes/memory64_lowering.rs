@@ -1,4 +1,5 @@
 use crate::ir::module::Module;
+use crate::ir::FuncId;
 use crate::passes::Pass;
 
 pub struct Memory64Lowering;
@@ -16,7 +17,7 @@ impl Pass for Memory64Lowering {
         // and injecting logic to handle 64-bit offsets/indices.
 
         // Check if module uses memory64.
-        let is_memory64 = if let Some(_mem) = &module.memory {
+        let is_memory64 = if let Some(_) = module.memories.ids().next() {
             // Wait, MemoryLimits doesn't store index type (i32/i64).
             // Binaryen-ir Module might assume i32 memory for MVP, but Memory64 proposal adds i64.
             // Currently our MemoryLimits struct in module.rs:
@@ -34,8 +35,8 @@ impl Pass for Memory64Lowering {
             return;
         }
 
-        for func in &mut module.functions {
-            if let Some(_body) = func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(_body) = func.body() {
                 // TODO: lowering logic
             }
         }
@@ -47,6 +48,7 @@ mod tests {
     use super::*;
     use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
     use crate::ir::module::Function;
+    use crate::ir::FuncId;
     use crate::ir::Type;
     use bumpalo::collections::Vec as BumpVec;
     use bumpalo::Bump;
@@ -76,6 +78,6 @@ mod tests {
         let mut pass = Memory64Lowering;
         pass.run(&mut module);
 
-        assert!(module.get_function("test_func").is_some());
+        assert!(module.get_function(FuncId::from_raw_parts(0, 0)).is_some());
     }
 }

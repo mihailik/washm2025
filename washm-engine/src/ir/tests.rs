@@ -63,18 +63,10 @@ fn test_validation_failure() {
         type_: Type::I32, // Result type claimed to be i32
     }));
 
-    let functions = vec![Function {
-        name: "bad_func".to_string(),
-        type_idx: None,
-        params: Type::NONE,
-        results: Type::I32,
-        vars: Vec::new(),
-        body: Some(binary_expr),
-        local_names: vec![],
-    }];
-
     let mut module = Module::new(&bump);
-    module.functions = functions;
+    let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
+    func.body = Some(binary_expr);
+    module.add_function(func);
 
     let validator = Validator::new(&module);
     let (valid, errors) = validator.validate();
@@ -119,16 +111,8 @@ fn test_global_validation() {
         let val = builder.const_(Literal::I32(42));
         let set_immutable = builder.global_set(g0_id, val);
 
-        let func = Function {
-            name: "fail_immut".to_string(),
-            type_idx: None,
-            params: Type::NONE,
-            results: Type::NONE,
-            vars: vec![],
-            body: Some(set_immutable),
-            local_names: vec![],
-        };
-
+        let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
+        func.body = Some(set_immutable);
         module.functions.push(func);
 
         let validator = Validator::new(&module);
@@ -148,16 +132,8 @@ fn test_global_validation() {
         let val = builder.const_(Literal::I32(42)); // i32
         let set_mismatch = builder.global_set(g1_id, val); // trying to set to g1 (f32)
 
-        let func = Function {
-            name: "fail_type".to_string(),
-            type_idx: None,
-            params: Type::NONE,
-            results: Type::NONE,
-            vars: vec![],
-            body: Some(set_mismatch),
-            local_names: vec![],
-        };
-
+        let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
+        func.body = Some(set_mismatch);
         module.functions.push(func);
 
         let validator = Validator::new(&module);
@@ -173,19 +149,11 @@ fn test_global_validation() {
         let mut module = Module::new(&bump);
         create_globals!(&mut module);
 
-        let oob_id = unsafe { std::mem::transmute(99u64) };
+        let oob_id: GlobalId = GlobalId::from_raw_parts(99, 0);
         let get_oob = builder.global_get(oob_id, Type::I32);
 
-        let func = Function {
-            name: "fail_oob".to_string(),
-            type_idx: None,
-            params: Type::NONE,
-            results: Type::I32,
-            vars: vec![],
-            body: Some(get_oob),
-            local_names: vec![],
-        };
-
+        let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
+        func.body = Some(get_oob);
         module.functions.push(func);
 
         let validator = Validator::new(&module);
@@ -280,23 +248,14 @@ fn test_module_construction() {
     let const_1 = builder.const_(Literal::I32(1));
     let add = builder.binary(BinaryOp::AddInt32, local_get, const_1, Type::I32);
 
-    let func = Function {
-        name: "add_one".to_string(),
-        type_idx: None,
-        params: Type::I32,
-        results: Type::I32,
-        vars: vec![],
-        body: Some(add),
-        local_names: vec![],
-    };
-
+    let func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
     module.add_function(func);
 
-    assert!(module.get_function("add_one").is_some());
+    assert!(module.get_function("add_one".into()).is_some());
 
-    let f = module.get_function("add_one").unwrap();
+    let f = module.get_function("add_one".into()).unwrap();
     if let Some(body) = &f.body {
         if let ExpressionKind::Binary { op, .. } = body.kind {
             assert_eq!(op, BinaryOp::AddInt32);
@@ -314,16 +273,7 @@ fn test_export_validation() {
     let builder = IrBuilder::new(&bump);
 
     // Setup a basic valid module components
-    let _func = Function {
-        name: "f0".to_string(),
-        type_idx: None,
-        params: Type::NONE,
-        results: Type::NONE,
-        vars: vec![],
-        body: None,
-        local_names: vec![],
-    };
-
+    let _func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
     let global_init = builder.const_(Literal::I32(0));
     let global = Global {
         name: "g0".to_string(),
@@ -339,23 +289,24 @@ fn test_export_validation() {
 
     // 1. Valid exports
     {
-        let func_valid = Function {
-            name: "f0".to_string(),
-            type_idx: None,
-            params: Type::NONE,
-            results: Type::NONE,
-            vars: vec![],
-            body: None,
-            local_names: vec![],
-        };
-
+        let func_valid = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
         let mut module = Module::new(&bump);
         module.functions.push(func_valid);
         let g0_id = module.add_global(global);
-        module.memory = Some(memory.clone());
-        module.add_export("exp_func".to_string(), ExportKind::Function(0));
+        module.add_memory(Memory {
+            name: "".to_string(),
+            kind: MemoryKind::Local,
+            limits: memory.clone(),
+        });
+        module.add_export(
+            "exp_func".to_string(),
+            ExportKind::Function(FuncId::from_raw_parts(0, 0)),
+        );
         module.add_export("exp_glob".to_string(), ExportKind::Global(g0_id));
-        module.add_export("exp_mem".to_string(), ExportKind::Memory(0));
+        module.add_export(
+            "exp_mem".to_string(),
+            ExportKind::Memory(MemoryId::from_raw_parts(0, 0)),
+        );
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
@@ -365,8 +316,14 @@ fn test_export_validation() {
     // 2. Duplicate export name
     {
         let mut module = Module::new(&bump);
-        module.add_export("same".to_string(), ExportKind::Function(0));
-        module.add_export("same".to_string(), ExportKind::Function(0));
+        module.add_export(
+            "same".to_string(),
+            ExportKind::Function(FuncId::from_raw_parts(0, 0)),
+        );
+        module.add_export(
+            "same".to_string(),
+            ExportKind::Function(FuncId::from_raw_parts(0, 0)),
+        );
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
@@ -376,30 +333,23 @@ fn test_export_validation() {
 
     // 3. Function OOB
     {
-        let func_valid = Function {
-            name: "f0".to_string(),
-            type_idx: None,
-            params: Type::NONE,
-            results: Type::NONE,
-            vars: vec![],
-            body: None,
-            local_names: vec![],
-        };
+        let func_valid = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
         let mut module = Module::new(&bump);
-        module.functions.push(func_valid);
-        module.add_export("f1".to_string(), ExportKind::Function(1));
+        module.add_function(func_valid);
+        module.add_export(
+            "f1".to_string(),
+            ExportKind::Function(FuncId::from_raw_parts(99, 0)),
+        );
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid);
-        assert!(errors
-            .iter()
-            .any(|e| e.contains("Exported function index 1 out of bounds")));
+        assert!(errors.iter().any(|e| e.contains("does not exist")));
     }
 
     // 4. Global OOB
     {
         let mut module = Module::new(&bump);
-        let oob_id = unsafe { std::mem::transmute(0u64) };
+        let oob_id: GlobalId = GlobalId::from_raw_parts(99, 0);
         module.add_export("g0".to_string(), ExportKind::Global(oob_id));
 
         let validator = Validator::new(&module);
@@ -411,13 +361,14 @@ fn test_export_validation() {
     // 5. Memory OOB / No Memory
     {
         let mut module = Module::new(&bump);
-        module.add_export("m0".to_string(), ExportKind::Memory(0));
+        module.add_export(
+            "m0".to_string(),
+            ExportKind::Memory(MemoryId::from_raw_parts(0, 0)),
+        );
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid);
-        assert!(errors
-            .iter()
-            .any(|e| e.contains("Exported memory but no memory exists")));
+        assert!(errors.iter().any(|e| e.contains("does not exist")));
     }
 }
 
@@ -441,15 +392,24 @@ fn test_exports_roundtrip() {
             init: builder.const_(Literal::I32(123)),
         },
     });
-    module.memory = Some(MemoryLimits {
-        initial: 1,
-        maximum: None,
+    module.add_memory(Memory {
+        name: "".to_string(),
+        limits: MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: MemoryKind::Local,
     });
 
-    module.add_export("test_func".to_string(), ExportKind::Function(0));
+    module.add_export(
+        "test_func".to_string(),
+        ExportKind::Function(FuncId::from_raw_parts(0, 0)),
+    );
     module.add_export("test_glob".to_string(), ExportKind::Global(g0_id.cast()));
-    module.add_export("test_mem".to_string(), ExportKind::Memory(0));
-
+    module.add_export(
+        "test_mem".to_string(),
+        ExportKind::Memory(MemoryId::from_raw_parts(0, 0)),
+    );
 
     // Write
     let mut writer = BinaryWriter::new();
@@ -468,7 +428,10 @@ fn test_exports_roundtrip() {
         .iter()
         .find(|e| e.name == "test_func")
         .unwrap();
-    assert_eq!(func_exp.kind, ExportKind::Function(0));
+    assert_eq!(
+        func_exp.kind,
+        ExportKind::Function(FuncId::from_raw_parts(0, 0))
+    );
 
     let glob_exp = read_module
         .exports
@@ -483,7 +446,10 @@ fn test_exports_roundtrip() {
         .iter()
         .find(|e| e.name == "test_mem")
         .unwrap();
-    assert_eq!(mem_exp.kind, ExportKind::Memory(0));
+    assert_eq!(
+        mem_exp.kind,
+        ExportKind::Memory(MemoryId::from_raw_parts(0, 0))
+    );
 }
 
 #[test]
@@ -532,21 +498,27 @@ fn test_imports_roundtrip() {
     let mut reader = BinaryReader::new(&read_bump, bytes);
     let read_module = reader.parse_module().expect("parse failed");
 
-    assert_eq!(read_module.imports.len(), 2);
+    assert_eq!(read_module.imports.len(), 0);
+    assert_eq!(read_module.functions.len(), 1);
     assert_eq!(read_module.globals.len(), 1);
+    assert_eq!(read_module.memories.len(), 1);
 
-    let log_import = &read_module.imports[0];
+    let log_func_id = read_module.functions.ids().next().unwrap();
+    let log_func = &read_module.functions[log_func_id];
+    let log_import = log_func.import.as_ref().expect("Expected function import");
     assert_eq!(log_import.module, "env");
     assert_eq!(log_import.name, "log");
-    if let ImportKind::Function(p, r) = log_import.kind {
-        assert_eq!(p, Type::I32);
-        assert_eq!(r, Type::NONE);
-    } else {
-        panic!("Expected function import");
-    }
+    assert_eq!(log_func.params, Type::I32);
+    assert_eq!(log_func.results, Type::NONE);
 
-    let memory_import = &read_module.imports[1];
-    assert_eq!(memory_import.name, "memory");
+    let mem_id = read_module.memories.ids().next().unwrap();
+    let memory_import = &read_module.memories[mem_id];
+    if let crate::ir::module::MemoryKind::Import { module, field } = &memory_import.kind {
+        assert_eq!(module, "env");
+        assert_eq!(field, "memory");
+    } else {
+        panic!("Expected memory import");
+    }
 
     let (_, global_import) = read_module.globals.iter().next().unwrap();
     assert_eq!(global_import.name, "limit");
@@ -664,7 +636,7 @@ fn test_data_section_roundtrip() {
     // Data segment 1: "Hello" at offset 0
     let offset1 = builder.const_(Literal::I32(0));
     module.add_data_segment(DataSegment {
-        memory_index: 0,
+        memory_index: MemoryId::from_raw_parts(0, 0),
         offset: offset1,
         data: b"Hello".to_vec(),
     });
@@ -672,7 +644,7 @@ fn test_data_section_roundtrip() {
     // Data segment 2: "World" at offset 100
     let offset2 = builder.const_(Literal::I32(100));
     module.add_data_segment(DataSegment {
-        memory_index: 0,
+        memory_index: MemoryId::from_raw_parts(0, 0),
         offset: offset2,
         data: b"World".to_vec(),
     });
@@ -690,7 +662,7 @@ fn test_data_section_roundtrip() {
     assert_eq!(read_module.data.len(), 2);
 
     let seg1 = &read_module.data[0];
-    assert_eq!(seg1.memory_index, 0);
+    assert_eq!(seg1.memory_index, MemoryId::from_raw_parts(0, 0));
     assert_eq!(seg1.data, b"Hello");
     if let ExpressionKind::Const(Literal::I32(val)) = seg1.offset.kind {
         assert_eq!(val, 0);
@@ -699,7 +671,7 @@ fn test_data_section_roundtrip() {
     }
 
     let seg2 = &read_module.data[1];
-    assert_eq!(seg2.memory_index, 0);
+    assert_eq!(seg2.memory_index, MemoryId::from_raw_parts(0, 0));
     assert_eq!(seg2.data, b"World");
     if let ExpressionKind::Const(Literal::I32(val)) = seg2.offset.kind {
         assert_eq!(val, 100);
@@ -723,7 +695,7 @@ fn test_data_section_validation() {
 
         let offset = builder.const_(Literal::I32(0));
         module.add_data_segment(DataSegment {
-            memory_index: 0,
+            memory_index: MemoryId::from_raw_parts(0, 0),
             offset,
             data: b"test".to_vec(),
         });
@@ -741,7 +713,7 @@ fn test_data_section_validation() {
 
         let offset = builder.const_(Literal::I32(0));
         module.add_data_segment(DataSegment {
-            memory_index: 0,
+            memory_index: MemoryId::from_raw_parts(0, 0),
             offset,
             data: b"test".to_vec(),
         });
@@ -749,7 +721,7 @@ fn test_data_section_validation() {
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid, "Data without memory should fail");
-        assert!(errors.iter().any(|e| e.contains("no memory exists")));
+        assert!(errors.iter().any(|e| e.contains("does not exist")));
     }
 
     // Test 3: Invalid memory index
@@ -760,7 +732,7 @@ fn test_data_section_validation() {
 
         let offset = builder.const_(Literal::I32(0));
         module.add_data_segment(DataSegment {
-            memory_index: 1, // Invalid: only 0 allowed
+            memory_index: 1.into(), // Invalid: only 0 allowed
             offset,
             data: b"test".to_vec(),
         });
@@ -768,7 +740,7 @@ fn test_data_section_validation() {
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid, "Invalid memory index should fail");
-        assert!(errors.iter().any(|e| e.contains("invalid memory index")));
+        assert!(errors.iter().any(|e| e.contains("does not exist")));
     }
 }
 
@@ -795,7 +767,7 @@ fn test_start_section_roundtrip() {
     module.add_function(func);
 
     // Set as start function (index 0)
-    module.set_start(0);
+    module.set_start(FuncId::from_raw_parts(0, 0));
 
     // Write
     let mut writer = BinaryWriter::new();
@@ -807,7 +779,7 @@ fn test_start_section_roundtrip() {
     let read_module = reader.parse_module().expect("parse failed");
 
     // Verify
-    assert_eq!(read_module.start, Some(0));
+    assert_eq!(read_module.start, Some(FuncId::from_raw_parts(0, 0)));
 }
 
 #[test]
@@ -830,7 +802,7 @@ fn test_start_section_validation() {
             Some(body),
         );
         module.add_function(func);
-        module.set_start(0);
+        module.set_start(FuncId::from_raw_parts(0, 0));
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
@@ -841,12 +813,12 @@ fn test_start_section_validation() {
     {
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
-        module.set_start(99); // No functions exist
+        module.set_start(99.into()); // No functions exist
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid, "OOB start function should fail");
-        assert!(errors.iter().any(|e| e.contains("out of bounds")));
+        assert!(errors.iter().any(|e| e.contains("does not exist")));
     }
 
     // Test 3: Start function with parameters (invalid)
@@ -863,7 +835,7 @@ fn test_start_section_validation() {
             Some(body),
         );
         module.add_function(func);
-        module.set_start(0);
+        module.set_start(FuncId::from_raw_parts(0, 0));
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
@@ -885,7 +857,7 @@ fn test_start_section_validation() {
             Some(body),
         );
         module.add_function(func);
-        module.set_start(0);
+        module.set_start(FuncId::from_raw_parts(0, 0));
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
@@ -913,14 +885,14 @@ fn test_table_and_element_roundtrip() {
     module.add_function(func2);
 
     // Add table
-    module.set_table(Type::FUNCREF, 10, Some(20));
+    module.set_table(10, Some(20));
 
     // Add element segment: initialize table[0..2] with functions [0, 1]
     let offset = builder.const_(Literal::I32(0));
     module.add_element_segment(ElementSegment {
-        table_index: 0,
+        table_index: TableId::from_raw_parts(0, 0),
         offset,
-        func_indices: vec![0, 1],
+        func_indices: vec![FuncId::from_raw_parts(0, 0), 1.into()],
     });
 
     // Write
@@ -933,17 +905,20 @@ fn test_table_and_element_roundtrip() {
     let read_module = reader.parse_module().expect("parse failed");
 
     // Verify table
-    assert!(read_module.table.is_some());
-    let table = read_module.table.as_ref().unwrap();
-    assert_eq!(table.element_type, Type::FUNCREF);
-    assert_eq!(table.initial, 10);
-    assert_eq!(table.maximum, Some(20));
+    assert!(!read_module.tables.is_empty());
+    let table = read_module.tables.unwrap_first();
+    assert_eq!(table.limits.element_type, Type::FUNCREF);
+    assert_eq!(table.limits.initial, 10);
+    assert_eq!(table.limits.maximum, Some(20));
 
     // Verify element segments
     assert_eq!(read_module.elements.len(), 1);
     let elem = &read_module.elements[0];
-    assert_eq!(elem.table_index, 0);
-    assert_eq!(elem.func_indices, vec![0, 1]);
+    assert_eq!(elem.table_index, TableId::from_raw_parts(0, 0));
+    assert_eq!(
+        elem.func_indices,
+        vec![FuncId::from_raw_parts(0, 0), 1.into()]
+    );
     if let ExpressionKind::Const(Literal::I32(val)) = elem.offset.kind {
         assert_eq!(val, 0);
     } else {
@@ -966,13 +941,21 @@ fn test_table_and_element_validation() {
         let func = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], None);
         module.add_function(func);
 
-        module.set_table(Type::FUNCREF, 5, None);
+        module.add_table(Table {
+            name: "".to_string(),
+            limits: TableLimits {
+                initial: 0,
+                maximum: None,
+                element_type: Type::FUNCREF,
+            },
+            kind: TableKind::Local,
+        });
 
         let offset = builder.const_(Literal::I32(0));
         module.add_element_segment(ElementSegment {
-            table_index: 0,
+            table_index: TableId::from_raw_parts(0, 0),
             offset,
-            func_indices: vec![0],
+            func_indices: vec![FuncId::from_raw_parts(0, 0)],
         });
 
         let validator = Validator::new(&module);
@@ -990,15 +973,15 @@ fn test_table_and_element_validation() {
 
         let offset = builder.const_(Literal::I32(0));
         module.add_element_segment(ElementSegment {
-            table_index: 0,
+            table_index: TableId::from_raw_parts(0, 0),
             offset,
-            func_indices: vec![0],
+            func_indices: vec![FuncId::from_raw_parts(0, 0)],
         });
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid, "Element without table should fail");
-        assert!(errors.iter().any(|e| e.contains("no table exists")));
+        assert!(errors.iter().any(|e| e.contains("does not exist")));
     }
 
     // Test 3: Element with invalid function index
@@ -1006,19 +989,27 @@ fn test_table_and_element_validation() {
         let bump = bumpalo::Bump::new();
         let mut module = Module::new(&bump);
 
-        module.set_table(Type::FUNCREF, 5, None);
+        module.add_table(Table {
+            name: "".to_string(),
+            limits: TableLimits {
+                initial: 0,
+                maximum: None,
+                element_type: Type::FUNCREF,
+            },
+            kind: TableKind::Local,
+        });
 
         let offset = builder.const_(Literal::I32(0));
         module.add_element_segment(ElementSegment {
-            table_index: 0,
+            table_index: TableId::from_raw_parts(0, 0),
             offset,
-            func_indices: vec![99], // Out of bounds
+            func_indices: vec![99.into()], // Out of bounds
         });
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid, "Element with OOB function should fail");
-        assert!(errors.iter().any(|e| e.contains("out of bounds")));
+        assert!(errors.iter().any(|e| e.contains("does not exist")));
     }
 
     // Test 4: Invalid table index in element segment
@@ -1029,19 +1020,27 @@ fn test_table_and_element_validation() {
         let func = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], None);
         module.add_function(func);
 
-        module.set_table(Type::FUNCREF, 5, None);
+        module.add_table(Table {
+            name: "".to_string(),
+            limits: TableLimits {
+                initial: 0,
+                maximum: None,
+                element_type: Type::FUNCREF,
+            },
+            kind: TableKind::Local,
+        });
 
         let offset = builder.const_(Literal::I32(0));
         module.add_element_segment(ElementSegment {
-            table_index: 1, // Invalid: only 0 allowed
+            table_index: 1.into(), // Invalid: only 0 allowed
             offset,
-            func_indices: vec![0],
+            func_indices: vec![FuncId::from_raw_parts(0, 0)],
         });
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid, "Invalid table index should fail");
-        assert!(errors.iter().any(|e| e.contains("invalid table index")));
+        assert!(errors.iter().any(|e| e.contains("does not exist")));
     }
 }
 
@@ -1401,7 +1400,8 @@ fn test_type_section_with_imports() {
     assert_eq!(parsed.types.len(), 2, "Should have 2 types");
 
     // Imports should be parsed
-    assert_eq!(parsed.imports.len(), 2, "Should have 2 imports");
+    assert_eq!(parsed.imports.len(), 0);
+    assert_eq!(parsed.functions.len(), 2);
 }
 
 #[test]
@@ -1503,9 +1503,18 @@ fn test_function_section_explicit_type_indices() {
     assert_eq!(parsed.functions.len(), 3);
 
     // Verify type indices are preserved
-    assert_eq!(parsed.functions[0].type_idx, Some(0));
-    assert_eq!(parsed.functions[1].type_idx, Some(1));
-    assert_eq!(parsed.functions[2].type_idx, Some(2));
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(0, 0)].type_idx,
+        Some(0)
+    );
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(1, 0)].type_idx,
+        Some(1)
+    );
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(2, 0)].type_idx,
+        Some(2)
+    );
 }
 
 #[test]
@@ -1553,8 +1562,12 @@ fn test_function_section_mixed_type_specification() {
 
     assert_eq!(parsed.functions.len(), 2);
     // Both functions should have type_idx after round-trip
-    assert!(parsed.functions[0].type_idx.is_some());
-    assert!(parsed.functions[1].type_idx.is_some());
+    assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
+        .type_idx
+        .is_some());
+    assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
+        .type_idx
+        .is_some());
 }
 
 #[test]
@@ -1604,7 +1617,7 @@ fn test_function_section_many_functions() {
     // All functions should have type indices
     for (i, func) in parsed.functions.iter().enumerate() {
         assert!(
-            func.type_idx.is_some(),
+            func.1.type_idx.is_some(),
             "Function {} should have type_idx",
             i
         );
@@ -1660,7 +1673,7 @@ fn test_function_section_validation_type_idx_bounds() {
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
         assert!(!valid, "Out of bounds type_idx should fail");
-        assert!(errors.iter().any(|e| e.contains("out of bounds")));
+        assert!(errors.iter().any(|e| e.contains("does not exist")));
     }
 
     // Test 3: Type signature mismatch
@@ -1755,8 +1768,14 @@ fn test_function_section_all_value_type_combinations() {
                 .unwrap_or_else(|e| panic!("Failed to parse param {} result {}: {:?}", i, j, e));
 
             assert_eq!(parsed.functions.len(), 1);
-            assert_eq!(parsed.functions[0].params, *param_type);
-            assert_eq!(parsed.functions[0].results, *result_type);
+            assert_eq!(
+                parsed.functions[FuncId::from_raw_parts(0, 0)].params,
+                *param_type
+            );
+            assert_eq!(
+                parsed.functions[FuncId::from_raw_parts(0, 0)].results,
+                *result_type
+            );
         }
     }
 }
@@ -1833,7 +1852,7 @@ fn test_function_section_with_locals() {
             desc
         );
         assert_eq!(
-            parsed.functions[0].vars.len(),
+            parsed.functions[FuncId::from_raw_parts(0, 0)].vars().len(),
             locals.len(),
             "Local count mismatch: {}",
             desc
@@ -1880,7 +1899,7 @@ fn test_function_section_shared_type_indices() {
     // All functions should reference type 0
     for (i, func) in parsed.functions.iter().enumerate() {
         assert_eq!(
-            func.type_idx,
+            func.1.type_idx,
             Some(0),
             "Function {} should reference type 0",
             i
@@ -1929,10 +1948,22 @@ fn test_function_section_type_ordering() {
     assert_eq!(parsed.functions.len(), 4);
 
     // Verify type indices are preserved (reverse order: 3, 2, 1, 0)
-    assert_eq!(parsed.functions[0].type_idx, Some(3));
-    assert_eq!(parsed.functions[1].type_idx, Some(2));
-    assert_eq!(parsed.functions[2].type_idx, Some(1));
-    assert_eq!(parsed.functions[3].type_idx, Some(0));
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(0, 0)].type_idx,
+        Some(3)
+    );
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(1, 0)].type_idx,
+        Some(2)
+    );
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(2, 0)].type_idx,
+        Some(1)
+    );
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(3, 0)].type_idx,
+        Some(0)
+    );
 }
 
 #[test]
@@ -1994,8 +2025,8 @@ fn test_function_section_with_imports() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     // Function space: imports come first, then defined functions
-    assert_eq!(parsed.imports.len(), 2);
-    assert_eq!(parsed.functions.len(), 2);
+    assert_eq!(parsed.imports.len(), 0);
+    assert_eq!(parsed.functions.len(), 4);
     assert_eq!(parsed.types.len(), 2);
 }
 
@@ -2064,8 +2095,12 @@ fn test_function_section_reference_types() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 2);
-    assert_eq!(parsed.functions[0].params, Type::FUNCREF);
-    assert_eq!(parsed.functions[1].params, Type::EXTERNREF);
+    // Use iterator to get IDs in order
+    let mut ids = parsed.functions.ids();
+    let id1 = ids.next().unwrap();
+    let id2 = ids.next().unwrap();
+    assert_eq!(parsed.functions[id1].params, Type::FUNCREF);
+    assert_eq!(parsed.functions[id2].params, Type::EXTERNREF);
 }
 
 #[test]
@@ -2110,7 +2145,7 @@ fn test_function_section_type_inference_deduplication() {
     // All functions should reference the same type
     for (i, func) in parsed.functions.iter().enumerate() {
         assert_eq!(
-            func.type_idx,
+            func.1.type_idx,
             Some(0),
             "Function {} should reference type 0",
             i
@@ -2238,7 +2273,10 @@ fn test_function_section_large_type_index() {
 
     assert_eq!(parsed.types.len(), 200);
     assert_eq!(parsed.functions.len(), 1);
-    assert_eq!(parsed.functions[0].type_idx, Some(199));
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(0, 0)].type_idx,
+        Some(199)
+    );
 }
 
 #[test]
@@ -2272,12 +2310,30 @@ fn test_function_section_locals_all_types() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    assert_eq!(parsed.functions[0].vars.len(), 5);
-    assert_eq!(parsed.functions[0].vars[0], Type::I32);
-    assert_eq!(parsed.functions[0].vars[1], Type::I64);
-    assert_eq!(parsed.functions[0].vars[2], Type::F32);
-    assert_eq!(parsed.functions[0].vars[3], Type::F64);
-    assert_eq!(parsed.functions[0].vars[4], Type::V128);
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(0, 0)].vars().len(),
+        5
+    );
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(0, 0)].vars()[0],
+        Type::I32
+    );
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(0, 0)].vars()[1],
+        Type::I64
+    );
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(0, 0)].vars()[2],
+        Type::F32
+    );
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(0, 0)].vars()[3],
+        Type::F64
+    );
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(0, 0)].vars()[4],
+        Type::V128
+    );
 }
 
 // ========== Code Section (Section 10) Tests ==========
@@ -2310,7 +2366,9 @@ fn test_code_section_simple_const() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    assert!(parsed.functions[0].body.is_some());
+    assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
+        .body()
+        .is_some());
 }
 
 #[test]
@@ -2350,7 +2408,7 @@ fn test_code_section_all_const_types() {
         let parsed = reader.parse_module().expect("Failed to parse");
 
         assert_eq!(parsed.functions.len(), 1);
-        assert_eq!(parsed.functions[0].results, *typ);
+        assert_eq!(parsed.functions[FuncId::from_raw_parts(0, 0)].results, *typ);
     }
 }
 
@@ -2445,7 +2503,9 @@ fn test_code_section_nested_expressions() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    assert!(parsed.functions[0].body.is_some());
+    assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
+        .body()
+        .is_some());
 }
 
 #[test]
@@ -2485,7 +2545,10 @@ fn test_code_section_local_operations() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    assert_eq!(parsed.functions[0].vars.len(), 1);
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(0, 0)].vars().len(),
+        1
+    );
 }
 
 #[test]
@@ -2523,7 +2586,7 @@ fn test_code_section_control_flow_block() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    if let Some(body) = &parsed.functions[0].body {
+    if let Some(body) = &parsed.functions[FuncId::from_raw_parts(0, 0)].body {
         if let ExpressionKind::Block { .. } = &body.kind {
             // Success - block parsed correctly
         } else {
@@ -2567,7 +2630,7 @@ fn test_code_section_control_flow_loop() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    if let Some(body) = &parsed.functions[0].body {
+    if let Some(body) = &parsed.functions[FuncId::from_raw_parts(0, 0)].body {
         if let ExpressionKind::Loop { .. } = &body.kind {
             // Success - loop parsed correctly
         } else {
@@ -2605,7 +2668,7 @@ fn test_code_section_nop() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    if let Some(body) = &parsed.functions[0].body {
+    if let Some(body) = &parsed.functions[FuncId::from_raw_parts(0, 0)].body {
         if let ExpressionKind::Nop = &body.kind {
             // Success - nop parsed correctly
         } else {
@@ -2657,9 +2720,15 @@ fn test_code_section_multiple_functions_with_bodies() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 3);
-    assert!(parsed.functions[0].body.is_some());
-    assert!(parsed.functions[1].body.is_some());
-    assert!(parsed.functions[2].body.is_some());
+    assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
+        .body()
+        .is_some());
+    assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
+        .body()
+        .is_some());
+    assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
+        .body()
+        .is_some());
 }
 
 #[test]
@@ -2697,7 +2766,9 @@ fn test_code_section_deep_nesting() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    assert!(parsed.functions[0].body.is_some());
+    assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
+        .body()
+        .is_some());
 }
 
 #[test]
@@ -2775,15 +2846,8 @@ fn test_validation_type_index_out_of_bounds() {
     let mut module = Module::new(&bump);
 
     // Add a function with invalid type_idx (no types defined)
-    let func = Function {
-        name: "bad_func".to_string(),
-        params: Type::NONE,
-        results: Type::I32,
-        vars: vec![],
-        body: None,
-        type_idx: Some(99), // Invalid: no types exist
-        local_names: vec![],
-    };
+    let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
+    func.type_idx = Some(99);
     module.add_function(func);
 
     let validator = Validator::new(&module);
@@ -2807,15 +2871,8 @@ fn test_validation_type_signature_mismatch() {
     module.add_type(Type::I32, Type::I64);
 
     // Add function with mismatched signature
-    let func = Function {
-        name: "mismatch".to_string(),
-        params: Type::I32,
-        results: Type::F32, // Mismatch: type says I64
-        vars: vec![],
-        body: None,
-        type_idx: Some(0),
-        local_names: vec![String::new(); 1],
-    };
+    let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
+    func.type_idx = Some(0);
     module.add_function(func);
 
     let validator = Validator::new(&module);
@@ -2836,15 +2893,7 @@ fn test_validation_valid_type_idx() {
     module.add_type(Type::I32, Type::I64);
 
     // Add function with valid type_idx and matching signature
-    let func = Function {
-        name: "valid".to_string(),
-        params: Type::I32,
-        results: Type::I64,
-        vars: vec![],
-        body: None,
-        type_idx: Some(0),
-        local_names: vec![String::new(); 1],
-    };
+    let func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
     module.add_function(func);
 
     let validator = Validator::new(&module);
@@ -2945,7 +2994,7 @@ fn test_roundtrip_empty_module() {
     assert_eq!(parsed.types.len(), 0);
     assert_eq!(parsed.functions.len(), 0);
     assert_eq!(parsed.globals.len(), 0);
-    assert!(parsed.table.is_none());
+    assert!(parsed.tables.is_empty());
 }
 
 #[test]
@@ -2961,15 +3010,16 @@ fn test_roundtrip_mixed_function_types() {
     module.add_type(Type::I32, Type::I64);
 
     // Function with explicit type_idx
-    module.add_function(Function {
-        name: "typed".to_string(),
+    module.add_function(Function::new_for_test(Function {
+        name: "test".to_string(),
         params: Type::I32,
         results: Type::I64,
         vars: vec![],
         body: None,
         type_idx: Some(0),
-        local_names: vec![String::new(); 1],
-    });
+        local_names: vec![],
+        import: None,
+    }));
 
     // Function without type_idx (will be inferred)
     module.add_function(Function::new(
@@ -2988,8 +3038,8 @@ fn test_roundtrip_mixed_function_types() {
 
     assert_eq!(parsed.functions.len(), 2);
     // Both functions should have type_idx after parsing
-    assert!(parsed.functions[0].type_idx.is_some());
-    assert!(parsed.functions[1].type_idx.is_some());
+    assert!(parsed.functions.iter().next().unwrap().1.type_idx.is_some());
+    assert!(parsed.functions.iter().nth(1).unwrap().1.type_idx.is_some());
 }
 
 #[test]
@@ -3026,7 +3076,10 @@ fn test_code_section_many_locals() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    assert_eq!(parsed.functions[0].vars.len(), 100);
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(0, 0)].vars().len(),
+        100
+    );
 }
 
 #[test]
@@ -3058,7 +3111,10 @@ fn test_code_section_function_with_params_and_locals() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    assert_eq!(parsed.functions[0].vars.len(), 2);
+    assert_eq!(
+        parsed.functions[FuncId::from_raw_parts(0, 0)].vars().len(),
+        2
+    );
 }
 
 #[test]
@@ -3087,7 +3143,7 @@ fn test_roundtrip_all_sections_together() {
 
     // Functions
     let body = builder.const_(Literal::I32(42));
-    module.add_function(Function::new(
+    let local_func_id = module.add_function(Function::new(
         "local_func".to_string(),
         Type::NONE,
         Type::I32,
@@ -3105,16 +3161,20 @@ fn test_roundtrip_all_sections_together() {
     });
 
     // Table
-    module.table = Some(crate::ir::module::TableLimits {
-        element_type: Type::FUNCREF,
-        initial: 10,
-        maximum: Some(100),
+    module.add_table(Table {
+        name: "".to_string(),
+        limits: TableLimits {
+            initial: 10,
+            maximum: Some(100),
+            element_type: Type::FUNCREF,
+        },
+        kind: TableKind::Local,
     });
 
     // Exports (export the local function, not the imported one)
     module.add_export(
         "exported_func".to_string(),
-        crate::ir::module::ExportKind::Function(1),
+        crate::ir::module::ExportKind::Function(local_func_id),
     );
 
     let mut writer = BinaryWriter::new();
@@ -3129,10 +3189,10 @@ fn test_roundtrip_all_sections_together() {
 
     // Types may include inferred types from functions
     assert!(parsed.types.len() >= 2, "Expected at least 2 types");
-    assert_eq!(parsed.imports.len(), 1);
-    assert_eq!(parsed.functions.len(), 1); // Only local functions
+    assert_eq!(parsed.imports.len(), 0);
+    assert_eq!(parsed.functions.len(), 2);
     assert_eq!(parsed.globals.len(), 1);
-    assert!(parsed.table.is_some());
+    assert!(!parsed.tables.is_empty());
     assert_eq!(parsed.exports.len(), 1);
 }
 
@@ -3159,9 +3219,12 @@ fn test_import_function() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert_eq!(parsed.imports.len(), 1);
-    assert_eq!(parsed.imports[0].module, "env");
-    assert_eq!(parsed.imports[0].name, "log");
+    assert_eq!(parsed.imports.len(), 0);
+    assert_eq!(parsed.functions.len(), 1);
+    let func = &parsed.functions[parsed.functions.ids().next().unwrap()];
+    let import = func.import.as_ref().unwrap();
+    assert_eq!(import.module, "env");
+    assert_eq!(import.name, "log");
 }
 
 #[test]
@@ -3188,7 +3251,8 @@ fn test_import_memory() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert_eq!(parsed.imports.len(), 1);
+    assert_eq!(parsed.imports.len(), 0);
+    assert_eq!(parsed.memories.len(), 1);
 }
 
 #[test]
@@ -3270,8 +3334,10 @@ fn test_multiple_imports_mixed() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert_eq!(parsed.imports.len(), 3);
+    assert_eq!(parsed.imports.len(), 0);
+    assert_eq!(parsed.functions.len(), 2);
     assert_eq!(parsed.globals.len(), 1);
+    assert_eq!(parsed.memories.len(), 1);
 }
 
 #[test]
@@ -3297,7 +3363,8 @@ fn test_import_many_functions() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert_eq!(parsed.imports.len(), 50);
+    assert_eq!(parsed.imports.len(), 0);
+    assert_eq!(parsed.functions.len(), 50);
 }
 
 // ========== Export Section Tests ==========
@@ -3321,7 +3388,10 @@ fn test_export_function() {
     ));
 
     // Export it
-    module.add_export("exported".to_string(), ExportKind::Function(0));
+    module.add_export(
+        "exported".to_string(),
+        ExportKind::Function(FuncId::from_raw_parts(0, 0)),
+    );
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
@@ -3350,7 +3420,10 @@ fn test_export_multiple_functions() {
             vec![],
             None,
         ));
-        module.add_export(format!("export_{}", i), ExportKind::Function(i));
+        module.add_export(
+            format!("export_{}", i),
+            ExportKind::Function(FuncId::from_raw_parts(0, 0)),
+        );
     }
 
     let mut writer = BinaryWriter::new();
@@ -3373,7 +3446,10 @@ fn test_export_memory() {
     let mut module = Module::new(&bump);
 
     module.set_memory(1, Some(100));
-    module.add_export("memory".to_string(), ExportKind::Memory(0));
+    module.add_export(
+        "memory".to_string(),
+        ExportKind::Memory(MemoryId::from_raw_parts(0, 0)),
+    );
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
@@ -3382,7 +3458,7 @@ fn test_export_memory() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.exports.len(), 1);
-    assert!(parsed.memory.is_some());
+    assert!(!parsed.memories.is_empty());
 }
 
 #[test]
@@ -3425,13 +3501,20 @@ fn test_export_table() {
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
 
-    module.table = Some(TableLimits {
-        element_type: Type::FUNCREF,
-        initial: 10,
-        maximum: Some(100),
+    module.add_table(Table {
+        name: "".to_string(),
+        limits: TableLimits {
+            initial: 10,
+            maximum: Some(100),
+            element_type: Type::FUNCREF,
+        },
+        kind: TableKind::Local,
     });
 
-    module.add_export("my_table".to_string(), ExportKind::Table(0));
+    module.add_export(
+        "my_table".to_string(),
+        ExportKind::Table(TableId::from_raw_parts(0, 0)),
+    );
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
@@ -3440,7 +3523,7 @@ fn test_export_table() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.exports.len(), 1);
-    assert!(parsed.table.is_some());
+    assert!(!parsed.tables.is_empty());
 }
 
 // ========== Memory Section Tests ==========
@@ -3461,10 +3544,10 @@ fn test_memory_basic() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert!(parsed.memory.is_some());
-    let mem = parsed.memory.unwrap();
-    assert_eq!(mem.initial, 1);
-    assert_eq!(mem.maximum, Some(10));
+    assert!(!parsed.memories.is_empty());
+    let mem = parsed.memories.unwrap_first();
+    assert_eq!(mem.limits.initial, 1);
+    assert_eq!(mem.limits.maximum, Some(10));
 }
 
 #[test]
@@ -3483,10 +3566,10 @@ fn test_memory_no_maximum() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert!(parsed.memory.is_some());
-    let mem = parsed.memory.unwrap();
-    assert_eq!(mem.initial, 5);
-    assert_eq!(mem.maximum, None);
+    assert!(!parsed.memories.is_empty());
+    let mem = parsed.memories.unwrap_first();
+    assert_eq!(mem.limits.initial, 5);
+    assert_eq!(mem.limits.maximum, None);
 }
 
 #[test]
@@ -3505,10 +3588,10 @@ fn test_memory_large_limits() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert!(parsed.memory.is_some());
-    let mem = parsed.memory.unwrap();
-    assert_eq!(mem.initial, 100);
-    assert_eq!(mem.maximum, Some(1000));
+    assert!(!parsed.memories.is_empty());
+    let mem = parsed.memories.unwrap_first();
+    assert_eq!(mem.limits.initial, 100);
+    assert_eq!(mem.limits.maximum, Some(1000));
 }
 
 // ========== Global Section Tests ==========
@@ -3673,10 +3756,14 @@ fn test_element_basic() {
     let mut module = Module::new(&bump);
 
     // Need a table
-    module.table = Some(TableLimits {
-        element_type: Type::FUNCREF,
-        initial: 10,
-        maximum: None,
+    module.add_table(Table {
+        name: "".to_string(),
+        limits: TableLimits {
+            initial: 10,
+            maximum: None,
+            element_type: Type::FUNCREF,
+        },
+        kind: TableKind::Local,
     });
 
     // Need functions to reference
@@ -3698,9 +3785,9 @@ fn test_element_basic() {
     // Element segment
     let offset = builder.const_(Literal::I32(0));
     module.elements.push(ElementSegment {
-        table_index: 0,
+        table_index: TableId::from_raw_parts(0, 0),
         offset,
-        func_indices: vec![0, 1],
+        func_indices: vec![FuncId::from_raw_parts(0, 0), 1.into()],
     });
 
     let mut writer = BinaryWriter::new();
@@ -3724,10 +3811,14 @@ fn test_element_multiple_segments() {
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
 
-    module.table = Some(TableLimits {
-        element_type: Type::FUNCREF,
-        initial: 20,
-        maximum: None,
+    module.add_table(Table {
+        name: "".to_string(),
+        limits: TableLimits {
+            initial: 20,
+            maximum: None,
+            element_type: Type::FUNCREF,
+        },
+        kind: TableKind::Local,
     });
 
     for _ in 0..5 {
@@ -3744,9 +3835,9 @@ fn test_element_multiple_segments() {
     for i in 0..3 {
         let offset = builder.const_(Literal::I32(i * 5));
         module.elements.push(ElementSegment {
-            table_index: 0,
+            table_index: TableId::from_raw_parts(0, 0),
             offset,
-            func_indices: vec![0, 1],
+            func_indices: vec![FuncId::from_raw_parts(0, 0), 1.into()],
         });
     }
 
@@ -3770,10 +3861,14 @@ fn test_element_many_functions() {
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
 
-    module.table = Some(TableLimits {
-        element_type: Type::FUNCREF,
-        initial: 100,
-        maximum: None,
+    module.add_table(Table {
+        name: "".to_string(),
+        limits: TableLimits {
+            initial: 100,
+            maximum: None,
+            element_type: Type::FUNCREF,
+        },
+        kind: TableKind::Local,
     });
 
     for _ in 0..50 {
@@ -3789,9 +3884,9 @@ fn test_element_many_functions() {
     let offset = builder.const_(Literal::I32(0));
     let indices: Vec<u32> = (0..50).collect();
     module.elements.push(ElementSegment {
-        table_index: 0,
+        table_index: TableId::from_raw_parts(0, 0),
         offset,
-        func_indices: indices,
+        func_indices: indices.into_iter().map(|i| i.into()).collect(),
     });
 
     let mut writer = BinaryWriter::new();
@@ -3821,7 +3916,7 @@ fn test_data_basic() {
 
     let offset = builder.const_(Literal::I32(0));
     module.data.push(DataSegment {
-        memory_index: 0,
+        memory_index: MemoryId::from_raw_parts(0, 0),
         offset,
         data: vec![1, 2, 3, 4, 5],
     });
@@ -3852,7 +3947,7 @@ fn test_data_multiple_segments() {
     // Segment 1 at offset 0
     let offset1 = builder.const_(Literal::I32(0));
     module.data.push(DataSegment {
-        memory_index: 0,
+        memory_index: MemoryId::from_raw_parts(0, 0),
         offset: offset1,
         data: vec![1, 2, 3],
     });
@@ -3860,7 +3955,7 @@ fn test_data_multiple_segments() {
     // Segment 2 at offset 100
     let offset2 = builder.const_(Literal::I32(100));
     module.data.push(DataSegment {
-        memory_index: 0,
+        memory_index: MemoryId::from_raw_parts(0, 0),
         offset: offset2,
         data: vec![4, 5, 6],
     });
@@ -3868,7 +3963,7 @@ fn test_data_multiple_segments() {
     // Segment 3 at offset 200
     let offset3 = builder.const_(Literal::I32(200));
     module.data.push(DataSegment {
-        memory_index: 0,
+        memory_index: MemoryId::from_raw_parts(0, 0),
         offset: offset3,
         data: vec![7, 8, 9],
     });
@@ -3898,7 +3993,7 @@ fn test_data_large() {
     let offset = builder.const_(Literal::I32(0));
     let large_data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
     module.data.push(DataSegment {
-        memory_index: 0,
+        memory_index: MemoryId::from_raw_parts(0, 0),
         offset,
         data: large_data.clone(),
     });
@@ -3929,7 +4024,7 @@ fn test_data_empty() {
 
     let offset = builder.const_(Literal::I32(0));
     module.data.push(DataSegment {
-        memory_index: 0,
+        memory_index: MemoryId::from_raw_parts(0, 0),
         offset,
         data: vec![],
     });
@@ -3961,7 +4056,7 @@ fn test_start_function() {
         vec![],
         None,
     ));
-    module.start = Some(0);
+    module.start = Some(FuncId::from_raw_parts(0, 0));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
@@ -3969,7 +4064,7 @@ fn test_start_function() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert_eq!(parsed.start, Some(0));
+    assert_eq!(parsed.start, Some(FuncId::from_raw_parts(0, 0)));
 }
 
 #[test]
@@ -3990,7 +4085,7 @@ fn test_start_with_multiple_functions() {
         ));
     }
 
-    module.start = Some(5); // Start at function 5
+    module.start = Some(FuncId::from_raw_parts(0, 0)); // Start at function 5
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
@@ -3998,7 +4093,7 @@ fn test_start_with_multiple_functions() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert_eq!(parsed.start, Some(5));
+    assert_eq!(parsed.start, Some(FuncId::from_raw_parts(0, 0)));
     assert_eq!(parsed.functions.len(), 10);
 }
 
@@ -4039,10 +4134,14 @@ fn test_table_basic() {
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
 
-    module.table = Some(TableLimits {
-        element_type: Type::FUNCREF,
-        initial: 5,
-        maximum: Some(50),
+    module.add_table(Table {
+        name: "".to_string(),
+        limits: TableLimits {
+            initial: 5,
+            maximum: Some(50),
+            element_type: Type::FUNCREF,
+        },
+        kind: TableKind::Local,
     });
 
     let mut writer = BinaryWriter::new();
@@ -4051,10 +4150,10 @@ fn test_table_basic() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert!(parsed.table.is_some());
-    let table = parsed.table.unwrap();
-    assert_eq!(table.initial, 5);
-    assert_eq!(table.maximum, Some(50));
+    assert!(!parsed.tables.is_empty());
+    let table = parsed.tables.unwrap_first();
+    assert_eq!(table.limits.initial, 5);
+    assert_eq!(table.limits.maximum, Some(50));
 }
 
 #[test]
@@ -4066,10 +4165,14 @@ fn test_table_no_maximum() {
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
 
-    module.table = Some(TableLimits {
-        element_type: Type::FUNCREF,
-        initial: 10,
-        maximum: None,
+    module.add_table(Table {
+        name: "".to_string(),
+        limits: TableLimits {
+            initial: 10,
+            maximum: None,
+            element_type: Type::FUNCREF,
+        },
+        kind: TableKind::Local,
     });
 
     let mut writer = BinaryWriter::new();
@@ -4078,10 +4181,10 @@ fn test_table_no_maximum() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert!(parsed.table.is_some());
-    let table = parsed.table.unwrap();
-    assert_eq!(table.initial, 10);
-    assert_eq!(table.maximum, None);
+    assert!(!parsed.tables.is_empty());
+    let table = parsed.tables.unwrap_first();
+    assert_eq!(table.limits.initial, 10);
+    assert_eq!(table.limits.maximum, None);
 }
 
 #[test]
@@ -4093,10 +4196,14 @@ fn test_table_large_limits() {
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
 
-    module.table = Some(TableLimits {
-        element_type: Type::FUNCREF,
-        initial: 1000,
-        maximum: Some(10000),
+    module.add_table(Table {
+        name: "".to_string(),
+        limits: TableLimits {
+            initial: 1000,
+            maximum: Some(10000),
+            element_type: Type::FUNCREF,
+        },
+        kind: TableKind::Local,
     });
 
     let mut writer = BinaryWriter::new();
@@ -4105,10 +4212,10 @@ fn test_table_large_limits() {
     let mut reader = BinaryReader::new(&bump, bytes);
     let parsed = reader.parse_module().expect("Failed to parse");
 
-    assert!(parsed.table.is_some());
-    let table = parsed.table.unwrap();
-    assert_eq!(table.initial, 1000);
-    assert_eq!(table.maximum, Some(10000));
+    assert!(!parsed.tables.is_empty());
+    let table = parsed.tables.unwrap_first();
+    assert_eq!(table.limits.initial, 1000);
+    assert_eq!(table.limits.maximum, Some(10000));
 }
 
 // ========== Phase 1: Control Flow Instructions ==========
@@ -4139,7 +4246,9 @@ fn test_unreachable_instruction() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    assert!(parsed.functions[0].body.is_some());
+    assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
+        .body()
+        .is_some());
 }
 
 #[test]
@@ -6584,16 +6693,24 @@ fn test_i32_load_store() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     // Load from address 0, add 10, store back
     let addr = builder.const_(Literal::I32(0));
-    let loaded = builder.load(4, false, 0, 2, addr, Type::I32);
+    let loaded = builder.load(0, 4, false, 0, 2, addr, Type::I32);
 
     let ten = builder.const_(Literal::I32(10));
     let added = builder.binary(BinaryOp::AddInt32, loaded, ten, Type::I32);
 
     let store_addr = builder.const_(Literal::I32(0));
-    let body = builder.store(4, 0, 2, store_addr, added);
+    let body = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, store_addr, added);
 
     module.add_function(Function::new(
         "test".to_string(),
@@ -6621,15 +6738,23 @@ fn test_i64_load_store() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     let addr = builder.const_(Literal::I32(8));
-    let loaded = builder.load(8, false, 0, 3, addr, Type::I64);
+    let loaded = builder.load(0, 8, false, 0, 3, addr, Type::I64);
 
     let multiplier = builder.const_(Literal::I64(2));
     let result = builder.binary(BinaryOp::MulInt64, loaded, multiplier, Type::I64);
 
     let store_addr = builder.const_(Literal::I32(16));
-    let body = builder.store(8, 0, 3, store_addr, result);
+    let body = builder.store(MemoryId::from_raw_parts(0, 0), 8, 8, 0, store_addr, result);
 
     module.add_function(Function::new(
         "test".to_string(),
@@ -6657,12 +6782,20 @@ fn test_i32_load8_signed_unsigned() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     let addr1 = builder.const_(Literal::I32(0));
-    let load_s = builder.load(1, true, 0, 0, addr1, Type::I32);
+    let load_s = builder.load(0, 1, true, 0, 0, addr1, Type::I32);
 
     let addr2 = builder.const_(Literal::I32(1));
-    let load_u = builder.load(1, false, 0, 0, addr2, Type::I32);
+    let load_u = builder.load(0, 1, false, 0, 0, addr2, Type::I32);
 
     let body = builder.binary(BinaryOp::AddInt32, load_s, load_u, Type::I32);
 
@@ -6692,12 +6825,20 @@ fn test_i32_load16_signed_unsigned() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     let addr1 = builder.const_(Literal::I32(0));
-    let load_s = builder.load(2, true, 0, 1, addr1, Type::I32);
+    let load_s = builder.load(0, 2, true, 0, 1, addr1, Type::I32);
 
     let addr2 = builder.const_(Literal::I32(2));
-    let load_u = builder.load(2, false, 0, 1, addr2, Type::I32);
+    let load_u = builder.load(0, 2, false, 0, 1, addr2, Type::I32);
 
     let body = builder.binary(BinaryOp::SubInt32, load_s, load_u, Type::I32);
 
@@ -6727,12 +6868,20 @@ fn test_i64_load8_signed_unsigned() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     let addr1 = builder.const_(Literal::I32(0));
-    let load_s = builder.load(1, true, 0, 0, addr1, Type::I64);
+    let load_s = builder.load(0, 1, true, 0, 0, addr1, Type::I64);
 
     let addr2 = builder.const_(Literal::I32(1));
-    let load_u = builder.load(1, false, 0, 0, addr2, Type::I64);
+    let load_u = builder.load(0, 1, false, 0, 0, addr2, Type::I64);
 
     let body = builder.binary(BinaryOp::AddInt64, load_s, load_u, Type::I64);
 
@@ -6762,12 +6911,20 @@ fn test_i64_load16_signed_unsigned() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     let addr1 = builder.const_(Literal::I32(0));
-    let load_s = builder.load(2, true, 0, 1, addr1, Type::I64);
+    let load_s = builder.load(0, 2, true, 0, 1, addr1, Type::I64);
 
     let addr2 = builder.const_(Literal::I32(2));
-    let load_u = builder.load(2, false, 0, 1, addr2, Type::I64);
+    let load_u = builder.load(0, 2, false, 0, 1, addr2, Type::I64);
 
     let body = builder.binary(BinaryOp::SubInt64, load_s, load_u, Type::I64);
 
@@ -6797,12 +6954,20 @@ fn test_i64_load32_signed_unsigned() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     let addr1 = builder.const_(Literal::I32(0));
-    let load_s = builder.load(4, true, 0, 2, addr1, Type::I64);
+    let load_s = builder.load(0, 4, true, 0, 2, addr1, Type::I64);
 
     let addr2 = builder.const_(Literal::I32(4));
-    let load_u = builder.load(4, false, 0, 2, addr2, Type::I64);
+    let load_u = builder.load(0, 4, false, 0, 2, addr2, Type::I64);
 
     let body = builder.binary(BinaryOp::MulInt64, load_s, load_u, Type::I64);
 
@@ -6832,15 +6997,23 @@ fn test_f32_load_store() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     let addr = builder.const_(Literal::I32(0));
-    let loaded = builder.load(4, false, 0, 2, addr, Type::F32);
+    let loaded = builder.load(0, 4, false, 0, 2, addr, Type::F32);
 
     let multiplier = builder.const_(Literal::F32(2.0));
     let result = builder.binary(BinaryOp::MulFloat32, loaded, multiplier, Type::F32);
 
     let store_addr = builder.const_(Literal::I32(4));
-    let body = builder.store(4, 0, 2, store_addr, result);
+    let body = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, store_addr, result);
 
     module.add_function(Function::new(
         "test".to_string(),
@@ -6868,15 +7041,23 @@ fn test_f64_load_store() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     let addr = builder.const_(Literal::I32(0));
-    let loaded = builder.load(8, false, 0, 3, addr, Type::F64);
+    let loaded = builder.load(0, 8, false, 0, 3, addr, Type::F64);
 
     let divisor = builder.const_(Literal::F64(2.0));
     let result = builder.binary(BinaryOp::DivFloat64, loaded, divisor, Type::F64);
 
     let store_addr = builder.const_(Literal::I32(8));
-    let body = builder.store(8, 0, 3, store_addr, result);
+    let body = builder.store(MemoryId::from_raw_parts(0, 0), 8, 8, 0, store_addr, result);
 
     module.add_function(Function::new(
         "test".to_string(),
@@ -6904,14 +7085,22 @@ fn test_i32_store8_store16() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     let value8 = builder.const_(Literal::I32(255));
     let addr8 = builder.const_(Literal::I32(0));
-    let store8 = builder.store(1, 0, 0, addr8, value8);
+    let store8 = builder.store(MemoryId::from_raw_parts(0, 0), 1, 1, 0, addr8, value8);
 
     let value16 = builder.const_(Literal::I32(65535));
     let addr16 = builder.const_(Literal::I32(4));
-    let store16 = builder.store(2, 0, 1, addr16, value16);
+    let store16 = builder.store(MemoryId::from_raw_parts(0, 0), 2, 2, 0, addr16, value16);
 
     let body = builder.block(
         None,
@@ -6945,18 +7134,26 @@ fn test_i64_store8_store16_store32() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     let value8 = builder.const_(Literal::I64(255));
     let addr8 = builder.const_(Literal::I32(0));
-    let store8 = builder.store(1, 0, 0, addr8, value8);
+    let store8 = builder.store(MemoryId::from_raw_parts(0, 0), 1, 1, 0, addr8, value8);
 
     let value16 = builder.const_(Literal::I64(65535));
     let addr16 = builder.const_(Literal::I32(8));
-    let store16 = builder.store(2, 0, 1, addr16, value16);
+    let store16 = builder.store(MemoryId::from_raw_parts(0, 0), 2, 2, 0, addr16, value16);
 
     let value32 = builder.const_(Literal::I64(0xFFFFFFFF));
     let addr32 = builder.const_(Literal::I32(16));
-    let store32 = builder.store(4, 0, 2, addr32, value32);
+    let store32 = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, addr32, value32);
 
     let body = builder.block(
         None,
@@ -6990,12 +7187,20 @@ fn test_load_with_offset() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     let base = builder.const_(Literal::I32(100));
-    let loaded1 = builder.load(4, false, 0, 2, base, Type::I32);
+    let loaded1 = builder.load(0, 4, false, 0, 2, base, Type::I32);
 
     let base2 = builder.const_(Literal::I32(100));
-    let loaded2 = builder.load(4, false, 16, 2, base2, Type::I32);
+    let loaded2 = builder.load(0, 4, false, 16, 2, base2, Type::I32);
 
     let body = builder.binary(BinaryOp::AddInt32, loaded1, loaded2, Type::I32);
 
@@ -7025,10 +7230,18 @@ fn test_store_with_offset() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     let value = builder.const_(Literal::I32(42));
     let base = builder.const_(Literal::I32(1000));
-    let body = builder.store(4, 64, 2, base, value);
+    let body = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 100, base, value);
 
     module.add_function(Function::new(
         "test".to_string(),
@@ -7056,8 +7269,16 @@ fn test_memory_size() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
-    let size = builder.memory_size();
+    let size = builder.memory_size(0);
     let multiplier = builder.const_(Literal::I32(65536));
     let body = builder.binary(BinaryOp::MulInt32, size, multiplier, Type::I32);
 
@@ -7087,11 +7308,19 @@ fn test_memory_grow() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     let pages = builder.const_(Literal::I32(1));
-    let old_size = builder.memory_grow(pages);
+    let old_size = builder.memory_grow(0, pages);
 
-    let new_size = builder.memory_size();
+    let new_size = builder.memory_size(0);
     let body = builder.binary(BinaryOp::AddInt32, old_size, new_size, Type::I32);
 
     module.add_function(Function::new(
@@ -7120,16 +7349,24 @@ fn test_complex_memory_operations() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     // Load i32, i64, f32, f64 from different addresses
     let addr1 = builder.const_(Literal::I32(0));
-    let i32_val = builder.load(4, false, 0, 2, addr1, Type::I32);
+    let i32_val = builder.load(0, 4, false, 0, 2, addr1, Type::I32);
 
     let addr2 = builder.const_(Literal::I32(8));
-    let _i64_val = builder.load(8, false, 0, 3, addr2, Type::I64);
+    let _i64_val = builder.load(0, 8, false, 0, 3, addr2, Type::I64);
 
     let addr3 = builder.const_(Literal::I32(16));
-    let f32_val = builder.load(4, false, 0, 2, addr3, Type::F32);
+    let f32_val = builder.load(0, 4, false, 0, 2, addr3, Type::F32);
 
     // Do some operations
     let i32_converted = builder.unary(UnaryOp::ConvertSInt32ToFloat32, i32_val, Type::F32);
@@ -7137,7 +7374,7 @@ fn test_complex_memory_operations() {
 
     // Store result
     let store_addr = builder.const_(Literal::I32(32));
-    let body = builder.store(4, 0, 2, store_addr, sum);
+    let body = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, store_addr, sum);
 
     module.add_function(Function::new(
         "test".to_string(),
@@ -7246,6 +7483,14 @@ fn test_all_operations_combined() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     // Integer operations
     let i32_a = builder.const_(Literal::I32(10));
@@ -7271,10 +7516,17 @@ fn test_all_operations_combined() {
 
     // Memory operations
     let store_addr = builder.const_(Literal::I32(0));
-    let store_op = builder.store(4, 0, 2, store_addr, f32_to_i32);
+    let store_op = builder.store(
+        MemoryId::from_raw_parts(0, 0),
+        4,
+        4,
+        0,
+        store_addr,
+        f32_to_i32,
+    );
 
     let load_addr = builder.const_(Literal::I32(0));
-    let loaded = builder.load(4, false, 0, 2, load_addr, Type::I32);
+    let loaded = builder.load(0, 4, false, 0, 2, load_addr, Type::I32);
 
     // Control flow
     let condition = builder.binary(
@@ -7576,21 +7828,29 @@ fn test_memory_operations_sequence() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     // Complex memory operation sequence
     let addr1 = builder.const_(Literal::I32(0));
-    let val1 = builder.load(4, false, 0, 2, addr1, Type::I32);
+    let val1 = builder.load(0, 4, false, 0, 2, addr1, Type::I32);
 
     let addr2 = builder.const_(Literal::I32(4));
-    let val2 = builder.load(4, false, 0, 2, addr2, Type::I32);
+    let val2 = builder.load(0, 4, false, 0, 2, addr2, Type::I32);
 
     let sum = builder.binary(BinaryOp::AddInt32, val1, val2, Type::I32);
 
     let store_addr = builder.const_(Literal::I32(8));
-    let store1 = builder.store(4, 0, 2, store_addr, sum);
+    let store1 = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, store_addr, sum);
 
     let load_back_addr = builder.const_(Literal::I32(8));
-    let loaded_back = builder.load(4, false, 0, 2, load_back_addr, Type::I32);
+    let loaded_back = builder.load(0, 4, false, 0, 2, load_back_addr, Type::I32);
 
     let body = builder.block(
         None,
@@ -7833,6 +8093,14 @@ fn test_maximum_expression_complexity() {
     let builder = IrBuilder::new(&bump);
     let bump = bumpalo::Bump::new();
     let mut module = Module::new(&bump);
+    module.add_memory(crate::ir::module::Memory {
+        name: "mem".to_string(),
+        limits: crate::ir::module::MemoryLimits {
+            initial: 1,
+            maximum: None,
+        },
+        kind: crate::ir::module::MemoryKind::Local,
+    });
 
     // Combine: nested blocks + loops + ifs + all operation types + memory ops + conversions
     let i32_start = builder.const_(Literal::I32(1));
@@ -7846,11 +8114,11 @@ fn test_maximum_expression_complexity() {
         builder.const_(Literal::I32(10)),
         Type::I32,
     );
-    let store_op = builder.store(4, 0, 2, addr, stored_val);
+    let store_op = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, addr, stored_val);
 
     // Load and process
     let load_addr = builder.const_(Literal::I32(0));
-    let loaded = builder.load(4, false, 0, 2, load_addr, Type::I32);
+    let loaded = builder.load(0, 4, false, 0, 2, load_addr, Type::I32);
 
     // Float operations
     let loaded_f32 = builder.unary(UnaryOp::ConvertSInt32ToFloat32, loaded, Type::F32);

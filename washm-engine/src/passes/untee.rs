@@ -26,8 +26,8 @@ impl Pass for Untee {
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         let allocator = module.allocator();
 
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 let mut transformer = UnteeTransformer { allocator };
                 transformer.visit(body);
             }
@@ -84,13 +84,14 @@ mod tests {
         );
 
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = Untee;
         pass.run(&mut module);
 
         // Verify transformation
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
 
         // Should now be a block
         if let ExpressionKind::Block { list, .. } = &body.kind {
@@ -130,13 +131,14 @@ mod tests {
         );
 
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = Untee;
         pass.run(&mut module);
 
         // Should remain unchanged
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
         assert!(matches!(body.kind, ExpressionKind::LocalGet { .. }));
     }
 
@@ -157,13 +159,14 @@ mod tests {
         );
 
         let mut module = Module::new(&bump);
-        module.add_function(func);
+        let id = module.add_function(func);
 
         let mut pass = Untee;
         pass.run(&mut module);
 
         // Verify type is preserved
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[id].body();
+        let body = binding.as_ref().unwrap();
         assert_eq!(body.type_, Type::I64, "Block should preserve tee's type");
     }
 }

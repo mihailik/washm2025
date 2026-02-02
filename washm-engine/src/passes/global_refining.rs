@@ -24,8 +24,8 @@ impl Pass for GlobalRefining {
         };
 
         // Scan all functions
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 analyzer.visit(body);
             }
         }
@@ -80,9 +80,9 @@ impl<'a> Visitor<'a> for GlobalAnalyzer {
 mod tests {
     use super::*;
     use crate::ir::expression::{Expression, ExpressionKind};
+    use crate::ir::module::GlobalKind;
     use crate::ir::module::{Global, Module};
     use crate::ir::{Literal, Type};
-    use crate::ir::module::GlobalKind;
     use bumpalo::Bump;
 
     #[test]

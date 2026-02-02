@@ -2842,8 +2842,8 @@ impl Pass for OptimizeInstructions {
             allocator: module.allocator,
         };
 
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 visitor.visit(body);
             }
         }

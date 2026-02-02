@@ -12,8 +12,8 @@ impl Pass for StripDebug {
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         // Clear all debug names
-        for func in &mut module.functions {
-            func.local_names.clear();
+        for (_, func) in &mut module.functions {
+            func.local_names_mut().clear();
         }
 
         // Clear all annotations (includes locations, local names, etc.)
@@ -54,8 +54,8 @@ impl Pass for PropagateDebugLocs {
             current_loc: None,
         };
 
-        for func in functions {
-            if let Some(mut body) = func.body {
+        for (_, func) in functions {
+            if let Some(mut body) = func.body() {
                 propagator.visit(&mut body);
             }
         }

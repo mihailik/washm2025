@@ -14,7 +14,7 @@ pub struct Liveness<'a> {
 
 impl<'a> Liveness<'a> {
     pub fn new(func: &Function<'a>) -> Self {
-        if func.body.is_none() {
+        if func.body().is_none() {
             // We need a dummy CFG or optional
             // For simplicity, panic or handle. Empty func has no body.
             // But we can't create CFG without entry expr.
@@ -22,7 +22,7 @@ impl<'a> Liveness<'a> {
             panic!("Liveness requires function body");
         }
 
-        let body = func.body.unwrap();
+        let body = func.body().unwrap();
         let cfg = ControlFlowGraph::build(func, body);
 
         // 2. Compute Gen definitions

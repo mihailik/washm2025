@@ -1,7 +1,7 @@
 use crate::analysis::call_graph::CallGraph;
 use crate::analysis::cost::{CostEstimator, TrivialInstruction};
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
-use crate::ir::module::{ExportKind, Module};
+use crate::ir::module::{ExportKind, FuncId, Module};
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
 use crate::passes::{InliningOptions, OptimizationOptions, Pass};
@@ -89,35 +89,32 @@ impl Pass for Inlining {
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         let call_graph = CallGraph::build(module);
+        let allocator = module.allocator;
 
         // Identify functions used globally
         let mut used_globally = HashSet::new();
         for export in &module.exports {
-            if let ExportKind::Function(index) = export.kind {
-                if let Some(func) = module.functions.get(index as usize) {
-                    used_globally.insert(func.name.clone());
+            if let ExportKind::Function(id) = export.kind {
+                if let Some(func) = module.functions.get(id) {
+                    used_globally.insert(id);
                 }
             }
         }
         if let Some(start) = module.start {
-            if let Some(func) = module.functions.get(start as usize) {
-                used_globally.insert(func.name.clone());
-            }
+            used_globally.insert(start);
         }
         for segment in &module.elements {
             for &idx in &segment.func_indices {
-                if let Some(func) = module.functions.get(idx as usize) {
-                    used_globally.insert(func.name.clone());
-                }
+                used_globally.insert(idx);
             }
         }
 
         // Store bodies and signatures
-        let mut function_info: HashMap<String, (ExprRef<'a>, Type, Vec<Type>)> = HashMap::new();
+        let mut function_info: HashMap<FuncId, (ExprRef<'a>, Type, Vec<Type>)> = HashMap::new();
 
-        for func in &module.functions {
-            if let Some(body) = func.body {
-                function_info.insert(func.name.clone(), (body, func.params, func.vars.clone()));
+        for (id, func) in &module.functions {
+            if let Some(body) = func.body() {
+                function_info.insert(id, (body, func.params, func.vars().to_vec()));
             }
         }
 
@@ -125,31 +122,28 @@ impl Pass for Inlining {
 
         // 1. Identification: Which functions are good candidates (Full Inlining)
         let mut candidates = HashMap::new();
-        for func in &module.functions {
+        for (id, func) in &module.functions {
             let num_callers = call_graph
                 .get_callers(&func.name)
                 .map(|s| s.len())
                 .unwrap_or(0);
-            let is_used_globally = used_globally.contains(&func.name);
+            let is_used_globally = used_globally.contains(&id);
             if self.worth_full_inlining(&func.name, num_callers, is_used_globally, func) {
-                candidates.insert(func.name.clone(), true);
+                candidates.insert(id, true);
             }
         }
 
         // 2. Application: Traverse all functions and inline calls to candidates
-        for caller_idx in 0..module.functions.len() {
-            let (mut body, mut vars, params, caller_name) = {
-                let f = &mut module.functions[caller_idx];
-                if f.body.is_none() {
-                    continue;
-                }
-                (
-                    f.body.unwrap(),
-                    std::mem::take(&mut f.vars),
-                    f.params,
-                    f.name.clone(),
-                )
-            };
+        let ids: Vec<_> = module.functions.iter().map(|(id, _)| id).collect();
+        for id in ids {
+            if module.functions[id].body().is_none() {
+                continue;
+            }
+
+            let mut body = module.functions[id].body_mut().take().unwrap();
+            let mut vars = std::mem::take(module.functions[id].vars_mut());
+            let params = module.functions[id].params;
+            let name = module.functions[id].name.clone();
 
             let mut inliner = Inliner {
                 function_info: &function_info,
@@ -157,14 +151,14 @@ impl Pass for Inlining {
                 builder: IrBuilder::new(allocator),
                 caller_vars: &mut vars,
                 caller_param_count: params.tuple_len(),
-                caller_name: &caller_name,
+                caller_name: id,
                 inline_counter: 0,
             };
             inliner.visit(&mut body);
 
             // Put vars back
-            module.functions[caller_idx].vars = vars;
-            module.functions[caller_idx].body = Some(body);
+            *module.functions[id].vars_mut() = vars;
+            *module.functions[id].body_mut() = Some(body);
         }
     }
 }
@@ -207,12 +201,12 @@ impl Pass for InliningOptimizing {
 }
 
 struct Inliner<'a, 'b> {
-    function_info: &'b HashMap<String, (ExprRef<'a>, Type, Vec<Type>)>,
-    candidates: &'b HashMap<String, bool>,
+    function_info: &'b HashMap<FuncId, (ExprRef<'a>, Type, Vec<Type>)>,
+    candidates: &'b HashMap<FuncId, bool>,
     builder: IrBuilder<'a>,
     caller_vars: &'b mut Vec<Type>,
     caller_param_count: usize,
-    caller_name: &'b str,
+    caller_name: FuncId,
     inline_counter: usize,
 }
 
@@ -225,7 +219,7 @@ impl<'a, 'b> Visitor<'a> for Inliner<'a, 'b> {
             target, operands, ..
         } = &expr.kind
         {
-            if !self.candidates.contains_key(*target) {
+            if !self.candidates.contains_key(target) {
                 return;
             }
 
@@ -234,7 +228,7 @@ impl<'a, 'b> Visitor<'a> for Inliner<'a, 'b> {
                 return;
             }
 
-            if let Some((callee_body, callee_params, callee_vars)) = self.function_info.get(*target)
+            if let Some((callee_body, callee_params, callee_vars)) = self.function_info.get(target)
             {
                 self.inline_counter += 1;
                 let inline_id = self.inline_counter;
@@ -244,7 +238,7 @@ impl<'a, 'b> Visitor<'a> for Inliner<'a, 'b> {
                 let base_local_index = self.caller_param_count + self.caller_vars.len();
 
                 // Parameters become locals
-                let param_types = callee_params.tuple_elements();
+                let param_types: &[Type] = &callee_params.tuple_elements();
                 for (i, &param_type) in param_types.iter().enumerate() {
                     self.caller_vars.push(param_type);
                     let operand = operands[i];
@@ -341,7 +335,7 @@ mod tests {
         let arg = builder.const_(Literal::I32(42));
         let mut args = BumpVec::new_in(&bump);
         args.push(arg);
-        let call = builder.call("callee", args, Type::I32, false);
+        let call = builder.call(FuncId::from_raw_parts(0, 0), args, Type::I32, false);
         let caller = Function::new(
             "caller".to_string(),
             Type::NONE,
@@ -351,13 +345,15 @@ mod tests {
         );
 
         let mut module = Module::new(&bump);
-        module.add_function(callee);
-        module.add_function(caller);
+        let callee_id = module.add_function(callee);
+        let caller_id = module.add_function(caller);
 
         let mut inlining = Inlining::new();
         inlining.run(&mut module);
 
-        let caller_body = module.functions[1].body.unwrap();
+        let caller_body = module.functions[caller_id]
+            .body()
+            .unwrap();
 
         // Expect:
         // (block
@@ -399,7 +395,7 @@ mod tests {
         let arg = builder.const_(Literal::I32(42));
         let mut args = BumpVec::new_in(&bump);
         args.push(arg);
-        let call = builder.call("callee", args, Type::I32, false);
+        let call = builder.call(FuncId::from_raw_parts(0, 0), args, Type::I32, false);
         let caller = Function::new(
             "caller".to_string(),
             Type::NONE,
@@ -415,7 +411,9 @@ mod tests {
         let mut inlining = Inlining::new();
         inlining.run(&mut module);
 
-        let caller_body = module.functions[1].body.unwrap();
+        let caller_body = module.functions[FuncId::from_raw_parts(1, 0)]
+            .body()
+            .unwrap();
 
         // Expect Return to be converted to Break
         if let ExpressionKind::Block { list, .. } = &caller_body.kind {

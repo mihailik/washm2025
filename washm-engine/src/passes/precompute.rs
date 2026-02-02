@@ -16,8 +16,8 @@ impl Pass for Precompute {
         let evaluator = Evaluator::new(module.allocator);
         let mut visitor = PrecomputeVisitor { evaluator };
 
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 visitor.visit(body);
             }
         }
@@ -83,7 +83,8 @@ mod tests {
         module.add_function(func);
         let mut pass = Precompute;
         pass.run(&mut module);
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         assert!(matches!(body.kind, ExpressionKind::Const(Literal::I32(30))));
     }
 
@@ -126,7 +127,8 @@ mod tests {
         module.add_function(func);
         let mut pass = Precompute;
         pass.run(&mut module);
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         assert!(matches!(body.kind, ExpressionKind::Const(Literal::I32(60))));
     }
 
@@ -147,7 +149,8 @@ mod tests {
         let mut pass = Precompute;
         pass.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         assert!(matches!(body.kind, ExpressionKind::Const(Literal::I64(v)) if v == (1i64 << 33)));
     }
 }

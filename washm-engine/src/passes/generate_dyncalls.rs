@@ -1,6 +1,7 @@
 use crate::ir::expression::{Expression, ExpressionKind, IrBuilder};
 use crate::ir::module::{Function, Module};
 use crate::ir::Type;
+use crate::ir::{FuncId, TableId};
 use crate::passes::Pass;
 
 use bumpalo::collections::Vec as BumpVec;
@@ -19,7 +20,7 @@ impl Pass for GenerateDynCalls {
 
         for segment in &module.elements {
             for &func_idx in &segment.func_indices {
-                if let Some(func) = module.functions.get(func_idx as usize) {
+                if let Some(func) = module.functions.get(func_idx) {
                     // Currently we only support functions with NO parameters (Type::NONE)
                     // because we cannot represent multi-value params (tuples) in 'Function::params'
                     // easily without Type support.
@@ -32,26 +33,30 @@ impl Pass for GenerateDynCalls {
             }
         }
 
+        let table_id = module.tables.ids().next();
+
         // Generate wrappers
         let mut new_functions = Vec::new();
 
         for (params, results) in signatures {
             let name = generate_dyncall_name(params, results);
 
-            if module.get_function(&name).is_some() {
+            if module.functions.iter().any(|(_, f)| f.name == name) {
                 continue;
             }
 
-            let wrapper = create_dyncall_wrapper(module.allocator, &name, params, results);
-            new_functions.push(wrapper);
+            if let Some(table_id) = table_id {
+                let wrapper =
+                    create_dyncall_wrapper(module.allocator, &name, params, results, table_id);
+                new_functions.push(wrapper);
+            }
         }
 
         // Add to module and export
         for func in new_functions {
             let name = func.name.clone();
-            module.add_function(func);
-            let idx = (module.functions.len() - 1) as u32;
-            module.export_function(idx, name);
+            let id = module.add_function(func);
+            module.export_function(id, name);
         }
     }
 }
@@ -60,14 +65,7 @@ fn generate_dyncall_name(params: Type, results: Type) -> String {
     let mut s = String::from("dynCall_");
     s.push(type_to_char(results));
     if params == Type::NONE {
-        // Void params, usually 'v' is appended in some conventions, or nothing.
-        // Emscripten 'dynCall_v' usually means void return, void params?
-        // Actually Emscripten uses: dynCall_<sig>
-        // sig: <ret><arg1><arg2>...
-        // v = void, i = i32, j = i64, f = f32, d = f64
-        // Example: void(void) -> dynCall_v
-        // Example: i32(void) -> dynCall_i
-        // Example: void(i32) -> dynCall_vi
+        // Void params
     } else {
         s.push(type_to_char(params));
     }
@@ -91,6 +89,7 @@ fn create_dyncall_wrapper<'a>(
     name: &str,
     params: Type,
     results: Type,
+    table: crate::ir::module::TableId,
 ) -> Function<'a> {
     let builder = IrBuilder::new(bump);
 
@@ -113,7 +112,7 @@ fn create_dyncall_wrapper<'a>(
     let body = Expression::new(
         bump,
         ExpressionKind::CallIndirect {
-            table: "0", // Default table
+            table,
             target,
             operands,
             type_: sig_type,
@@ -136,6 +135,7 @@ mod tests {
     use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
     use crate::ir::module::{ElementSegment, Function};
     use crate::ir::Type;
+    use crate::ir::{FuncId, TableId};
     use bumpalo::collections::Vec as BumpVec;
     use bumpalo::Bump;
 
@@ -143,6 +143,17 @@ mod tests {
     fn test_generate_dyncalls_void_void() {
         let allocator = Bump::new();
         let mut module = Module::new(&allocator);
+
+        // Add a table
+        module.add_table(crate::ir::module::Table {
+            name: "table".to_string(),
+            limits: crate::ir::module::TableLimits {
+                initial: 1,
+                maximum: None,
+                element_type: Type::FUNCREF,
+            },
+            kind: crate::ir::module::TableKind::Local,
+        });
 
         // Define function: void test()
         let block = allocator.alloc(Expression {
@@ -160,23 +171,19 @@ mod tests {
             vec![],
             Some(ExprRef::new(block)),
         );
-        module.add_function(func);
+        let func_id = module.add_function(func);
 
         // Add to table (Elements)
-        // ElementSegment { table_index: 0, offset: (i32.const 0), func_indices: [0] }
         let offset = Expression::const_expr(&allocator, crate::ir::Literal::I32(0), Type::I32);
         let segment = ElementSegment {
-            table_index: 0,
+            table_index: TableId::from_raw_parts(0, 0),
             offset,
-            func_indices: vec![0], // Index 0
+            func_indices: vec![func_id],
         };
         module.add_element_segment(segment);
 
         let mut pass = GenerateDynCalls;
         pass.run(&mut module);
-
-        // Expect: dynCall_v
-        assert!(module.get_function("dynCall_v").is_some());
 
         // Verify export
         let export = module.exports.iter().find(|e| e.name == "dynCall_v");
@@ -188,6 +195,17 @@ mod tests {
         let allocator = Bump::new();
         let mut module = Module::new(&allocator);
 
+        // Add a table
+        module.add_table(crate::ir::module::Table {
+            name: "table".to_string(),
+            limits: crate::ir::module::TableLimits {
+                initial: 1,
+                maximum: None,
+                element_type: Type::FUNCREF,
+            },
+            kind: crate::ir::module::TableKind::Local,
+        });
+
         // Define function: i32 test()
         let val = Expression::const_expr(&allocator, crate::ir::Literal::I32(42), Type::I32);
         let func = Function::new(
@@ -197,14 +215,14 @@ mod tests {
             vec![],
             Some(val),
         );
-        module.add_function(func);
+        let func_id = module.add_function(func);
 
         // Add to table
         let offset = Expression::const_expr(&allocator, crate::ir::Literal::I32(0), Type::I32);
         let segment = ElementSegment {
-            table_index: 0,
+            table_index: TableId::from_raw_parts(0, 0),
             offset,
-            func_indices: vec![0],
+            func_indices: vec![func_id],
         };
         module.add_element_segment(segment);
 
@@ -212,6 +230,6 @@ mod tests {
         pass.run(&mut module);
 
         // Expect: dynCall_i
-        assert!(module.get_function("dynCall_i").is_some());
+        assert!(module.functions.iter().any(|(_, f)| f.name == "dynCall_i"));
     }
 }

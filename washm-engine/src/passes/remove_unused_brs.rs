@@ -17,10 +17,10 @@ impl Pass for RemoveUnusedBrs {
             _bump: module.allocator,
         };
 
-        for func in &mut module.functions {
-            if let Some(mut body) = func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(mut body) = func.body() {
                 optimizer.optimize(&mut body);
-                func.body = Some(body);
+                *func.body_mut() = Some(body);
             }
         }
     }
@@ -313,7 +313,7 @@ impl<'a> BrOptimizer<'a> {
             | ExpressionKind::LocalTee { value, .. }
             | ExpressionKind::GlobalSet { value, .. }
             | ExpressionKind::Load { ptr: value, .. }
-            | ExpressionKind::MemoryGrow { delta: value } => {
+            | ExpressionKind::MemoryGrow { delta: value, .. } => {
                 current_flow = self.optimize(value);
             }
             ExpressionKind::Binary { left, right, .. }
@@ -375,7 +375,8 @@ mod tests {
         module.add_function(func);
         let mut pass = RemoveUnusedBrs;
         pass.run(&mut module);
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert!(matches!(list[0].kind, ExpressionKind::Nop));
         } else {

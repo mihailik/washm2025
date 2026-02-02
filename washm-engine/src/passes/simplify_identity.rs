@@ -13,8 +13,8 @@ impl Pass for SimplifyIdentity {
     }
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 self.visit(body);
             }
         }
@@ -315,7 +315,8 @@ mod tests {
 
         SimplifyIdentity.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         assert!(matches!(body.kind, ExpressionKind::Const(Literal::I32(42))));
     }
 
@@ -341,7 +342,8 @@ mod tests {
 
         SimplifyIdentity.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         assert!(matches!(body.kind, ExpressionKind::Const(Literal::I32(0))));
     }
 
@@ -381,7 +383,8 @@ mod tests {
 
         SimplifyIdentity.run(&mut module);
 
-        let body = module.functions[0].body.as_ref().unwrap();
+        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
+        let body = binding.as_ref().unwrap();
         if let ExpressionKind::Unary { op, value } = &body.kind {
             assert_eq!(*op, UnaryOp::EqZInt32);
             assert!(matches!(value.kind, ExpressionKind::LocalGet { .. }));

@@ -1,6 +1,7 @@
 use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
 use crate::ir::module::{ExportKind, Function, Global, GlobalId, GlobalKind, Module};
 use crate::ir::ops::{BinaryOp, UnaryOp};
+use crate::ir::FuncId;
 use crate::ir::{Literal, Type};
 use crate::passes::Pass;
 use bumpalo::collections::Vec as BumpVec;
@@ -23,7 +24,7 @@ impl Pass for LegalizeJSInterface {
         // Identify exports that need legalization
         struct ExportTask {
             export_index: usize, // Index in module.exports
-            func_index: u32,
+            func_id: crate::ir::FuncId,
             _name: String,
             has_i64_param: bool,
             has_i64_result: bool,
@@ -32,8 +33,8 @@ impl Pass for LegalizeJSInterface {
         let mut tasks = Vec::new();
 
         for (i, export) in module.exports.iter().enumerate() {
-            if let ExportKind::Function(func_index) = export.kind {
-                if let Some(func) = module.functions.get(func_index as usize) {
+            if let ExportKind::Function(func_id) = export.kind {
+                if let Some(func) = module.get_function(func_id) {
                     let has_i64_param = func.params == Type::I64; // Simple check for now
                     let has_i64_result = func.results == Type::I64;
 
@@ -43,7 +44,7 @@ impl Pass for LegalizeJSInterface {
                         }
                         tasks.push(ExportTask {
                             export_index: i,
-                            func_index,
+                            func_id,
                             _name: export.name.clone(),
                             has_i64_param,
                             has_i64_result,
@@ -85,11 +86,8 @@ impl Pass for LegalizeJSInterface {
         let mut new_funcs = Vec::new();
 
         // To avoid borrowing issues, we record the *new* function index for each task.
-        // Current function count + i
-        let start_func_index = module.functions.len() as u32;
-
         for task in tasks.iter() {
-            let original_func = &module.functions[task.func_index as usize];
+            let original_func = &module.functions[task.func_id];
             let wrapper_name = format!("legalized_{}", original_func.name);
 
             // Signature of wrapper:
@@ -128,7 +126,7 @@ impl Pass for LegalizeJSInterface {
             let call_original = allocator.alloc(Expression {
                 type_: original_func.results,
                 kind: ExpressionKind::Call {
-                    target: allocator.alloc_str(&original_func.name),
+                    target: task.func_id,
                     operands: args,
                     is_return: false,
                 },
@@ -239,12 +237,11 @@ impl Pass for LegalizeJSInterface {
 
         // 4. Update exports and add functions
         for (i, func) in new_funcs.into_iter().enumerate() {
-            let new_idx = start_func_index + i as u32;
-            module.add_function(func);
+            let func_id = module.add_function(func);
 
             // Update the export to point to this new function
             let task = &tasks[i];
-            module.exports[task.export_index].kind = ExportKind::Function(new_idx);
+            module.exports[task.export_index].kind = ExportKind::Function(func_id);
         }
     }
 }
@@ -254,6 +251,7 @@ mod tests {
     use super::*;
     use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
     use crate::ir::module::Function;
+    use crate::ir::FuncId;
     use crate::ir::{Literal, Type};
 
     use bumpalo::Bump;
@@ -277,7 +275,7 @@ mod tests {
             Some(ExprRef::new(const_val)),
         );
         module.add_function(func);
-        module.export_function(0, "return_i64".to_string());
+        module.export_function(FuncId::from_raw_parts(0, 0), "return_i64".to_string());
 
         let mut pass = LegalizeJSInterface;
         pass.run(&mut module);
@@ -289,14 +287,18 @@ mod tests {
             ExportKind::Function(idx) => idx,
             _ => panic!("Expected function export"),
         };
-        assert_ne!(wrapper_idx, 0);
+        assert_ne!(wrapper_idx, FuncId::from_raw_parts(0, 0));
 
         // 2. New function should return i32
-        let wrapper = &module.functions[wrapper_idx as usize];
+        let wrapper = &module.functions[wrapper_idx];
         assert_eq!(wrapper.results, Type::I32);
 
         // 3. global tempRet0 should exist
-        let g_id = module.globals.ids().find(|id| module.globals[*id].name == "tempRet0").expect("tempRet0 global not found");
+        let g_id = module
+            .globals
+            .ids()
+            .find(|id| module.globals[*id].name == "tempRet0")
+            .expect("tempRet0 global not found");
         assert!(module.get_global(g_id.cast()).is_some());
     }
 }

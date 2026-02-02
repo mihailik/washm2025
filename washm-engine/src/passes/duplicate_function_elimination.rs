@@ -1,10 +1,9 @@
 use crate::analysis::hasher::DeepHasher;
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::Module;
+use crate::ir::module::{FuncId, Module};
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
-use bumpalo::Bump;
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 /// Duplicate Function Elimination pass
@@ -18,80 +17,70 @@ impl Pass for DuplicateFunctionElimination {
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         // 1. Compute hashes
-        let mut hashes: HashMap<u64, Vec<String>> = HashMap::new();
+        let mut hashes: HashMap<u64, Vec<FuncId>> = HashMap::new();
 
-        for func in &module.functions {
-            if let Some(body) = func.body {
+        for (id, func) in &module.functions {
+            if let Some(body) = func.body() {
                 let mut hasher = DefaultHasher::new();
                 // Hash signature too!
                 func.params.hash(&mut hasher);
                 func.results.hash(&mut hasher);
-                func.vars.hash(&mut hasher);
+                func.vars().hash(&mut hasher);
 
                 // Hash body
                 let mut visitor = DeepHasher::new(&mut hasher);
                 visitor.hash_expr(body);
 
                 let hash = hasher.finish();
-                hashes.entry(hash).or_default().push(func.name.clone());
+                hashes.entry(hash).or_default().push(id);
             }
         }
 
         // 2. Identify duplicates
-        let mut replacements: HashMap<String, String> = HashMap::new();
-        let mut to_remove: Vec<String> = Vec::new();
+        let mut replacements: HashMap<FuncId, FuncId> = HashMap::new();
+        let mut to_remove: HashSet<FuncId> = HashSet::new();
 
         for (_, group) in hashes {
             if group.len() > 1 {
                 // Potential duplicates
                 // Ideally check equality, but assuming hash collision is rare for now or acceptable for this pass level.
                 // Canonical is the first one.
-                let canonical = &group[0];
-                for duplicate in &group[1..] {
-                    replacements.insert(duplicate.clone(), canonical.clone());
-                    to_remove.push(duplicate.clone());
+                let canonical = group[0];
+                for &duplicate in &group[1..] {
+                    replacements.insert(duplicate, canonical);
+                    to_remove.insert(duplicate);
                 }
             }
         }
-
-        // ...
 
         if replacements.is_empty() {
             return;
         }
 
-        let allocator = module.allocator;
-
         // 3. Redirect calls
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
+        for (_, func) in &mut module.functions {
+            if let Some(body) = func.body_mut() {
                 let mut rewriter = CallRedirector {
                     replacements: &replacements,
-                    allocator,
                 };
                 rewriter.visit(body);
             }
         }
 
         // 4. Remove functions
-        let to_remove_set: std::collections::HashSet<_> = to_remove.iter().collect();
-        module
-            .functions
-            .retain(|f| !to_remove_set.contains(&f.name));
+        module.functions.retain(|id, _| !to_remove.contains(&id));
     }
 }
 
-struct CallRedirector<'a, 'b> {
-    replacements: &'b HashMap<String, String>,
-    allocator: &'a Bump,
+struct CallRedirector<'b> {
+    replacements: &'b HashMap<FuncId, FuncId>,
 }
 
-impl<'a, 'b> Visitor<'a> for CallRedirector<'a, 'b> {
+impl<'a, 'b> Visitor<'a> for CallRedirector<'b> {
     fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
         if let ExpressionKind::Call { target, .. } = &mut expr.kind {
-            if let Some(replacement) = self.replacements.get(*target) {
-                // Allocate replacement string in arena
-                *target = self.allocator.alloc_str(replacement);
+            if let Some(&replacement) = self.replacements.get(target) {
+                *target = replacement;
             }
         }
         self.visit_children(expr);
@@ -147,22 +136,22 @@ mod tests {
         );
 
         let mut module = Module::new(&bump);
-        module.add_function(func1);
-        module.add_function(func2);
-        module.add_function(func3);
+        let id1 = module.add_function(func1);
+        let id2 = module.add_function(func2);
+        let id3 = module.add_function(func3);
 
         let mut pass = DuplicateFunctionElimination;
         pass.run(&mut module);
 
         // Should have merged func2 into func1
-        assert_eq!(module.functions.len(), 2); // func1 and func3
+        assert_eq!(module.functions.len(), 2);
 
         // func3 should call func1
-        let func3 = &module.functions[1];
+        let func3 = module.functions.get(id3).unwrap();
         assert_eq!(func3.name, "func3");
 
-        if let ExpressionKind::Call { target, .. } = func3.body.unwrap().kind {
-            assert_eq!(target, "func1");
+        if let ExpressionKind::Call { target, .. } = func3.body().unwrap().kind {
+            assert_eq!(target, id1);
         } else {
             panic!("Expected Call");
         }

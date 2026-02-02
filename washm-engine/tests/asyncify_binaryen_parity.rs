@@ -45,26 +45,22 @@ fn test_asyncify_binaryen_sleep_parity() {
 
     // Verify 'factorial-loop' still works (it has nested structural components)
     // We expect it to have been transformed.
-    let factorial_loop_idx = module
+    let factorial_loop_id = module
         .exports
         .iter()
         .find(|e| {
-            e.name == "factorial-loop" && matches!(e.kind, washm::ir::module::ExportKind::Function(_))
+            e.name == "factorial-loop"
+                && matches!(e.kind, washm::ir::module::ExportKind::Function(_))
         })
         .map(|e| match e.kind {
-            washm::ir::module::ExportKind::Function(idx) => idx,
+            washm::ir::module::ExportKind::Function(id) => id,
             _ => unreachable!(),
         })
         .expect("factorial-loop export missing");
 
-    let num_func_imports = module
-        .imports
-        .iter()
-        .filter(|i| matches!(i.kind, washm::ir::module::ImportKind::Function(_, _)))
-        .count() as u32;
-    let func = &module.functions[(factorial_loop_idx - num_func_imports) as usize];
+    let func = &module.functions[factorial_loop_id];
 
-    let body = func.body.expect("factorial-loop missing body");
+    let body = func.body().expect("factorial-loop missing body");
     // Verify it contains a loop that is instrumented
     use washm::ir::expression::ExpressionKind;
     use washm::ir::visitor::ReadOnlyVisitor;
@@ -146,8 +142,8 @@ fn test_asyncify_binaryen_suite_parity() {
 
                 let mut config = AsyncifyConfig::default();
                 // Heuristic: If it has imports, it likely needs them to be async-capable for the test
-                for import in &ir_module.imports {
-                    if let washm::ir::module::ImportKind::Function(_, _) = &import.kind {
+                for (_, func) in ir_module.functions.iter() {
+                    if let Some(import) = &func.import {
                         config
                             .imports
                             .push(format!("{}.{}", import.module, import.name));
@@ -188,7 +184,7 @@ fn verify_liveness1(func: &washm::ir::module::Function) {
     use washm::ir::expression::ExpressionKind;
     use washm::ir::Literal;
 
-    let body = func.body.expect("liveness1 missing body");
+    let body = func.body().expect("liveness1 missing body");
     if let ExpressionKind::Block { list, .. } = &body.kind {
         // First element is the Rewinding check
         let rewind_if = list[0];

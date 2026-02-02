@@ -167,8 +167,8 @@ impl Pass for SimplifyLocals {
             self.another_cycle = false;
             self.path.clear();
 
-            for func in &mut module.functions {
-                if let Some(body) = &mut func.body {
+            for (_, func) in &mut module.functions {
+                if let Some(body) = func.body_mut() {
                     let mut ctx = FunctionContext::new(
                         self.allow_tee,
                         self.allow_structure,
@@ -1075,7 +1075,7 @@ where
             f(if_true);
             f(if_false);
         }
-        ExpressionKind::MemoryGrow { delta } => {
+        ExpressionKind::MemoryGrow { delta, .. } => {
             f(delta);
         }
         ExpressionKind::RefIsNull { value } => {
@@ -1222,7 +1222,7 @@ where
         | ExpressionKind::Const(_)
         | ExpressionKind::LocalGet { .. }
         | ExpressionKind::GlobalGet { .. }
-        | ExpressionKind::MemorySize
+        | ExpressionKind::MemorySize { .. }
         | ExpressionKind::TableSize { .. }
         | ExpressionKind::AtomicFence
         | ExpressionKind::RefNull { .. }
@@ -1324,7 +1324,7 @@ where
             f(if_true);
             f(if_false);
         }
-        ExpressionKind::MemoryGrow { delta } => {
+        ExpressionKind::MemoryGrow { delta, .. } => {
             f(delta);
         }
         ExpressionKind::AtomicRMW { ptr, value, .. } => {
@@ -1499,7 +1499,7 @@ where
         | ExpressionKind::Const(_)
         | ExpressionKind::LocalGet { .. }
         | ExpressionKind::GlobalGet { .. }
-        | ExpressionKind::MemorySize
+        | ExpressionKind::MemorySize { .. }
         | ExpressionKind::TableSize { .. }
         | ExpressionKind::AtomicFence
         | ExpressionKind::RefNull { .. }
@@ -1572,21 +1572,19 @@ mod tests {
 
         let block = builder.block(None, list, Type::NONE);
 
-        module.functions.push(crate::ir::module::Function {
-            name: "test".to_string(),
-            type_idx: None,
-            params: Type::NONE,
-            results: Type::NONE,
-            vars: vec![Type::I32],
-            body: Some(block),
-            local_names: vec![String::new(); 1],
-        });
+        let test_id = module.add_function(crate::ir::module::Function::new(
+            "test".to_string(),
+            Type::NONE,
+            Type::NONE,
+            vec![Type::I32],
+            Some(block),
+        ));
 
         let mut pass = SimplifyLocals::new();
         pass.run(&mut module);
 
-        let body = module.functions[0]
-            .body
+        let body = module.functions[test_id]
+            .body()
             .expect("Function should have a body");
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 3);
@@ -1629,24 +1627,22 @@ mod tests {
 
         let if_expr = builder.if_(condition, if_true, if_false, Type::NONE);
 
-        module.functions.push(crate::ir::module::Function {
-            name: "test".to_string(),
-            type_idx: None,
-            params: Type::NONE,
-            results: Type::NONE,
-            vars: vec![Type::I32, Type::I32],
-            body: Some(if_expr),
-            local_names: vec![String::new(); 2],
-        });
+        let test_id = module.add_function(crate::ir::module::Function::new(
+            "test".to_string(),
+            Type::NONE,
+            Type::NONE,
+            vec![Type::I32, Type::I32],
+            Some(if_expr),
+        ));
 
         let mut pass = SimplifyLocals::new();
         pass.run(&mut module);
 
-        let body = module.functions[0]
-            .body
+        let body = module.functions[test_id]
+            .body()
             .expect("Function should have a body");
         if let ExpressionKind::LocalSet { index, value } = &body.kind {
-            assert_eq!(*index, 0);
+            assert_eq!((*index as usize), 0);
             assert!(matches!(value.kind, ExpressionKind::If { .. }));
         } else {
             panic!("Expected LocalSet, got {:?}", body.kind);
@@ -1663,22 +1659,20 @@ mod tests {
         list.push(builder.local_set(0, builder.const_(Literal::I32(1))));
         let block = builder.block(Some("label"), list, Type::NONE);
 
-        module.functions.push(crate::ir::module::Function {
-            name: "test".to_string(),
-            params: Type::NONE,
-            results: Type::NONE,
-            vars: vec![Type::I32],
-            body: Some(block),
-            local_names: vec![String::new(); 1],
-            type_idx: None,
-        });
+        let test_id = module.add_function(crate::ir::module::Function::new(
+            "test".to_string(),
+            Type::NONE,
+            Type::NONE,
+            vec![Type::I32],
+            Some(block),
+        ));
 
         let mut pass = SimplifyLocals::new();
         pass.run(&mut module);
 
-        let body = module.functions[0].body.unwrap();
+        let body = module.functions[test_id].body().unwrap();
         if let ExpressionKind::LocalSet { index, value: _ } = &body.kind {
-            assert_eq!(*index, 0);
+            assert_eq!((*index as usize), 0);
         } else {
             panic!("Expected LocalSet, got {:?}", body.kind);
         }
@@ -1697,22 +1691,20 @@ mod tests {
 
         let if_expr = builder.if_(condition, if_true, None, Type::NONE);
 
-        module.functions.push(crate::ir::module::Function {
-            name: "test".to_string(),
-            params: Type::NONE,
-            results: Type::NONE,
-            vars: vec![Type::I32, Type::I32],
-            body: Some(if_expr),
-            local_names: vec![String::new(); 2],
-            type_idx: None,
-        });
+        let test_id = module.add_function(crate::ir::module::Function::new(
+            "test".to_string(),
+            Type::NONE,
+            Type::NONE,
+            vec![Type::I32, Type::I32],
+            Some(if_expr),
+        ));
 
         let mut pass = SimplifyLocals::new();
         pass.run(&mut module);
 
-        let body = module.functions[0].body.unwrap();
+        let body = module.functions[test_id].body().unwrap();
         if let ExpressionKind::LocalSet { index, value } = &body.kind {
-            assert_eq!(*index, 0);
+            assert_eq!((*index as usize), 0);
             if let ExpressionKind::If { if_false, .. } = &value.kind {
                 assert!(if_false.is_some());
             } else {
@@ -1734,22 +1726,20 @@ mod tests {
         let block = builder.block(None, list, Type::NONE);
         let loop_expr = builder.loop_(Some("label"), block, Type::NONE);
 
-        module.functions.push(crate::ir::module::Function {
-            name: "test".to_string(),
-            params: Type::NONE,
-            results: Type::NONE,
-            vars: vec![Type::I32],
-            body: Some(loop_expr),
-            local_names: vec![String::new(); 1],
-            type_idx: None,
-        });
+        let test_id = module.add_function(crate::ir::module::Function::new(
+            "test".to_string(),
+            Type::NONE,
+            Type::NONE,
+            vec![Type::I32],
+            Some(loop_expr),
+        ));
 
         let mut pass = SimplifyLocals::new();
         pass.run(&mut module);
 
-        let body = module.functions[0].body.unwrap();
+        let body = module.functions[test_id].body().unwrap();
         if let ExpressionKind::LocalSet { index, value } = &body.kind {
-            assert_eq!(*index, 0);
+            assert_eq!((*index as usize), 0);
             assert!(matches!(value.kind, ExpressionKind::Loop { .. }));
         } else {
             panic!("Expected LocalSet, got {:?}", body.kind);

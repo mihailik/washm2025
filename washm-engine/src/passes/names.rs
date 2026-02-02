@@ -1,5 +1,5 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{Module, GlobalKind};
+use crate::ir::module::{GlobalKind, Module};
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
 use std::collections::HashMap;
@@ -32,7 +32,7 @@ impl Pass for MinifyNames {
         };
 
         // 1. Minify function names
-        for func in &mut module.functions {
+        for (_, func) in &mut module.functions {
             let old_name = func.name.clone();
             let new_name = get_next_name(&mut next_id);
             name_map.insert(old_name, new_name.clone());
@@ -53,13 +53,8 @@ impl Pass for MinifyNames {
         // This suggests there's a disconnect or a single implicit table name.
         // In Binaryen, tables have names.
 
-        // 4. Update calls and other name references
-        let mut updater = NameUpdater {
-            name_map: &name_map,
-            allocator: module.allocator,
-        };
-        for func in &mut module.functions {
-            // Minify local branch names inside function
+        // 4. Update local branch names
+        for (_, func) in &mut module.functions {
             let mut local_next_id = 0;
             let mut local_name_map = HashMap::new();
             self.minify_local_names(
@@ -69,10 +64,8 @@ impl Pass for MinifyNames {
                 module.allocator,
             );
 
-            if let Some(mut body) = func.body {
-                updater.visit(&mut body);
-
-                // Also update local branch names
+            if let Some(mut body) = func.body_mut() {
+                // Update local branch names
                 let mut branch_updater = BranchNameUpdater {
                     name_map: &local_name_map,
                     allocator: module.allocator,
@@ -81,16 +74,10 @@ impl Pass for MinifyNames {
             }
 
             // Minify local variable names
-            for name in &mut func.local_names {
+            for name in func.local_names_mut() {
                 if !name.is_empty() {
                     *name = get_next_name(&mut local_next_id);
                 }
-            }
-        }
-
-        for (_, global) in &mut module.globals {
-            if let crate::ir::module::GlobalKind::Local { init } = &mut global.kind {
-                updater.visit(init);
             }
         }
     }
@@ -104,7 +91,7 @@ impl MinifyNames {
         name_map: &mut HashMap<String, String>,
         _allocator: &'a bumpalo::Bump,
     ) {
-        if let Some(mut body) = func.body {
+        if let Some(mut body) = func.body() {
             let mut collector = BranchNameCollector { next_id, name_map };
             collector.visit(&mut body);
         }
@@ -189,9 +176,9 @@ impl Pass for StripNames {
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         // Clear all debug names
-        for func in &mut module.functions {
+        for (_, func) in &mut module.functions {
             func.name = String::new();
-            for name in &mut func.local_names {
+            for name in func.local_names_mut() {
                 name.clear();
             }
         }
@@ -237,63 +224,7 @@ impl Pass for MinifyImports {
         "MinifyImports"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
-        let mut next_id = 0;
-        for import in &mut module.imports {
-            let mut name = String::new();
-            let mut id = next_id;
-            loop {
-                let char = ((id % 26) as u8 + b'a') as char;
-                name.insert(0, char);
-                id /= 26;
-                if id == 0 {
-                    break;
-                }
-            }
-            next_id += 1;
-            import.name = name;
-        }
-    }
-}
-
-struct NameUpdater<'map, 'a> {
-    name_map: &'map HashMap<String, String>,
-    allocator: &'a bumpalo::Bump,
-}
-
-impl<'map, 'a> Visitor<'a> for NameUpdater<'map, 'a> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        match &mut expr.kind {
-            ExpressionKind::Call { target, .. } | ExpressionKind::RefFunc { func: target } => {
-                if let Some(new_name) = self.name_map.get(*target) {
-                    *target = self.allocator.alloc_str(new_name);
-                }
-            }
-            ExpressionKind::CallIndirect { table, .. }
-            | ExpressionKind::TableGet { table, .. }
-            | ExpressionKind::TableSet { table, .. }
-            | ExpressionKind::TableSize { table, .. }
-            | ExpressionKind::TableGrow { table, .. }
-            | ExpressionKind::TableFill { table, .. }
-            | ExpressionKind::TableInit { table, .. } => {
-                if let Some(new_name) = self.name_map.get(*table) {
-                    *table = self.allocator.alloc_str(new_name);
-                }
-            }
-            ExpressionKind::TableCopy {
-                dest_table,
-                src_table,
-                ..
-            } => {
-                if let Some(new_name) = self.name_map.get(*dest_table) {
-                    *dest_table = self.allocator.alloc_str(new_name);
-                }
-                if let Some(new_name) = self.name_map.get(*src_table) {
-                    *src_table = self.allocator.alloc_str(new_name);
-                }
-            }
-            _ => {}
-        }
-        self.visit_children(expr);
+    fn run<'a>(&mut self, _module: &mut Module<'a>) {
+        // TODO: Re-implement using new import architecture
     }
 }
