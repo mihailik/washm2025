@@ -54,7 +54,9 @@ impl Pass for TypeSSA {
                 // 3. Apply refinements
                 let mut applier = TypeRefiner { refinements };
                 applier.visit(&mut body);
-                *func.body_mut() = Some(body);
+                if let Some(mut_body) = func.body_mut() {
+                    *mut_body = body;
+                }
             }
         }
     }

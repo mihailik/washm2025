@@ -368,9 +368,10 @@ impl<'a> BinaryReader<'a> {
                             results,
                             param_ids,
                             type_idx: Some(self.type_ids[type_idx as usize]),
-                            locals,
-                            body: None,
-                            import: None,
+                            kind: crate::ir::module::FunctionKind::Local {
+                                locals,
+                                body: crate::ir::expression::ExprRef::new_null(), // Placeholder
+                            },
                         });
                         self.func_ids.push(id);
                     }
@@ -534,7 +535,7 @@ impl<'a> BinaryReader<'a> {
                         let (count, ty) = reader.read()?;
                         let t = Self::valtype_to_type(ty);
                         for _ in 0..count {
-                            func.locals.alloc(crate::ir::module::Local {
+                            func.locals_mut().alloc(crate::ir::module::Local {
                                 name: String::new(),
                                 type_: t,
                             });
@@ -544,13 +545,17 @@ impl<'a> BinaryReader<'a> {
                     // Build mapping of positional indices to LocalId
                     unsafe {
                         (*this).current_func_local_ids =
-                            func.locals.iter().map(|(id, _)| id.cast()).collect();
+                            func.locals().iter().map(|(id, _)| id.cast()).collect();
                     }
 
                     let expr = unsafe {
                         (&mut *this).parse_expression(body.get_operators_reader()?, &*m_ptr)
                     }?;
-                    func.body = expr;
+                    if let Some(mut_body) = func.body_mut() {
+                        if let Some(e) = expr {
+                            *mut_body = e;
+                        }
+                    }
                 }
                 Payload::DataSection(reader) => {
                     for data in reader {

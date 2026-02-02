@@ -27,7 +27,8 @@ impl Pass for StackCheck {
 
         if let (Some(sp), Some(limit)) = (sp_id, limit_id) {
             for (_, func) in &mut module.functions {
-                if let Some(body) = func.body() {
+                if let Some(mut_body) = func.body_mut() {
+                    let body = *mut_body;
                     let builder = IrBuilder::new(module.allocator);
 
                     // Create check: if (sp < limit) unreachable
@@ -59,7 +60,7 @@ impl Pass for StackCheck {
                         }
                     };
 
-                    *func.body_mut() = Some(new_body);
+                    *mut_body = new_body;
                 }
             }
         }

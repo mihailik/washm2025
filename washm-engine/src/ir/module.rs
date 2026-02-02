@@ -49,15 +49,22 @@ pub struct FunctionImport {
 }
 
 #[derive(Debug)]
+pub enum FunctionKind<'a> {
+    Local {
+        locals: IdArena<LocalMarker, Local>,
+        body: ExprRef<'a>,
+    },
+    Import(FunctionImport),
+}
+
+#[derive(Debug)]
 pub struct Function<'a> {
     pub name: String,
     pub type_idx: Option<TypeId>, // Pointer to module.types
     pub params: Type,
     pub results: Type,
     pub param_ids: Vec<LocalId>, // Explicit parameter order
-    pub locals: IdArena<LocalMarker, Local>,
-    pub body: Option<ExprRef<'a>>,
-    pub import: Option<FunctionImport>,
+    pub kind: FunctionKind<'a>,
 }
 
 impl<'a> Function<'a> {
@@ -68,7 +75,7 @@ impl<'a> Function<'a> {
         vars: Vec<Type>,
         body: Option<ExprRef<'a>>,
     ) -> Self {
-        let mut locals = IdArena::new();
+        let mut locals: IdArena<LocalMarker, Local> = IdArena::new();
         let mut param_ids = Vec::new();
         for param_type in params.tuple_elements() {
             param_ids.push(
@@ -91,10 +98,11 @@ impl<'a> Function<'a> {
             params,
             results,
             param_ids,
-            locals,
-            body,
             type_idx: None,
-            import: None,
+            kind: FunctionKind::Local {
+                locals,
+                body: body.unwrap_or_else(|| ExprRef::new_null()),
+            },
         }
     }
 
@@ -106,7 +114,7 @@ impl<'a> Function<'a> {
         vars: Vec<Type>,
         body: Option<ExprRef<'a>>,
     ) -> Self {
-        let mut locals = IdArena::new();
+        let mut locals: IdArena<LocalMarker, Local> = IdArena::new();
         let mut param_ids = Vec::new();
         for param_type in params.tuple_elements() {
             param_ids.push(
@@ -129,10 +137,11 @@ impl<'a> Function<'a> {
             params,
             results,
             param_ids,
-            locals,
-            body,
             type_idx: Some(type_idx),
-            import: None,
+            kind: FunctionKind::Local {
+                locals,
+                body: body.unwrap_or_else(|| ExprRef::new_null()),
+            },
         }
     }
 
@@ -143,7 +152,7 @@ impl<'a> Function<'a> {
         params: Type,
         results: Type,
     ) -> Self {
-        let mut locals = IdArena::new();
+        let mut locals: IdArena<LocalMarker, Local> = IdArena::new();
         let mut param_ids = Vec::new();
         for param_type in params.tuple_elements() {
             param_ids.push(
@@ -160,10 +169,8 @@ impl<'a> Function<'a> {
             params,
             results,
             param_ids,
-            locals,
-            body: None,
             type_idx: None,
-            import: Some(FunctionImport {
+            kind: FunctionKind::Import(FunctionImport {
                 module,
                 name: field,
             }),
@@ -175,33 +182,44 @@ impl<'a> Function<'a> {
     }
 
     pub fn body(&self) -> Option<ExprRef<'a>> {
-        self.body
+        match &self.kind {
+            FunctionKind::Local { body, .. } => Some(*body),
+            FunctionKind::Import(_) => None,
+        }
     }
 
-    pub fn body_mut(&mut self) -> &mut Option<ExprRef<'a>> {
-        &mut self.body
+    pub fn body_mut(&mut self) -> Option<&mut ExprRef<'a>> {
+        match &mut self.kind {
+            FunctionKind::Local { body, .. } => Some(body),
+            FunctionKind::Import(_) => None,
+        }
     }
 
     pub fn locals(&self) -> &IdArena<LocalMarker, Local> {
-        &self.locals
+        match &self.kind {
+            FunctionKind::Local { locals, .. } => locals,
+            FunctionKind::Import(_) => panic!("Cannot get locals of an import"),
+        }
     }
 
     pub fn locals_mut(&mut self) -> &mut IdArena<LocalMarker, Local> {
-        &mut self.locals
+        match &mut self.kind {
+            FunctionKind::Local { locals, .. } => locals,
+            FunctionKind::Import(_) => panic!("Cannot get locals of an import"),
+        }
     }
 
     pub fn is_import(&self) -> bool {
-        self.import.is_some()
+        matches!(self.kind, FunctionKind::Import(_))
     }
 
     #[cfg(test)]
-    pub fn new_for_test(mut f: Function<'a>) -> Self {
-        f.import = None;
+    pub fn new_for_test(f: Function<'a>) -> Self {
         f
     }
 
     pub fn add_var(&mut self, type_: Type) -> LocalId {
-        self.locals
+        self.locals_mut()
             .alloc(Local {
                 name: String::new(),
                 type_,
@@ -210,7 +228,7 @@ impl<'a> Function<'a> {
     }
 
     pub fn get_local_type(&self, id: LocalId) -> Type {
-        self.locals
+        self.locals()
             .get(id.cast())
             .map(|l| l.type_)
             .unwrap_or(Type::NONE)
@@ -219,9 +237,9 @@ impl<'a> Function<'a> {
     pub fn vars(&self) -> Vec<Type> {
         let param_set: std::collections::HashSet<LocalId> =
             self.param_ids.iter().cloned().collect();
-        self.locals
+        self.locals()
             .iter()
-            .filter(|(id, _)| !param_set.contains(&id.cast()))
+            .filter(|&(id, _)| !param_set.contains(&id.cast()))
             .map(|(_, l)| l.type_)
             .collect()
     }

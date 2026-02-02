@@ -97,12 +97,12 @@ mod tests {
             Type::NONE,
             false,
         );
-        module
-            .functions
-            .get_mut(FuncId::from_raw_parts(1, 0))
-            .unwrap()
-            .body_mut()
-            .replace(call);
+        let f1 = module
+            .get_function_mut(FuncId::from_raw_parts(1, 0))
+            .unwrap();
+        if let Some(mut_body) = f1.body_mut() {
+            *mut_body = call;
+        }
 
         let mut pass = RemoveUnusedModuleElements;
         pass.run(&mut module);

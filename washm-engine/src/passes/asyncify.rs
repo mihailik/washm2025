@@ -3,7 +3,9 @@ use crate::analysis::liveness::Liveness;
 use crate::collections::IdArena;
 use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
 use crate::ir::module::FuncMarker;
-use crate::ir::module::{Function, Global, GlobalKind, Memory, MemoryKind, MemoryLimits, Module};
+use crate::ir::module::{
+    Function, FunctionKind, Global, GlobalKind, Memory, MemoryKind, MemoryLimits, Module,
+};
 use crate::ir::visitor::{ReadOnlyVisitor, Visitor};
 use crate::ir::{FuncId, Literal, LocalId, Type};
 use crate::passes::flatten::Flatten;
@@ -346,9 +348,10 @@ impl Pass for Asyncify {
             };
 
             if let Some((start_idx, end_idx, body)) = range {
-                let has_body = module.functions[id].body().is_some();
-                *module.functions[id].body_mut() = Some(body);
-                if has_body {
+                if let Some(mut_body) = module.functions[id].body_mut() {
+                    *mut_body = body;
+                }
+                if start_idx != 0 || end_idx != 0 {
                     let mut locals = AsyncifyLocals::new(
                         module,
                         &analyzer,
@@ -404,7 +407,7 @@ impl ModuleAnalyzer {
             }
 
             // Check if it's an asyncify import
-            if let Some(import) = &func.import {
+            if let FunctionKind::Import(import) = &func.kind {
                 let mod_name = &import.module;
                 let func_name = &import.name;
                 let is_asyncify = mod_name == "asyncify";
@@ -516,7 +519,7 @@ impl<'a, 'b> ReadOnlyVisitor<'a> for FunctionStateAnalyzer<'a, 'b> {
     fn visit_expression(&mut self, expr: ExprRef<'a>) {
         if let ExpressionKind::Call { target, .. } = &expr.kind {
             let func = &self.module.functions[*target];
-            if let Some(import) = &func.import {
+            if let FunctionKind::Import(import) = &func.kind {
                 if import.module == "asyncify" {
                     match import.name.as_str() {
                         "start_unwind" | "stop_rewind" => {
@@ -1142,7 +1145,9 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
             Type::NONE,
         ));
 
-        *func.body_mut() = Some(builder.block(None, list, Type::NONE));
+        if let Some(mut_body) = func.body_mut() {
+            *mut_body = builder.block(None, list, Type::NONE);
+        }
     }
 }
 
@@ -1268,13 +1273,11 @@ mod tests {
             params: Type::NONE,
             results: Type::NONE,
             param_ids: Vec::new(),
-            locals: crate::collections::IdArena::new(),
-            body: None,
-            import: Some(crate::ir::module::FunctionImport {
+            type_idx: None,
+            kind: crate::ir::module::FunctionKind::Import(crate::ir::module::FunctionImport {
                 module: "env".to_string(),
                 name: "sleep".to_string(),
             }),
-            type_idx: None,
         });
 
         let mut func = crate::ir::module::Function::new(
@@ -1286,8 +1289,9 @@ mod tests {
         );
 
         let sleep_call = builder.call(sleep_id, bumpalo::vec![in &allocator], Type::NONE, false);
-        *func.body_mut() =
-            Some(builder.block(None, bumpalo::vec![in &allocator; sleep_call], Type::NONE));
+        if let Some(mut_body) = func.body_mut() {
+            *mut_body = builder.block(None, bumpalo::vec![in &allocator; sleep_call], Type::NONE);
+        }
 
         module.functions.alloc(func);
 
@@ -1329,13 +1333,11 @@ mod tests {
             params: Type::NONE,
             results: Type::NONE,
             param_ids: Vec::new(),
-            locals: crate::collections::IdArena::new(),
-            body: None,
-            import: Some(crate::ir::module::FunctionImport {
+            type_idx: None,
+            kind: crate::ir::module::FunctionKind::Import(crate::ir::module::FunctionImport {
                 module: "env".to_string(),
                 name: "sleep".to_string(),
             }),
-            type_idx: None,
         });
 
         let mut func = crate::ir::module::Function::new(
@@ -1354,7 +1356,9 @@ mod tests {
             Some(builder.nop()),
             Type::NONE,
         );
-        *func.body_mut() = Some(if_expr);
+        if let Some(mut_body) = func.body_mut() {
+            *mut_body = if_expr;
+        }
 
         module.functions.alloc(func);
 
@@ -1424,7 +1428,9 @@ mod tests {
             ],
             Type::NONE,
         );
-        *func.body_mut() = Some(body);
+        if let Some(mut_body) = func.body_mut() {
+            *mut_body = body;
+        }
         module.functions.push(func);
 
         let mut config = AsyncifyConfig::default();
@@ -1514,12 +1520,14 @@ mod tests {
             None,
         );
         // calls regular() - should NOT be instrumented
-        *func.body_mut() = Some(builder.call(
-            FuncId::from_raw_parts(0, 0),
-            bumpalo::vec![in &allocator],
-            Type::NONE,
-            false,
-        ));
+        if let Some(mut_body) = func.body_mut() {
+            *mut_body = builder.call(
+                FuncId::from_raw_parts(0, 0),
+                bumpalo::vec![in &allocator],
+                Type::NONE,
+                false,
+            );
+        }
         module.functions.push(func);
 
         let mut config = AsyncifyConfig::default();

@@ -108,7 +108,7 @@ mod tests {
         pass.run(&mut module);
 
         let func = module.get_function(0.into() /* test_func */).unwrap();
-        let body = func.body.unwrap();
+        let body = func.body().unwrap();
 
         match body.kind {
             ExpressionKind::Block { ref list, .. } => {

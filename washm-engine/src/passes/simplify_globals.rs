@@ -65,9 +65,8 @@ impl SimplifyGlobals {
             allocator: module.allocator,
         };
         for (_, func) in &mut module.functions {
-            if let Some(mut body) = func.body() {
-                folder.visit(&mut body);
-                *func.body_mut() = Some(body);
+            if let Some(mut_body) = func.body_mut() {
+                folder.visit(mut_body);
             }
         }
         folder.changed
@@ -107,9 +106,8 @@ impl SimplifyGlobals {
             builder: IrBuilder::new(module.allocator),
         };
         for (_, func) in &mut module.functions {
-            if let Some(mut body) = func.body() {
-                remover.visit(&mut body);
-                *func.body_mut() = Some(body);
+            if let Some(mut_body) = func.body_mut() {
+                remover.visit(mut_body);
             }
         }
     }
@@ -172,7 +170,7 @@ impl SimplifyGlobals {
             let globals = &module.globals;
             let allocator = module.allocator;
             for (_, func) in &mut module.functions {
-                if let Some(mut body) = func.body() {
+                if let Some(mut_body) = func.body_mut() {
                     let mut applier = ConstantCodeApplier {
                         globals,
                         constant_globals: &constant_globals,
@@ -180,8 +178,7 @@ impl SimplifyGlobals {
                         builder: IrBuilder::new(allocator),
                         replaced: false,
                     };
-                    applier.visit(&mut body);
-                    *func.body_mut() = Some(body);
+                    applier.visit(mut_body);
                     if applier.replaced {
                         changed = true;
                     }

@@ -29,7 +29,9 @@ impl Pass for Flatten {
                 if body.type_.is_concrete() {
                     let builder = IrBuilder::new(allocator);
                     body = builder.return_(Some(body));
-                    *func.body_mut() = Some(body);
+                    if let Some(mut_body) = func.body_mut() {
+                        *mut_body = body;
+                    }
                 }
 
                 let mut flattener = Flattener {
@@ -43,7 +45,9 @@ impl Pass for Flatten {
 
                 // The body itself may have preludes
                 let final_body = flattener.get_preludes_with_expression(body, body);
-                *func.body_mut() = Some(final_body);
+                if let Some(mut_body) = func.body_mut() {
+                    *mut_body = final_body;
+                }
             }
         }
     }

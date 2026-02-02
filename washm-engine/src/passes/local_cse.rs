@@ -25,14 +25,16 @@ impl Pass for LocalCSE {
         let allocator = module.allocator();
 
         for (_, func) in &mut module.functions {
-            let crate::ir::module::Function { body, locals, .. } = func;
-            if let Some(body_ref) = body {
-                let mut cse = CSETransformer {
-                    allocator,
-                    expr_map: HashMap::new(),
-                    locals,
-                };
-                cse.visit(body_ref);
+            match &mut func.kind {
+                crate::ir::module::FunctionKind::Local { body, locals } => {
+                    let mut cse = CSETransformer {
+                        allocator,
+                        expr_map: HashMap::new(),
+                        locals,
+                    };
+                    cse.visit(body);
+                }
+                crate::ir::module::FunctionKind::Import(_) => {}
             }
         }
     }
@@ -163,21 +165,25 @@ mod tests {
         let mut module = Module::new(&bump);
         // We need to add the function and get a mutable reference to it
         let func_id = module.add_function(func);
-        let func_mut = &mut module.functions[func_id];
 
-        let crate::ir::module::Function { body, locals, .. } = func_mut;
-        let mut cse = CSETransformer {
-            allocator: &bump,
-            expr_map: HashMap::new(),
-            locals,
-        };
+        let mut body = module.functions[func_id].body().unwrap();
+        {
+            let func_mut = &mut module.functions[func_id];
+            let mut cse = CSETransformer {
+                allocator: &bump,
+                expr_map: HashMap::new(),
+                locals: func_mut.locals_mut(),
+            };
 
-        if let Some(body_ref) = body {
-            cse.visit(body_ref);
+            cse.visit(&mut body);
+        }
+
+        if let Some(mut_body) = module.functions[func_id].body_mut() {
+            *mut_body = body;
         }
 
         // For now, expression should be unchanged (foundation only)
-        let body = func_mut.body().unwrap();
+        let body = module.functions[func_id].body().unwrap();
         assert!(matches!(body.kind, ExpressionKind::Binary { .. }));
     }
 
@@ -190,7 +196,7 @@ mod tests {
         let transformer = CSETransformer {
             allocator: &bump,
             expr_map: HashMap::new(),
-            locals: &mut func.locals,
+            locals: func.locals_mut(),
         };
 
         // Test constant key generation

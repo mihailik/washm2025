@@ -47,16 +47,18 @@ impl<'a, 'm> Validator<'a, 'm> {
 
             // Check body if present
             if let Some(body) = func.body() {
-                self.visit(body);
+                if !body.is_null() {
+                    self.visit(body);
 
-                // Check return type
-                if body.type_ != func.results {
-                    // Simple check: Allow Unreachable
-                    if body.type_ != Type::UNREACHABLE {
-                        self.fail(&format!(
-                            "{}Result mismatch. Expected {:?}, got {:?}",
-                            context, func.results, body.type_
-                        ));
+                    // Check return type
+                    if body.type_ != func.results {
+                        // Simple check: Allow Unreachable
+                        if body.type_ != Type::UNREACHABLE {
+                            self.fail(&format!(
+                                "{}Result mismatch. Expected {:?}, got {:?}",
+                                context, func.results, body.type_
+                            ));
+                        }
                     }
                 }
             }
@@ -155,7 +157,10 @@ impl<'a, 'm> Validator<'a, 'm> {
     }
 
     fn get_local_type(&self, func: &Function, id: LocalId) -> Option<Type> {
-        func.locals.get(id).map(|l| l.type_)
+        if func.is_import() {
+            return None;
+        }
+        func.locals().get(id.cast()).map(|l| l.type_)
     }
 }
 

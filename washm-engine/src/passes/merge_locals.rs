@@ -18,6 +18,9 @@ impl Pass for MergeLocals {
         let stats = ModuleStats::collect(module);
 
         for (_, func) in &mut module.functions {
+            if func.is_import() {
+                continue;
+            }
             let local_usage = stats.local_counts.get(&func.name);
 
             // Identify unused locals

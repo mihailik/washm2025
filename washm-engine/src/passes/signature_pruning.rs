@@ -85,20 +85,22 @@ impl Pass for SignaturePruning {
                 let mut new_param_ids = Vec::new();
                 let mut constant_replacements = HashMap::new();
 
+                let param_ids = func.param_ids.clone();
+
                 for (i, status) in infos.iter().enumerate() {
                     match status {
                         ParamStatus::Read | ParamStatus::Written | ParamStatus::Variable => {
                             new_params.push(old_params_vec[i]);
-                            new_param_ids.push(func.param_ids[i]);
+                            new_param_ids.push(param_ids[i]);
                         }
                         ParamStatus::Unused => {
                             // Deallocate the formal parameter local, it's totally unused
-                            func.locals.dealloc(func.param_ids[i].cast());
+                            func.locals_mut().dealloc(param_ids[i].cast());
                         }
                         ParamStatus::Constant(lit) => {
-                            constant_replacements.insert(func.param_ids[i], *lit);
+                            constant_replacements.insert(param_ids[i], *lit);
                             // Also deallocate since it's now a constant
-                            func.locals.dealloc(func.param_ids[i].cast());
+                            func.locals_mut().dealloc(param_ids[i].cast());
                         }
                     }
                 }

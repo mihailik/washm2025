@@ -247,7 +247,7 @@ mod tests {
                     panic!("Expected Binary Add");
                 }
 
-                assert_eq!(func.locals.len() - func.num_params(), 1); // Added 1 local
+                assert_eq!(func.locals().len() - func.num_params(), 1); // Added 1 local
             }
             _ => panic!("Expected Block wrapper"),
         }

@@ -16,11 +16,18 @@ impl Pass for LICM {
 
     fn run<'a>(&mut self, module: &mut Module<'a>) {
         let allocator = module.allocator();
-        for (_, func) in &mut module.functions {
-            if let Some(mut body) = func.body() {
-                let mut hoister = LoopInvariantHoister { allocator, func };
+        let ids: Vec<_> = module.functions.iter().map(|(id, _)| id).collect();
+        for id in ids {
+            if let Some(mut body) = module.functions[id].body() {
+                let mut hoister = LoopInvariantHoister {
+                    allocator,
+                    func: &mut module.functions[id],
+                };
                 hoister.visit(&mut body);
-                *func.body_mut() = Some(body);
+
+                if let Some(mut_body) = module.functions[id].body_mut() {
+                    *mut_body = body;
+                }
             }
         }
     }

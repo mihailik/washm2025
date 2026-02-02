@@ -134,7 +134,7 @@ impl Pass for Inlining {
                         body,
                         param_ids: func.param_ids.clone(),
                         all_locals: func
-                            .locals
+                            .locals()
                             .iter()
                             .map(|(id, l)| (id.cast(), l.type_))
                             .collect(),
@@ -162,25 +162,22 @@ impl Pass for Inlining {
                 continue;
             }
 
-            let mut body = module.functions[id].body_mut().take().unwrap();
+            let mut body = module.functions[id].body().unwrap();
 
             // We need to pass the function itself to add new variables
-            let (func_body, caller_func) = {
-                let func = module.functions.get_mut(id).unwrap();
-                (&mut body, func)
-            };
-
             let mut inliner = Inliner {
                 function_info: &function_info,
                 candidates: &candidates,
                 builder: IrBuilder::new(allocator),
-                caller_func,
+                caller_func: &mut module.functions[id],
                 caller_name: id,
                 inline_counter: 0,
             };
-            inliner.visit(func_body);
+            inliner.visit(&mut body);
 
-            *module.functions[id].body_mut() = Some(body);
+            if let Some(mut_body) = module.functions[id].body_mut() {
+                *mut_body = body;
+            }
         }
     }
 }

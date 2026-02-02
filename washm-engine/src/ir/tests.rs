@@ -64,7 +64,9 @@ fn test_validation_failure() {
 
     let mut module = Module::new(&bump);
     let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
-    func.body = Some(binary_expr);
+    if let Some(mut_body) = func.body_mut() {
+        *mut_body = binary_expr;
+    }
     module.add_function(func);
 
     let validator = Validator::new(&module);
@@ -111,7 +113,9 @@ fn test_global_validation() {
         let set_immutable = builder.global_set(g0_id, val);
 
         let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
-        func.body = Some(set_immutable);
+        if let Some(mut_body) = func.body_mut() {
+            *mut_body = set_immutable;
+        }
         module.functions.push(func);
 
         let validator = Validator::new(&module);
@@ -132,7 +136,9 @@ fn test_global_validation() {
         let set_mismatch = builder.global_set(g1_id, val); // trying to set to g1 (f32)
 
         let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
-        func.body = Some(set_mismatch);
+        if let Some(mut_body) = func.body_mut() {
+            *mut_body = set_mismatch;
+        }
         module.functions.push(func);
 
         let validator = Validator::new(&module);
@@ -152,7 +158,9 @@ fn test_global_validation() {
         let get_oob = builder.global_get(oob_id, Type::I32);
 
         let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
-        func.body = Some(get_oob);
+        if let Some(mut_body) = func.body_mut() {
+            *mut_body = get_oob;
+        }
         module.functions.push(func);
 
         let validator = Validator::new(&module);
@@ -245,17 +253,22 @@ fn test_module_construction() {
     // fn add_one(x: i32) -> i32
     let local_get = builder.local_get(0, Type::I32);
     let const_1 = builder.const_(Literal::I32(1));
-    let _add = builder.binary(BinaryOp::AddInt32, local_get, const_1, Type::I32);
+    let add = builder.binary(BinaryOp::AddInt32, local_get, const_1, Type::I32);
 
-    let func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
-    let bump = bumpalo::Bump::new();
+    let func = Function::new(
+        "add_one".to_string(),
+        Type::I32,
+        Type::I32,
+        vec![],
+        Some(add),
+    );
     let mut module = Module::new(&bump);
     module.add_function(func);
 
-    assert!(module.get_function("add_one".into()).is_some());
+    assert!(module.get_function_by_name("add_one").is_some());
 
-    let f = module.get_function("add_one".into()).unwrap();
-    if let Some(body) = &f.body {
+    let (_, f) = module.get_function_by_name("add_one").unwrap();
+    if let Some(body) = f.body() {
         if let ExpressionKind::Binary { op, .. } = body.kind {
             assert_eq!(op, BinaryOp::AddInt32);
         } else {
@@ -503,7 +516,11 @@ fn test_imports_roundtrip() {
 
     let log_func_id = read_module.functions.ids().next().unwrap();
     let log_func = &read_module.functions[log_func_id];
-    let log_import = log_func.import.as_ref().expect("Expected function import");
+    let log_import = if let crate::ir::module::FunctionKind::Import(import) = &log_func.kind {
+        import
+    } else {
+        panic!("Expected function import");
+    };
     assert_eq!(log_import.module, "env");
     assert_eq!(log_import.name, "log");
     assert_eq!(log_func.params, Type::I32);
@@ -2594,7 +2611,7 @@ fn test_code_section_control_flow_block() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    if let Some(body) = &parsed.functions[FuncId::from_raw_parts(0, 0)].body {
+    if let Some(body) = parsed.functions[FuncId::from_raw_parts(0, 0)].body() {
         if let ExpressionKind::Block { .. } = &body.kind {
             // Success - block parsed correctly
         } else {
@@ -2638,7 +2655,7 @@ fn test_code_section_control_flow_loop() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    if let Some(body) = &parsed.functions[FuncId::from_raw_parts(0, 0)].body {
+    if let Some(body) = parsed.functions[FuncId::from_raw_parts(0, 0)].body() {
         if let ExpressionKind::Loop { .. } = &body.kind {
             // Success - loop parsed correctly
         } else {
@@ -2676,7 +2693,7 @@ fn test_code_section_nop() {
     let parsed = reader.parse_module().expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    if let Some(body) = &parsed.functions[FuncId::from_raw_parts(0, 0)].body {
+    if let Some(body) = parsed.functions[FuncId::from_raw_parts(0, 0)].body() {
         if let ExpressionKind::Nop = &body.kind {
             // Success - nop parsed correctly
         } else {
@@ -3022,11 +3039,12 @@ fn test_roundtrip_mixed_function_types() {
         name: "test".to_string(),
         params: Type::I32,
         results: Type::I64,
-        locals: IdArena::new(),
         param_ids: Vec::new(),
-        body: None,
         type_idx: Some(0.into()),
-        import: None,
+        kind: crate::ir::module::FunctionKind::Local {
+            locals: IdArena::new(),
+            body: crate::ir::expression::ExprRef::new_null(),
+        },
     }));
 
     // Function without type_idx (will be inferred)
@@ -3228,7 +3246,11 @@ fn test_import_function() {
 
     assert_eq!(parsed.functions.len(), 1);
     let func = &parsed.functions[parsed.functions.ids().next().unwrap()];
-    let import = func.import.as_ref().unwrap();
+    let import = if let crate::ir::module::FunctionKind::Import(import) = &func.kind {
+        import
+    } else {
+        panic!("Expected function import");
+    };
     assert_eq!(import.module, "env");
     assert_eq!(import.name, "log");
 }

@@ -317,7 +317,7 @@ impl BinaryWriter {
             let mut has_imports = false;
 
             for (_, func) in &module.functions {
-                if let Some(import) = &func.import {
+                if let crate::ir::module::FunctionKind::Import(import) = &func.kind {
                     let type_idx = if let Some(type_id) = func.type_idx {
                         *type_id_map.get(&type_id).ok_or_else(|| {
                             WriteError::InternalError("TypeId not found in map".to_string())
@@ -601,7 +601,7 @@ impl BinaryWriter {
                     let param_set: std::collections::HashSet<crate::ir::LocalId> =
                         func.param_ids.iter().cloned().collect();
 
-                    for (id, local) in func.locals.iter() {
+                    for (id, local) in func.locals().iter() {
                         if param_set.contains(&id.cast()) {
                             continue;
                         }
@@ -623,21 +623,23 @@ impl BinaryWriter {
 
                     let mut func_encoder = EncoderFunction::new(locals);
 
-                    if let Some(body_expr) = &func.body {
-                        let mut label_stack = vec![None];
-                        Self::write_instructions(
-                            &mut func_encoder,
-                            *body_expr,
-                            &mut label_stack,
-                            &func_map,
-                            &global_map,
-                            &type_id_map,
-                            &data_map,
-                            &element_map,
-                            &table_map,
-                            &memory_map,
-                            &local_map,
-                        )?;
+                    if let Some(body_expr) = func.body() {
+                        if !body_expr.is_null() {
+                            let mut label_stack = vec![None];
+                            Self::write_instructions(
+                                &mut func_encoder,
+                                body_expr,
+                                &mut label_stack,
+                                &func_map,
+                                &global_map,
+                                &type_id_map,
+                                &data_map,
+                                &element_map,
+                                &table_map,
+                                &memory_map,
+                                &local_map,
+                            )?;
+                        }
                     }
                     func_encoder.instruction(&Instruction::End);
                     code.function(&func_encoder);
@@ -735,6 +737,9 @@ impl BinaryWriter {
             let mut local_names = IndirectNameMap::new();
             let mut has_any_local_names = false;
             for (id, func) in &module.functions {
+                if func.is_import() {
+                    continue;
+                }
                 let mut map = NameMap::new();
                 let mut func_has_local_names = false;
 
@@ -742,7 +747,7 @@ impl BinaryWriter {
                 // This logic mirrors the one in the Code Section writing
                 let mut current_idx = 0;
                 for &local_id in &func.param_ids {
-                    if let Some(local) = func.locals.get(local_id.cast()) {
+                    if let Some(local) = func.locals().get(local_id.cast()) {
                         if !local.name.is_empty() {
                             map.append(current_idx, &local.name);
                             func_has_local_names = true;
@@ -760,7 +765,7 @@ impl BinaryWriter {
                     std::collections::HashMap::<Type, Vec<crate::ir::LocalId>>::new();
                 let mut types_ordered = Vec::new();
 
-                for (local_id, local) in func.locals.iter() {
+                for (local_id, local) in func.locals().iter() {
                     if param_set.contains(&local_id.cast()) {
                         continue;
                     }
@@ -773,7 +778,7 @@ impl BinaryWriter {
 
                 for ty in types_ordered {
                     for &local_id in &type_groups[&ty] {
-                        if let Some(local) = func.locals.get(local_id.cast()) {
+                        if let Some(local) = func.locals().get(local_id.cast()) {
                             if !local.name.is_empty() {
                                 map.append(current_idx, &local.name);
                                 func_has_local_names = true;
@@ -815,6 +820,9 @@ impl BinaryWriter {
         memory_map: &std::collections::HashMap<MemoryId, u32>,
         local_map: &std::collections::HashMap<crate::ir::LocalId, u32>,
     ) -> Result<()> {
+        if expr_ref.is_null() {
+            return Ok(());
+        }
         let expr = &*expr_ref;
         match &expr.kind {
             ExpressionKind::Const(lit) => match lit {
@@ -2439,13 +2447,11 @@ mod tests {
         assert_eq!(func.params, Type::I32);
         assert_eq!(func.results, Type::I32);
         let num_params = BinaryWriter::expand_type(func.params).len();
-        assert_eq!(func.locals.len() - num_params, 2);
+        let locals = func.locals();
+        assert_eq!(locals.len() - num_params, 2);
+        assert_eq!(locals.get_at_index(num_params).unwrap().type_, Type::I32);
         assert_eq!(
-            func.locals.get_at_index(num_params).unwrap().type_,
-            Type::I32
-        );
-        assert_eq!(
-            func.locals.get_at_index(num_params + 1).unwrap().type_,
+            locals.get_at_index(num_params + 1).unwrap().type_,
             Type::I64
         );
     }

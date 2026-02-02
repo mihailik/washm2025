@@ -18,9 +18,8 @@ impl Pass for RemoveUnusedBrs {
         };
 
         for (_, func) in &mut module.functions {
-            if let Some(mut body) = func.body() {
-                optimizer.optimize(&mut body);
-                *func.body_mut() = Some(body);
+            if let Some(mut_body) = func.body_mut() {
+                optimizer.optimize(mut_body);
             }
         }
     }

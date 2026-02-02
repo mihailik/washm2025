@@ -353,13 +353,15 @@ mod tests {
         let f3_id = module.add_function(func3);
 
         // Patch placeholder IDs
-        if let ExpressionKind::Call { target, .. } = &mut module.functions[f0_id].body.unwrap().kind
-        {
-            *target = f1_id;
+        if let Some(mut_body) = module.functions[f0_id].body_mut() {
+            if let ExpressionKind::Call { target, .. } = &mut mut_body.kind {
+                *target = f1_id;
+            }
         }
-        if let ExpressionKind::Call { target, .. } = &mut module.functions[f1_id].body.unwrap().kind
-        {
-            *target = f2_id;
+        if let Some(mut_body) = module.functions[f1_id].body_mut() {
+            if let ExpressionKind::Call { target, .. } = &mut mut_body.kind {
+                *target = f2_id;
+            }
         }
 
         // Export func0

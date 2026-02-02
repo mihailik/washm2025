@@ -1,5 +1,5 @@
 use crate::ir::expression::{ExprRef, ExpressionKind};
-use crate::ir::module::{GlobalKind, Module};
+use crate::ir::module::{FunctionKind, GlobalKind, Module};
 use crate::ir::visitor::ReadOnlyVisitor;
 use std::collections::HashMap;
 
@@ -24,25 +24,25 @@ impl ModuleStats {
 
         // Count references in functions (including imports)
         for (_, func) in &module.functions {
-            if let Some(_import) = &func.import {
-                stats.increment_type(func.params);
-                stats.increment_type(func.results);
-            } else {
-                stats.increment_type(func.params);
-                stats.increment_type(func.results);
-                for local in func.locals.values() {
-                    stats.increment_type(local.type_);
-                }
+            stats.increment_type(func.params);
+            stats.increment_type(func.results);
 
-                if let Some(body_expr) = &func.body {
+            match &func.kind {
+                FunctionKind::Import(_) => {}
+                FunctionKind::Local { locals, body } => {
+                    for local in locals.values() {
+                        stats.increment_type(local.type_);
+                    }
+
                     let mut visitor = StatsVisitor {
                         stats: &mut stats,
                         module,
                         current_function: Some(func.name.clone()),
                     };
-                    visitor.visit_expression(*body_expr);
+                    visitor.visit_expression(*body);
                 }
             }
+
             if let Some(idx) = func.type_idx {
                 *stats.type_counts.entry(idx.index()).or_insert(0) += 1;
             }

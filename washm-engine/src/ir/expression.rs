@@ -16,6 +16,14 @@ impl<'a> ExprRef<'a> {
         Self(NonNull::from(ptr))
     }
 
+    pub fn new_null() -> Self {
+        Self(NonNull::dangling())
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.0 == NonNull::dangling()
+    }
+
     pub fn as_ptr(&self) -> *mut Expression<'a> {
         self.0.as_ptr()
     }

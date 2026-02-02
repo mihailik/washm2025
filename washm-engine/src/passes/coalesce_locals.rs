@@ -385,15 +385,18 @@ impl<'a> Visitor<'a> for CopyCoalescingVisitor {
 
 impl CoalesceLocals {
     pub fn run_on_func<'a>(func: &mut Function<'a>) {
+        if func.is_import() {
+            return;
+        }
         let num_params = func.num_params();
 
         let mut all_locals: Vec<(crate::ir::LocalId, Type)> = Vec::new();
         for &id in &func.param_ids {
-            all_locals.push((id, func.locals.get(id.cast()).unwrap().type_));
+            all_locals.push((id, func.locals().get(id.cast()).unwrap().type_));
         }
         let param_set: std::collections::HashSet<crate::ir::LocalId> =
             func.param_ids.iter().cloned().collect();
-        for (id, local) in func.locals.iter() {
+        for (id, local) in func.locals().iter() {
             if !param_set.contains(&id.cast()) {
                 all_locals.push((id.cast(), local.type_));
             }
@@ -479,7 +482,7 @@ impl CoalesceLocals {
 
             // Remove merged locals from the arena
             for &old_id in mapping.keys() {
-                func.locals.remove_id(old_id);
+                func.locals_mut().remove_id(old_id);
             }
 
             if let Some(body) = func.body_mut() {

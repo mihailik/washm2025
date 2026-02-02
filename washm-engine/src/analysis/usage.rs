@@ -57,10 +57,12 @@ impl UsageTracker {
                         tracker.types.insert(type_idx);
                     }
                     if let Some(body_expr) = func.body() {
-                        let mut visitor = UsageVisitor {
-                            tracker: &mut tracker,
-                        };
-                        visitor.visit(body_expr);
+                        if !body_expr.is_null() {
+                            let mut visitor = UsageVisitor {
+                                tracker: &mut tracker,
+                            };
+                            visitor.visit(body_expr);
+                        }
                     }
                 }
             }

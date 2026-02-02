@@ -51,8 +51,10 @@ impl Pass for ReorderTypes {
             }
             func.params = self.remap_type(func.params, &remap);
             func.results = self.remap_type(func.results, &remap);
-            for (_, var) in func.locals.iter_mut() {
-                var.type_ = self.remap_type(var.type_, &remap);
+            if !func.is_import() {
+                for (_, var) in func.locals_mut().iter_mut() {
+                    var.type_ = self.remap_type(var.type_, &remap);
+                }
             }
 
             if let Some(body) = func.body_mut() {

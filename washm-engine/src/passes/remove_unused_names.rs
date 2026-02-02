@@ -14,10 +14,9 @@ impl Pass for RemoveUnusedNames {
     fn run(&mut self, module: &mut Module) {
         let mut optimizer = NameOptimizer;
         for (_, func) in &mut module.functions {
-            if let Some(mut body) = func.body() {
+            if let Some(mut_body) = func.body_mut() {
                 let mut used_names = HashSet::new();
-                optimizer.process(&mut body, &mut used_names);
-                *func.body_mut() = Some(body);
+                optimizer.process(mut_body, &mut used_names);
             }
         }
     }

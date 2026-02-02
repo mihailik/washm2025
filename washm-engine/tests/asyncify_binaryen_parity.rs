@@ -143,7 +143,7 @@ fn test_asyncify_binaryen_suite_parity() {
                 let mut config = AsyncifyConfig::default();
                 // Heuristic: If it has imports, it likely needs them to be async-capable for the test
                 for (_, func) in ir_module.functions.iter() {
-                    if let Some(import) = &func.import {
+                    if let washm::ir::module::FunctionKind::Import(import) = &func.kind {
                         config
                             .imports
                             .push(format!("{}.{}", import.module, import.name));

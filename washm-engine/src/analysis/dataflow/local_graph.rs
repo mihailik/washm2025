@@ -23,7 +23,11 @@ pub struct LocalGraph<'a> {
 impl<'a> LocalGraph<'a> {
     /// Build local graph for a function
     pub fn build(func: &'a Function<'a>) -> Self {
-        let num_locals = func.locals.len();
+        let num_locals = if func.is_import() {
+            func.param_ids.len()
+        } else {
+            func.locals().len()
+        };
 
         let mut graph = LocalGraph {
             definitions: HashMap::new(),
