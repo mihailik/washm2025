@@ -29,7 +29,7 @@ impl ModuleStats {
 
             match &func.kind {
                 FunctionKind::Import(_) => {}
-                FunctionKind::Local { locals, body } => {
+                FunctionKind::Local { locals, body, .. } => {
                     for local in locals.values() {
                         stats.increment_type(local.type_);
                     }

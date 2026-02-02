@@ -391,11 +391,11 @@ impl CoalesceLocals {
         let num_params = func.num_params();
 
         let mut all_locals: Vec<(crate::ir::LocalId, Type)> = Vec::new();
-        for &id in &func.param_ids {
+        for &id in func.param_ids() {
             all_locals.push((id, func.locals().get(id.cast()).unwrap().type_));
         }
         let param_set: std::collections::HashSet<crate::ir::LocalId> =
-            func.param_ids.iter().cloned().collect();
+            func.param_ids().iter().cloned().collect();
         for (id, local) in func.locals().iter() {
             if !param_set.contains(&id.cast()) {
                 all_locals.push((id.cast(), local.type_));

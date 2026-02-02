@@ -64,7 +64,7 @@ impl<'a> SSABuilder<'a> {
         let mut stacks: HashMap<LocalId, Vec<DefA<'a>>> = HashMap::new();
 
         // 0. Initialize stacks with params
-        for id in &func.param_ids {
+        for id in func.param_ids() {
             let local_id = *id;
             stacks
                 .entry(local_id)
@@ -196,7 +196,7 @@ impl<'a> SSABuilder<'a> {
         let mut defs: HashMap<LocalId, HashSet<BlockId>> = HashMap::new();
 
         // Entry block defines all params
-        for &id in &func.param_ids {
+        for &id in func.param_ids() {
             defs.entry(id).or_default().insert(cfg.entry);
         }
 

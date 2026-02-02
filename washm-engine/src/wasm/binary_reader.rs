@@ -366,10 +366,10 @@ impl<'a> BinaryReader<'a> {
                             name: format!("func_{}", i),
                             params,
                             results,
-                            param_ids,
                             type_idx: Some(self.type_ids[type_idx as usize]),
                             kind: crate::ir::module::FunctionKind::Local {
                                 locals,
+                                param_ids,
                                 body: crate::ir::expression::ExprRef::new_null(), // Placeholder
                             },
                         });

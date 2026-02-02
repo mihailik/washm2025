@@ -132,7 +132,7 @@ impl Pass for Inlining {
                     id,
                     InliningInfo {
                         body,
-                        param_ids: func.param_ids.clone(),
+                        param_ids: func.param_ids().to_vec(),
                         all_locals: func
                             .locals()
                             .iter()

@@ -3039,10 +3039,10 @@ fn test_roundtrip_mixed_function_types() {
         name: "test".to_string(),
         params: Type::I32,
         results: Type::I64,
-        param_ids: Vec::new(),
         type_idx: Some(0.into()),
         kind: crate::ir::module::FunctionKind::Local {
             locals: IdArena::new(),
+            param_ids: Vec::new(),
             body: crate::ir::expression::ExprRef::new_null(),
         },
     }));

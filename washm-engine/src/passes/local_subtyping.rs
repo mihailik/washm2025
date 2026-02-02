@@ -45,7 +45,7 @@ impl Pass for LocalSubtyping {
 
                 // 2. Update vars (excluding parameters)
                 let param_set: std::collections::HashSet<crate::ir::LocalId> =
-                    func.param_ids.iter().cloned().collect();
+                    func.param_ids().iter().cloned().collect();
 
                 for (id, local) in func.locals_mut().iter_mut() {
                     let local_id = id.cast();

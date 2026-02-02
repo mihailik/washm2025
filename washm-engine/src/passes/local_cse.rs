@@ -26,7 +26,7 @@ impl Pass for LocalCSE {
 
         for (_, func) in &mut module.functions {
             match &mut func.kind {
-                crate::ir::module::FunctionKind::Local { body, locals } => {
+                crate::ir::module::FunctionKind::Local { body, locals, .. } => {
                     let mut cse = CSETransformer {
                         allocator,
                         expr_map: HashMap::new(),

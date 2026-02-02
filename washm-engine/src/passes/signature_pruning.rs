@@ -46,7 +46,7 @@ impl Pass for SignaturePruning {
 
         // 2. Scan all function bodies to check for param usage (local.get)
         for (id, func) in &mut module.functions {
-            let param_ids = func.param_ids.clone();
+            let param_ids = func.param_ids().to_vec();
             if let Some(body) = func.body_mut() {
                 let mut scanner = ParamUsageScanner {
                     usage: if candidates.contains(&id) {
@@ -85,7 +85,7 @@ impl Pass for SignaturePruning {
                 let mut new_param_ids = Vec::new();
                 let mut constant_replacements = HashMap::new();
 
-                let param_ids = func.param_ids.clone();
+                let param_ids = func.param_ids().to_vec();
 
                 for (i, status) in infos.iter().enumerate() {
                     match status {
@@ -105,13 +105,15 @@ impl Pass for SignaturePruning {
                     }
                 }
 
-                if new_param_ids.len() == func.param_ids.len() {
+                if new_param_ids.len() == func.param_ids().len() {
                     continue;
                 }
 
                 if let Some(new_ty) = make_param_type(&new_params) {
                     func.params = new_ty;
-                    func.param_ids = new_param_ids;
+                    if let Some(mut_param_ids) = func.param_ids_mut() {
+                        *mut_param_ids = new_param_ids;
+                    }
                     pruned_functions.insert(func.name.clone());
 
                     if let Some(body) = func.body_mut() {

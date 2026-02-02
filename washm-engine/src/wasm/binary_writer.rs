@@ -587,7 +587,7 @@ impl BinaryWriter {
                     let mut current_idx = 0;
 
                     // 1. Assign indices to parameters in explicit order
-                    for &id in &func.param_ids {
+                    for &id in func.param_ids() {
                         local_map.insert(id, current_idx);
                         current_idx += 1;
                     }
@@ -599,7 +599,7 @@ impl BinaryWriter {
                     let mut types_ordered = Vec::new();
 
                     let param_set: std::collections::HashSet<crate::ir::LocalId> =
-                        func.param_ids.iter().cloned().collect();
+                        func.param_ids().iter().cloned().collect();
 
                     for (id, local) in func.locals().iter() {
                         if param_set.contains(&id.cast()) {
@@ -746,7 +746,7 @@ impl BinaryWriter {
                 // We need to find the WASM indices for locals in this function
                 // This logic mirrors the one in the Code Section writing
                 let mut current_idx = 0;
-                for &local_id in &func.param_ids {
+                for &local_id in func.param_ids() {
                     if let Some(local) = func.locals().get(local_id.cast()) {
                         if !local.name.is_empty() {
                             map.append(current_idx, &local.name);
@@ -758,7 +758,7 @@ impl BinaryWriter {
 
                 // Non-parameter locals
                 let param_set: std::collections::HashSet<crate::ir::LocalId> =
-                    func.param_ids.iter().cloned().collect();
+                    func.param_ids().iter().cloned().collect();
 
                 // To match indices, we must group them the same way as in Section 10
                 let mut type_groups =

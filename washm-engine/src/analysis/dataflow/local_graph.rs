@@ -24,7 +24,7 @@ impl<'a> LocalGraph<'a> {
     /// Build local graph for a function
     pub fn build(func: &'a Function<'a>) -> Self {
         let num_locals = if func.is_import() {
-            func.param_ids.len()
+            func.num_params()
         } else {
             func.locals().len()
         };
@@ -36,7 +36,7 @@ impl<'a> LocalGraph<'a> {
         };
 
         // Add parameter definitions
-        for id in &func.param_ids {
+        for id in func.param_ids() {
             graph.definitions.entry(*id).or_default();
         }
 

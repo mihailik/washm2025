@@ -1272,7 +1272,6 @@ mod tests {
             name: "sleep".to_string(),
             params: Type::NONE,
             results: Type::NONE,
-            param_ids: Vec::new(),
             type_idx: None,
             kind: crate::ir::module::FunctionKind::Import(crate::ir::module::FunctionImport {
                 module: "env".to_string(),
@@ -1332,7 +1331,6 @@ mod tests {
             name: "sleep".to_string(),
             params: Type::NONE,
             results: Type::NONE,
-            param_ids: Vec::new(),
             type_idx: None,
             kind: crate::ir::module::FunctionKind::Import(crate::ir::module::FunctionImport {
                 module: "env".to_string(),

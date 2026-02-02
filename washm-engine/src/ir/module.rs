@@ -52,6 +52,7 @@ pub struct FunctionImport {
 pub enum FunctionKind<'a> {
     Local {
         locals: IdArena<LocalMarker, Local>,
+        param_ids: Vec<LocalId>,
         body: ExprRef<'a>,
     },
     Import(FunctionImport),
@@ -63,7 +64,6 @@ pub struct Function<'a> {
     pub type_idx: Option<TypeId>, // Pointer to module.types
     pub params: Type,
     pub results: Type,
-    pub param_ids: Vec<LocalId>, // Explicit parameter order
     pub kind: FunctionKind<'a>,
 }
 
@@ -97,10 +97,10 @@ impl<'a> Function<'a> {
             name,
             params,
             results,
-            param_ids,
             type_idx: None,
             kind: FunctionKind::Local {
                 locals,
+                param_ids,
                 body: body.unwrap_or_else(|| ExprRef::new_null()),
             },
         }
@@ -136,10 +136,10 @@ impl<'a> Function<'a> {
             name,
             params,
             results,
-            param_ids,
             type_idx: Some(type_idx),
             kind: FunctionKind::Local {
                 locals,
+                param_ids,
                 body: body.unwrap_or_else(|| ExprRef::new_null()),
             },
         }
@@ -152,23 +152,10 @@ impl<'a> Function<'a> {
         params: Type,
         results: Type,
     ) -> Self {
-        let mut locals: IdArena<LocalMarker, Local> = IdArena::new();
-        let mut param_ids = Vec::new();
-        for param_type in params.tuple_elements() {
-            param_ids.push(
-                locals
-                    .alloc(Local {
-                        name: String::new(),
-                        type_: param_type,
-                    })
-                    .cast(),
-            );
-        }
         Self {
             name,
             params,
             results,
-            param_ids,
             type_idx: None,
             kind: FunctionKind::Import(FunctionImport {
                 module,
@@ -178,7 +165,24 @@ impl<'a> Function<'a> {
     }
 
     pub fn num_params(&self) -> usize {
-        self.param_ids.len()
+        match &self.kind {
+            FunctionKind::Local { param_ids, .. } => param_ids.len(),
+            FunctionKind::Import(_) => self.params.tuple_elements().len(),
+        }
+    }
+
+    pub fn param_ids(&self) -> &[LocalId] {
+        match &self.kind {
+            FunctionKind::Local { param_ids, .. } => param_ids,
+            FunctionKind::Import(_) => &[],
+        }
+    }
+
+    pub fn param_ids_mut(&mut self) -> Option<&mut Vec<LocalId>> {
+        match &mut self.kind {
+            FunctionKind::Local { param_ids, .. } => Some(param_ids),
+            FunctionKind::Import(_) => None,
+        }
     }
 
     pub fn body(&self) -> Option<ExprRef<'a>> {
@@ -236,7 +240,7 @@ impl<'a> Function<'a> {
 
     pub fn vars(&self) -> Vec<Type> {
         let param_set: std::collections::HashSet<LocalId> =
-            self.param_ids.iter().cloned().collect();
+            self.param_ids().iter().cloned().collect();
         self.locals()
             .iter()
             .filter(|&(id, _)| !param_set.contains(&id.cast()))
