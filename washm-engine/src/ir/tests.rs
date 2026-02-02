@@ -3043,6 +3043,7 @@ fn test_roundtrip_mixed_function_types() {
         kind: crate::ir::module::FunctionKind::Local {
             locals: IdArena::new(),
             param_ids: Vec::new(),
+            var_ids: Vec::new(),
             body: crate::ir::expression::ExprRef::new_null(),
         },
     }));

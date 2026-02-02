@@ -45,7 +45,7 @@ pub mod remove_unused_names;
 pub mod remove_unused_types;
 pub mod reorder_functions;
 pub mod reorder_globals;
-// pub mod reorder_locals;
+pub mod reorder_locals;
 pub mod reorder_types;
 pub mod rereloop;
 pub mod rse;

@@ -53,6 +53,7 @@ pub enum FunctionKind<'a> {
     Local {
         locals: IdArena<LocalMarker, Local>,
         param_ids: Vec<LocalId>,
+        var_ids: Vec<LocalId>,
         body: ExprRef<'a>,
     },
     Import(FunctionImport),
@@ -87,11 +88,16 @@ impl<'a> Function<'a> {
                     .cast(),
             );
         }
+        let mut var_ids = Vec::new();
         for var_type in vars {
-            locals.alloc(Local {
-                name: String::new(),
-                type_: var_type,
-            });
+            var_ids.push(
+                locals
+                    .alloc(Local {
+                        name: String::new(),
+                        type_: var_type,
+                    })
+                    .cast(),
+            );
         }
         Self {
             name,
@@ -101,6 +107,7 @@ impl<'a> Function<'a> {
             kind: FunctionKind::Local {
                 locals,
                 param_ids,
+                var_ids,
                 body: body.unwrap_or_else(|| ExprRef::new_null()),
             },
         }
@@ -126,11 +133,16 @@ impl<'a> Function<'a> {
                     .cast(),
             );
         }
+        let mut var_ids = Vec::new();
         for var_type in vars {
-            locals.alloc(Local {
-                name: String::new(),
-                type_: var_type,
-            });
+            var_ids.push(
+                locals
+                    .alloc(Local {
+                        name: String::new(),
+                        type_: var_type,
+                    })
+                    .cast(),
+            );
         }
         Self {
             name,
@@ -140,6 +152,7 @@ impl<'a> Function<'a> {
             kind: FunctionKind::Local {
                 locals,
                 param_ids,
+                var_ids,
                 body: body.unwrap_or_else(|| ExprRef::new_null()),
             },
         }
@@ -185,6 +198,20 @@ impl<'a> Function<'a> {
         }
     }
 
+    pub fn var_ids(&self) -> &[LocalId] {
+        match &self.kind {
+            FunctionKind::Local { var_ids, .. } => var_ids,
+            FunctionKind::Import(_) => &[],
+        }
+    }
+
+    pub fn var_ids_mut(&mut self) -> Option<&mut Vec<LocalId>> {
+        match &mut self.kind {
+            FunctionKind::Local { var_ids, .. } => Some(var_ids),
+            FunctionKind::Import(_) => None,
+        }
+    }
+
     pub fn body(&self) -> Option<ExprRef<'a>> {
         match &self.kind {
             FunctionKind::Local { body, .. } => Some(*body),
@@ -223,12 +250,17 @@ impl<'a> Function<'a> {
     }
 
     pub fn add_var(&mut self, type_: Type) -> LocalId {
-        self.locals_mut()
+        let id = self
+            .locals_mut()
             .alloc(Local {
                 name: String::new(),
                 type_,
             })
-            .cast()
+            .cast();
+        if let Some(var_ids) = self.var_ids_mut() {
+            var_ids.push(id);
+        }
+        id
     }
 
     pub fn get_local_type(&self, id: LocalId) -> Type {
@@ -239,12 +271,9 @@ impl<'a> Function<'a> {
     }
 
     pub fn vars(&self) -> Vec<Type> {
-        let param_set: std::collections::HashSet<LocalId> =
-            self.param_ids().iter().cloned().collect();
-        self.locals()
+        self.var_ids()
             .iter()
-            .filter(|&(id, _)| !param_set.contains(&id.cast()))
-            .map(|(_, l)| l.type_)
+            .map(|&id| self.get_local_type(id))
             .collect()
     }
 }

@@ -370,6 +370,7 @@ impl<'a> BinaryReader<'a> {
                             kind: crate::ir::module::FunctionKind::Local {
                                 locals,
                                 param_ids,
+                                var_ids: Vec::new(),
                                 body: crate::ir::expression::ExprRef::new_null(), // Placeholder
                             },
                         });
@@ -535,17 +536,16 @@ impl<'a> BinaryReader<'a> {
                         let (count, ty) = reader.read()?;
                         let t = Self::valtype_to_type(ty);
                         for _ in 0..count {
-                            func.locals_mut().alloc(crate::ir::module::Local {
-                                name: String::new(),
-                                type_: t,
-                            });
+                            func.add_var(t);
                         }
                     }
 
                     // Build mapping of positional indices to LocalId
+                    let mut mapping = Vec::new();
+                    mapping.extend_from_slice(func.param_ids());
+                    mapping.extend_from_slice(func.var_ids());
                     unsafe {
-                        (*this).current_func_local_ids =
-                            func.locals().iter().map(|(id, _)| id.cast()).collect();
+                        (*this).current_func_local_ids = mapping;
                     }
 
                     let expr = unsafe {

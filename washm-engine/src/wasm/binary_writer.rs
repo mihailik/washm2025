@@ -598,18 +598,12 @@ impl BinaryWriter {
                         std::collections::HashMap::<Type, Vec<crate::ir::LocalId>>::new();
                     let mut types_ordered = Vec::new();
 
-                    let param_set: std::collections::HashSet<crate::ir::LocalId> =
-                        func.param_ids().iter().cloned().collect();
-
-                    for (id, local) in func.locals().iter() {
-                        if param_set.contains(&id.cast()) {
-                            continue;
-                        }
-                        let ty = local.type_;
+                    for &id in func.var_ids() {
+                        let ty = func.get_local_type(id);
                         if !type_groups.contains_key(&ty) {
                             types_ordered.push(ty);
                         }
-                        type_groups.entry(ty).or_default().push(id.cast());
+                        type_groups.entry(ty).or_default().push(id);
                     }
 
                     for ty in types_ordered {
