@@ -62,11 +62,11 @@ impl Pass for DuplicateFunctionElimination {
 
         // 3. Redirect calls
         for (_, func) in functions.iter_mut() {
-            if let Some(mut body) = func.body_mut() {
+            if let Some(body) = func.body_mut() {
                 let mut rewriter = CallRedirector {
                     replacements: &replacements,
                 };
-                rewriter.visit(&mut body, arena);
+                rewriter.visit(body, arena);
             }
         }
 

@@ -25,8 +25,8 @@ impl Pass for GlobalRefining {
 
         // Scan all functions
         for (_, func) in functions {
-            if let Some(mut body) = func.body_mut() {
-                analyzer.visit(&mut body, arena);
+            if let Some(body) = func.body_mut() {
+                analyzer.visit(body, arena);
             }
         }
 

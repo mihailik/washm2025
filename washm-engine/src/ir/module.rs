@@ -417,7 +417,7 @@ pub struct Tag {
     pub type_idx: TypeId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Module {
     pub features: FeatureSet,
     pub types: IdArena<TypeMarker, FuncType>, // Type section
@@ -441,25 +441,7 @@ pub struct Module {
 
 impl Module {
     pub fn new() -> Self {
-        Self {
-            features: FeatureSet::DEFAULT,
-            types: IdArena::new(),
-            functions: IdArena::new(),
-            tables: IdArena::new(),
-            memories: IdArena::new(),
-            globals: IdArena::new(),
-            start: None,
-            exports: Vec::new(),
-            elements: IdArena::new(),
-            data: IdArena::new(),
-            tags: IdArena::new(),
-            type_names: Vec::new(),
-            annotations: AnnotationStore::new(),
-            expressions: IdArena::new(),
-            imports: Vec::new(),
-            strings: Vec::new(),
-            recgroups: Vec::new(),
-        }
+        Self::default()
     }
 
     pub fn parts_mut(

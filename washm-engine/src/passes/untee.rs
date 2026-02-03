@@ -27,9 +27,9 @@ impl Pass for Untee {
 
     fn run(&mut self, module: &mut Module) {
         for (_, func) in &mut module.functions {
-            if let Some(mut body) = func.body_mut() {
+            if let Some(body) = func.body_mut() {
                 let mut transformer = UnteeTransformer;
-                transformer.visit(&mut body, &mut module.expressions);
+                transformer.visit(body, &mut module.expressions);
             }
         }
     }

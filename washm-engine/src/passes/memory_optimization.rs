@@ -26,13 +26,19 @@ pub struct MemoryOptimization {
     allow_structure: bool,
 }
 
-impl MemoryOptimization {
-    pub fn new() -> Self {
+impl Default for MemoryOptimization {
+    fn default() -> Self {
         Self {
             rigorous: false,
             allow_tee: true,
             allow_structure: true,
         }
+    }
+}
+
+impl MemoryOptimization {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn with_rigorous(mut self, rigorous: bool) -> Self {
@@ -59,8 +65,8 @@ impl Pass for MemoryOptimization {
     fn run(&mut self, module: &mut Module) {
         let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
         for (_, func) in functions {
-            if let Some(mut body) = func.body_mut() {
-                self.visit(&mut body, arena);
+            if let Some(body) = func.body_mut() {
+                self.visit(body, arena);
             }
         }
     }
@@ -98,12 +104,6 @@ impl Visitor for MemoryOptimization {
         {
             *arena_list = list;
         }
-    }
-}
-
-impl Default for MemoryOptimization {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

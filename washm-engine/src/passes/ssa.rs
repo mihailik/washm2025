@@ -13,9 +13,9 @@ impl Pass for Ssa {
 
     fn run(&mut self, module: &mut Module) {
         for (_, func) in &mut module.functions {
-            if let Some(mut body) = func.body_mut() {
+            if let Some(body) = func.body_mut() {
                 let mut visitor = GenericVisitor;
-                visitor.visit(&mut body, &mut module.expressions);
+                visitor.visit(body, &mut module.expressions);
             }
         }
     }

@@ -53,6 +53,12 @@ impl From<wasmparser::BinaryReaderError> for ParseError {
 
 type Result<T> = std::result::Result<T, ParseError>;
 
+impl Default for BinaryReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BinaryReader {
     pub fn new() -> Self {
         Self {

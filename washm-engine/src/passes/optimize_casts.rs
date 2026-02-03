@@ -90,8 +90,8 @@ impl Pass for OptimizeCasts {
         };
 
         for (_, func) in functions {
-            if let Some(mut body) = func.body_mut() {
-                visitor.visit(&mut body, arena);
+            if let Some(body) = func.body_mut() {
+                visitor.visit(body, arena);
             }
         }
     }

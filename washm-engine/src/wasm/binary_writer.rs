@@ -346,8 +346,8 @@ impl BinaryWriter {
             for (_, table) in &module.tables {
                 if let crate::ir::module::TableKind::Import { module, field } = &table.kind {
                     imports.import(
-                        &module,
-                        &field,
+                        module,
+                        field,
                         wasm_encoder::EntityType::Table(wasm_encoder::TableType {
                             element_type: Self::to_ref_type(table.limits.element_type),
                             minimum: table.limits.initial as u64,
@@ -363,8 +363,8 @@ impl BinaryWriter {
             for (_, mem) in &module.memories {
                 if let crate::ir::module::MemoryKind::Import { module, field } = &mem.kind {
                     imports.import(
-                        &module,
-                        &field,
+                        module,
+                        field,
                         wasm_encoder::EntityType::Memory(wasm_encoder::MemoryType {
                             minimum: mem.limits.initial as u64,
                             maximum: mem.limits.maximum.map(|m| m as u64),
@@ -380,8 +380,8 @@ impl BinaryWriter {
             for (_, global) in &module.globals {
                 if let crate::ir::module::GlobalKind::Import { module, field } = &global.kind {
                     imports.import(
-                        &module,
-                        &field,
+                        module,
+                        field,
                         wasm_encoder::EntityType::Global(wasm_encoder::GlobalType {
                             val_type: Self::to_val_type(global.type_),
                             mutable: global.mutable,
@@ -1229,7 +1229,7 @@ impl BinaryWriter {
                         local_map,
                     )?;
                 }
-                let depth = Self::find_label_depth(label_stack, &name)?;
+                let depth = Self::find_label_depth(label_stack, name)?;
                 if let Some(c) = condition {
                     Self::write_instructions(
                         encoder,
@@ -1373,7 +1373,7 @@ impl BinaryWriter {
                 )?;
                 let memarg = MemArg {
                     offset: offset as u64,
-                    align: align as u32,
+                    align,
                     memory_index: *memory_map.get(&memory).ok_or_else(|| {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
@@ -1441,7 +1441,7 @@ impl BinaryWriter {
                 )?;
                 let memarg = MemArg {
                     offset: offset as u64,
-                    align: align as u32,
+                    align,
                     memory_index: *memory_map.get(&memory).ok_or_else(|| {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
@@ -1532,9 +1532,9 @@ impl BinaryWriter {
                 )?;
                 let mut targets = Vec::new();
                 for name in names {
-                    targets.push(Self::find_label_depth(label_stack, &name)?);
+                    targets.push(Self::find_label_depth(label_stack, name)?);
                 }
-                let default_target = Self::find_label_depth(label_stack, &default)?;
+                let default_target = Self::find_label_depth(label_stack, default)?;
                 encoder.instruction(&Instruction::BrTable(targets.into(), default_target));
             }
             ExpressionKind::MemorySize { memory } => {
@@ -2128,7 +2128,7 @@ impl BinaryWriter {
             }
             ExpressionKind::ElemDrop { segment } => {
                 encoder.instruction(&Instruction::ElemDrop(
-                    *element_map.get(&segment).ok_or_else(|| {
+                    *element_map.get(segment).ok_or_else(|| {
                         WriteError::InternalError(format!(
                             "Element segment not found: {:?}",
                             segment

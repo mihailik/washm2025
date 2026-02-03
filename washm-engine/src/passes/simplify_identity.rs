@@ -44,18 +44,16 @@ fn simplify_identity(
     arena: &IdArena<ExpressionMarker, Expression>,
 ) -> Option<ExpressionId> {
     match kind {
-        ExpressionKind::Unary { op, value } => {
-            match op {
-                UnaryOp::EqZInt32 => {
-                    if let ExpressionKind::Unary {
-                        op: UnaryOp::EqZInt32,
-                        value: inner,
-                    } = &arena[value].kind
-                    {
-                        return Some(*inner); // eqz(eqz(x)) -> x (for i32 bools)
-                    }
-                }
-                _ => {}
+        ExpressionKind::Unary {
+            op: UnaryOp::EqZInt32,
+            value,
+        } => {
+            if let ExpressionKind::Unary {
+                op: UnaryOp::EqZInt32,
+                value: inner,
+            } = &arena[value].kind
+            {
+                return Some(*inner); // eqz(eqz(x)) -> x (for i32 bools)
             }
         }
         ExpressionKind::Binary { op, left, right } => match op {
@@ -91,17 +89,9 @@ fn simplify_identity(
 }
 
 fn is_const_zero(id: ExpressionId, arena: &IdArena<ExpressionMarker, Expression>) -> bool {
-    if let ExpressionKind::Const(Literal::I32(0)) = &arena[id].kind {
-        true
-    } else {
-        false
-    }
+    matches!(&arena[id].kind, ExpressionKind::Const(Literal::I32(0)))
 }
 
 fn is_const_one(id: ExpressionId, arena: &IdArena<ExpressionMarker, Expression>) -> bool {
-    if let ExpressionKind::Const(Literal::I32(1)) = &arena[id].kind {
-        true
-    } else {
-        false
-    }
+    matches!(&arena[id].kind, ExpressionKind::Const(Literal::I32(1)))
 }

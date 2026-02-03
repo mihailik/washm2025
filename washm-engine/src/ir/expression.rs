@@ -637,11 +637,10 @@ impl ExpressionKind {
             | ExpressionKind::ArrayLen { ptr: value } => {
                 f(value);
             }
-            ExpressionKind::Return { value } => {
-                if let Some(v) = value {
-                    f(v);
-                }
+            ExpressionKind::Return { value: Some(v) } => {
+                f(v);
             }
+            ExpressionKind::Return { value: None } => {}
             ExpressionKind::Binary { left, right, .. }
             | ExpressionKind::Store {
                 ptr: left,
@@ -855,7 +854,7 @@ impl LabelName for String {
     }
 }
 
-impl<'a> LabelName for &'a str {
+impl LabelName for &str {
     fn to_option_string(self) -> Option<String> {
         if self.is_empty() {
             None
@@ -871,7 +870,7 @@ impl LabelName for Option<String> {
     }
 }
 
-impl<'a> LabelName for Option<&'a str> {
+impl LabelName for Option<&str> {
     fn to_option_string(self) -> Option<String> {
         self.and_then(|s| {
             if s.is_empty() {

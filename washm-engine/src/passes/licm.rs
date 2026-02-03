@@ -54,16 +54,9 @@ impl<'a> LoopInvariantHoister<'a> {
     }
 }
 
+#[derive(Default)]
 struct LocalReadCollector {
     read_locals: HashSet<crate::ir::LocalId>,
-}
-
-impl Default for LocalReadCollector {
-    fn default() -> Self {
-        Self {
-            read_locals: HashSet::new(),
-        }
-    }
 }
 
 impl ReadOnlyVisitor for LocalReadCollector {
@@ -147,16 +140,9 @@ impl<'a> Visitor for LoopInvariantHoister<'a> {
     }
 }
 
+#[derive(Default)]
 struct LocalWriteFinder {
     writes: HashSet<crate::ir::LocalId>,
-}
-
-impl Default for LocalWriteFinder {
-    fn default() -> Self {
-        Self {
-            writes: HashSet::new(),
-        }
-    }
 }
 
 impl ReadOnlyVisitor for LocalWriteFinder {
@@ -222,11 +208,14 @@ impl<'a, 'b> InvariantReplacer<'a, 'b> {
         expr_id: ExpressionId,
         arena: &IdArena<ExpressionMarker, Expression>,
     ) -> bool {
-        match &arena[expr_id].kind {
-            ExpressionKind::Nop | ExpressionKind::Const(_) | ExpressionKind::Unreachable => true,
-            ExpressionKind::LocalGet { .. } | ExpressionKind::GlobalGet { .. } => true,
-            _ => false,
-        }
+        matches!(
+            &arena[expr_id].kind,
+            ExpressionKind::Nop
+                | ExpressionKind::Const(_)
+                | ExpressionKind::Unreachable
+                | ExpressionKind::LocalGet { .. }
+                | ExpressionKind::GlobalGet { .. }
+        )
     }
 }
 

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 /// Compile-time expression evaluator
 #[allow(dead_code)]
+#[derive(Default)]
 pub struct Evaluator {
     /// Known constant values for globals/locals
     /// Using usize for now as GlobalId/LocalId are likely indices
@@ -14,9 +15,7 @@ pub struct Evaluator {
 
 impl Evaluator {
     pub fn new() -> Self {
-        Self {
-            constants: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Evaluate expression to constant if possible

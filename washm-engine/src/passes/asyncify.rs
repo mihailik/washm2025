@@ -1047,7 +1047,7 @@ impl<'a> AsyncifyLocals<'a> {
             }
 
             let current_ptr = builder.load(memory_id, 4, false, 0, 4, data_ptr, Type::I32);
-            let size_const = builder.const_(Literal::I32(total_locals_size as i32));
+            let size_const = builder.const_(Literal::I32(total_locals_size));
             let new_ptr = builder.binary(
                 crate::ir::ops::BinaryOp::SubInt32,
                 current_ptr,
@@ -1097,7 +1097,7 @@ impl<'a> AsyncifyLocals<'a> {
             }
 
             let ptr_get = builder.local_get(stack_ptr_temp, pointer_type);
-            let size_const = builder.const_(Literal::I32(total_locals_size as i32));
+            let size_const = builder.const_(Literal::I32(total_locals_size));
             let new_ptr = builder.binary(
                 crate::ir::ops::BinaryOp::AddInt32,
                 ptr_get,
@@ -1131,8 +1131,7 @@ impl<'a> AsyncifyLocals<'a> {
         let r_block = builder.block("", rewind_then, Type::NONE);
         list.push(builder.if_("", rewinding, r_block, None, Type::NONE));
 
-        let mut unwind_block_list = Vec::new();
-        unwind_block_list.push(new_inner_body);
+        let unwind_block_list = vec![new_inner_body];
 
         list.push(builder.block(
             Some(ASYNCIFY_UNWIND.to_string()),
@@ -1156,7 +1155,7 @@ impl<'a> AsyncifyLocals<'a> {
         unwind_then.push(builder.local_set(stack_ptr_temp, loaded_ptr));
         let limit = builder.load(memory_id, 4, false, 4, 4, data_ptr, Type::I32);
         let ptr_get = builder.local_get(stack_ptr_temp, pointer_type);
-        let frame_size_const = builder.const_(Literal::I32(total_frame_size as i32));
+        let frame_size_const = builder.const_(Literal::I32(total_frame_size));
         let next_ptr = builder.binary(
             crate::ir::ops::BinaryOp::AddInt32,
             ptr_get,

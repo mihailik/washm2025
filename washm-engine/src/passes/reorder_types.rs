@@ -39,13 +39,10 @@ impl<'a> Visitor for ReorderTypesVisitor<'a> {
     ) {
         self.visit_children(expr_id, arena);
 
-        match &mut arena[*expr_id].kind {
-            ExpressionKind::CallIndirect { type_id, .. } => {
-                if let Some(&new_id) = self.remap.get(type_id) {
-                    *type_id = new_id;
-                }
+        if let ExpressionKind::CallIndirect { type_id, .. } = &mut arena[*expr_id].kind {
+            if let Some(&new_id) = self.remap.get(type_id) {
+                *type_id = new_id;
             }
-            _ => {}
         }
     }
 }

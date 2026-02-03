@@ -31,13 +31,10 @@ impl Visitor for ControlFlowSimplifier {
         arena: &mut IdArena<ExpressionMarker, Expression>,
     ) {
         let kind = &arena[*expr].kind;
-        match kind {
-            ExpressionKind::Block { list, .. } => {
-                if list.is_empty() {
-                    arena[*expr].kind = ExpressionKind::Nop;
-                }
+        if let ExpressionKind::Block { list, .. } = kind {
+            if list.is_empty() {
+                arena[*expr].kind = ExpressionKind::Nop;
             }
-            _ => {}
         }
     }
 }

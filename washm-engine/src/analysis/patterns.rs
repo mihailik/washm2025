@@ -61,6 +61,7 @@ pub enum Pattern {
 }
 
 /// Captures variables from a matched pattern
+#[derive(Default)]
 pub struct MatchEnv {
     vars: HashMap<&'static str, ExpressionId>,
     pub matched_op: Option<BinaryOp>,
@@ -71,13 +72,7 @@ pub struct MatchEnv {
 
 impl MatchEnv {
     pub fn new() -> Self {
-        Self {
-            vars: HashMap::new(),
-            matched_op: None,
-            matched_unary_op: None,
-            left: None,
-            right: None,
-        }
+        Self::default()
     }
 
     pub fn clear(&mut self) {
@@ -215,11 +210,11 @@ impl Pattern {
                     }
                 };
 
-                if op_matches {
-                    if p_left.matches(*e_left, env, arena) && p_right.matches(*e_right, env, arena)
-                    {
-                        return true;
-                    }
+                if op_matches
+                    && p_left.matches(*e_left, env, arena)
+                    && p_right.matches(*e_right, env, arena)
+                {
+                    return true;
                 }
                 false
             }
@@ -238,12 +233,8 @@ impl Pattern {
                         true
                     }
                 };
-                if op_matches {
-                    if p_val.matches(*e_val, env, arena) {
-                        return true;
-                    }
-                }
-                false
+
+                op_matches && p_val.matches(*e_val, env, arena)
             }
 
             (

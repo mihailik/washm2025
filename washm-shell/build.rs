@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 /// Semantic Transformation Engine using rust-analyzer
 /// Implements the specification from docs/1.7-ra.md - ZERO REGEX VERSION
 ///
@@ -216,8 +216,7 @@ impl SemanticEngine {
         // Walk all Rust files in this crate
         for entry in WalkDir::new(crate_path) {
             let entry = entry.unwrap();
-            if !entry.file_type().is_file() || entry.path().extension().map_or(true, |e| e != "rs")
-            {
+            if !entry.file_type().is_file() || entry.path().extension().is_none_or(|e| e != "rs") {
                 continue;
             }
 
@@ -260,8 +259,7 @@ impl SemanticEngine {
         // 1. Load files into VFS
         for entry in WalkDir::new(vendor_dir) {
             let entry = entry.unwrap();
-            if !entry.file_type().is_file() || entry.path().extension().map_or(true, |e| e != "rs")
-            {
+            if !entry.file_type().is_file() || entry.path().extension().is_none_or(|e| e != "rs") {
                 continue;
             }
             let content = fs::read(entry.path()).unwrap_or_default();
@@ -804,7 +802,7 @@ impl SemanticEngine {
                         continue; // It's a sub-path
                     }
 
-                    let new_path_text = format!("crate::{}", path.to_string());
+                    let new_path_text = format!("crate::{path}");
                     edits.push((path.syntax().text_range(), new_path_text));
                 }
             }
@@ -853,7 +851,7 @@ impl SemanticEngine {
         }
 
         for func in root.descendants().filter_map(ast::Fn::cast) {
-            if func.name().map_or(false, |n| n.text() == fn_name) {
+            if func.name().is_some_and(|n| n.text() == fn_name) {
                 if let Some(body) = func.body() {
                     let new_body = parse_stmt::<ast::BlockExpr>(new_body_str);
                     editor.replace(body.syntax(), new_body.syntax());
@@ -874,7 +872,7 @@ impl SemanticEngine {
             if path
                 .syntax()
                 .parent()
-                .map_or(false, |p| p.kind() == SyntaxKind::PATH)
+                .is_some_and(|p| p.kind() == SyntaxKind::PATH)
             {
                 continue;
             }
@@ -899,14 +897,13 @@ impl SemanticEngine {
             .descendants_with_tokens()
             .filter_map(|e| e.into_token())
         {
-            if token.text() == target_token {
-                if token
+            if token.text() == target_token
+                && token
                     .parent_ancestors()
                     .any(|n| ast::MacroCall::can_cast(n.kind()))
-                {
-                    let new_node = make_mutable(make::path_from_text(replacement_text));
-                    editor.replace(token, new_node.syntax());
-                }
+            {
+                let new_node = make_mutable(make::path_from_text(replacement_text));
+                editor.replace(token, new_node.syntax());
             }
         }
     }
@@ -1359,14 +1356,14 @@ impl SemanticEngine {
             if path
                 .syntax()
                 .parent()
-                .map_or(false, |p| p.kind() == SyntaxKind::PATH)
+                .is_some_and(|p| p.kind() == SyntaxKind::PATH)
             {
                 continue;
             }
 
             let segments: Vec<_> = path.segments().collect();
             if let Some(first) = segments.first() {
-                if first.name_ref().map_or(false, |n| n.text() == "crossterm") {
+                if first.name_ref().is_some_and(|n| n.text() == "crossterm") {
                     let rest: Vec<_> = segments.iter().skip(1).map(|s| s.to_string()).collect();
                     let new_path_text = if rest.is_empty() {
                         "crate::shims::crossterm".to_string()
@@ -1405,7 +1402,7 @@ impl SemanticEngine {
             for func in root.descendants().filter_map(ast::Fn::cast) {
                 if func
                     .name()
-                    .map_or(false, |n| n.text() == "get_embedded_locale")
+                    .is_some_and(|n| n.text() == "get_embedded_locale")
                 {
                     if let Some(name) = func.name() {
                         let new_name = make::name("get_embedded_locale_unused");
@@ -1418,30 +1415,27 @@ impl SemanticEngine {
             for macro_call in root.descendants().filter_map(ast::MacroCall::cast) {
                 if macro_call
                     .path()
-                    .map_or(false, |p| p.to_string() == "include")
+                    .is_some_and(|p| p.to_string() == "include")
+                    && macro_call.to_string().contains("embedded_locales.rs")
                 {
-                    if macro_call.to_string().contains("embedded_locales.rs") {
-                        let new_item = parse_node::<ast::Item>("pub use crate::shims::embedded_locales::get_embedded_locale as get_embedded_locale;");
-                        editor.replace(macro_call.syntax(), new_item.syntax());
-                    }
+                    let new_item = parse_node::<ast::Item>("pub use crate::shims::embedded_locales::get_embedded_locale as get_embedded_locale;");
+                    editor.replace(macro_call.syntax(), new_item.syntax());
                 }
             }
         }
 
         if path_str.ends_with("brush-core/src/sys/stubs/process.rs") {
             for struct_def in root.descendants().filter_map(ast::Struct::cast) {
-                if struct_def.name().map_or(false, |n| n.text() == "Child") {
-                    if let Some(field_list) = struct_def.field_list() {
-                        if let ast::FieldList::RecordFieldList(record) = field_list {
-                            for field in record.fields() {
-                                if field.name().map_or(false, |n| n.text() == "inner") {
-                                    if let Some(ty) = field.ty() {
-                                        let new_path = make_mutable(make::path_from_text(
-                                            "crate::stubs_impl::GuestChild",
-                                        ));
-                                        let new_ty = make_mutable(make::ty_path(new_path));
-                                        editor.replace(ty.syntax(), new_ty.syntax());
-                                    }
+                if struct_def.name().is_some_and(|n| n.text() == "Child") {
+                    if let Some(ast::FieldList::RecordFieldList(record)) = struct_def.field_list() {
+                        for field in record.fields() {
+                            if field.name().is_some_and(|n| n.text() == "inner") {
+                                if let Some(ty) = field.ty() {
+                                    let new_path = make_mutable(make::path_from_text(
+                                        "crate::stubs_impl::GuestChild",
+                                    ));
+                                    let new_ty = make_mutable(make::ty_path(new_path));
+                                    editor.replace(ty.syntax(), new_ty.syntax());
                                 }
                             }
                         }
@@ -1483,7 +1477,7 @@ impl SemanticEngine {
             for macro_def in root.descendants().filter_map(ast::MacroRules::cast) {
                 if macro_def
                     .name()
-                    .map_or(false, |n| n.text() == "minus_or_plus_flag_arg")
+                    .is_some_and(|n| n.text() == "minus_or_plus_flag_arg")
                 {
                     let has_attr = macro_def
                         .attrs()
@@ -1521,16 +1515,16 @@ impl SemanticEngine {
         if path_str.ends_with("brush-shell/src/lib.rs") {
             // mod brushctl -> pub mod brushctl
             for mod_item in root.descendants().filter_map(ast::Module::cast) {
-                if mod_item.name().map_or(false, |n| n.text() == "brushctl") {
-                    if mod_item.visibility().is_none() {
-                        let pub_token = parse_token("pub", SyntaxKind::PUB_KW);
-                        if let Some(mod_token) = mod_item.mod_token() {
-                            editor.insert(
-                                Position::before(mod_token.clone()),
-                                make::tokens::single_space(),
-                            );
-                            editor.insert(Position::before(mod_token), pub_token);
-                        }
+                if mod_item.name().is_some_and(|n| n.text() == "brushctl")
+                    && mod_item.visibility().is_none()
+                {
+                    let pub_token = parse_token("pub", SyntaxKind::PUB_KW);
+                    if let Some(mod_token) = mod_item.mod_token() {
+                        editor.insert(
+                            Position::before(mod_token.clone()),
+                            make::tokens::single_space(),
+                        );
+                        editor.insert(Position::before(mod_token), pub_token);
                     }
                 }
             }
@@ -1554,7 +1548,7 @@ impl SemanticEngine {
             for trait_def in root.descendants().filter_map(ast::Trait::cast) {
                 if trait_def
                     .name()
-                    .map_or(false, |n| n.text() == "ShellBuilderBrushBuiltinExt")
+                    .is_some_and(|n| n.text() == "ShellBuilderBrushBuiltinExt")
                 {
                     if let Some(vis) = trait_def.visibility() {
                         let pub_vis = make_mutable(make::visibility_pub());
@@ -1652,34 +1646,30 @@ impl SemanticEngine {
             // Second pass: handle the smaller expression if not already handled
             for call in root.descendants().filter_map(ast::MethodCallExpr::cast) {
                 let call_str = call.to_string();
-                if call_str == "shell.default_builtins(builtin_set)" {
-                    if !handled_ranges.contains(&call.syntax().text_range()) {
-                        let new_expr = parse_expr::<ast::Expr>(
-                            "crate::stubs_impl::configure_shell(shell, builtin_set)",
-                        );
-                        editor.replace(call.syntax(), new_expr.syntax());
-                    }
+                if call_str == "shell.default_builtins(builtin_set)"
+                    && !handled_ranges.contains(&call.syntax().text_range())
+                {
+                    let new_expr = parse_expr::<ast::Expr>(
+                        "crate::stubs_impl::configure_shell(shell, builtin_set)",
+                    );
+                    editor.replace(call.syntax(), new_expr.syntax());
                 }
             }
 
             // MinimalInputBackend replacement
             for path in root.descendants().filter_map(ast::Path::cast) {
-                if path.to_string() == "brush_interactive::MinimalInputBackend"
-                    || path.to_string() == "crate::brush_interactive::MinimalInputBackend"
-                {
-                    if path
+                if (path.to_string() == "brush_interactive::MinimalInputBackend"
+                    || path.to_string() == "crate::brush_interactive::MinimalInputBackend")
+                    && path
                         .syntax()
                         .parent()
-                        .map_or(false, |p| ast::PathExpr::can_cast(p.kind()))
-                    {
-                        let new_expr = parse_expr::<ast::Expr>(
-                            "crate::brush_interactive::MinimalInputBackend::new()",
-                        );
-                        if let Some(path_expr) =
-                            ast::PathExpr::cast(path.syntax().parent().unwrap())
-                        {
-                            editor.replace(path_expr.syntax(), new_expr.syntax());
-                        }
+                        .is_some_and(|p| ast::PathExpr::can_cast(p.kind()))
+                {
+                    let new_expr = parse_expr::<ast::Expr>(
+                        "crate::brush_interactive::MinimalInputBackend::new()",
+                    );
+                    if let Some(path_expr) = ast::PathExpr::cast(path.syntax().parent().unwrap()) {
+                        editor.replace(path_expr.syntax(), new_expr.syntax());
                     }
                 }
             }
@@ -1730,7 +1720,7 @@ fn verify_no_stubs(vendor_dir: &Path) {
     for entry in WalkDir::new(vendor_dir) {
         let entry = entry.unwrap();
         let path_str = normalize_path(entry.path());
-        if !entry.file_type().is_file() || entry.path().extension().map_or(true, |e| e != "rs") {
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|e| e != "rs") {
             continue;
         }
 

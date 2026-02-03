@@ -17,8 +17,8 @@ impl Pass for OptimizeForJS {
         let mut optimizer = JSOptimizer;
 
         for (_, func) in functions {
-            if let Some(mut body) = func.body_mut() {
-                optimizer.visit(&mut body, arena);
+            if let Some(body) = func.body_mut() {
+                optimizer.visit(body, arena);
             }
         }
     }

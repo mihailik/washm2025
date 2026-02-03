@@ -76,8 +76,8 @@ impl Pass for AvoidReinterprets {
         let (expressions, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
 
         for (_, func) in functions {
-            if let Some(mut body) = func.body_mut() {
-                visitor.visit(&mut body, expressions);
+            if let Some(body) = func.body_mut() {
+                visitor.visit(body, expressions);
             }
         }
     }

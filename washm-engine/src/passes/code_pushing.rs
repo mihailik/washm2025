@@ -15,9 +15,9 @@ impl Pass for CodePushing {
     fn run(&mut self, module: &mut Module) {
         let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
         for (_, func) in functions {
-            if let Some(mut body) = func.body_mut() {
+            if let Some(body) = func.body_mut() {
                 let mut pusher = CodePusher;
-                pusher.visit(&mut body, arena);
+                pusher.visit(body, arena);
             }
         }
     }

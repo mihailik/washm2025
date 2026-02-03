@@ -261,7 +261,6 @@ impl<'a> Visitor for Inliner<'a> {
 
             // Copy operands and target to avoid borrowing arena
             let operands = operands.clone();
-            let target = target;
 
             if let Some(info) = self.function_info.get(&target) {
                 self.inline_counter += 1;

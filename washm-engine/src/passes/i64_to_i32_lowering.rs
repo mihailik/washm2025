@@ -29,9 +29,9 @@ impl Pass for I64ToI32Lowering {
         let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
 
         for (_, func) in functions {
-            if let Some(mut body) = func.body_mut() {
+            if let Some(body) = func.body_mut() {
                 let mut visitor = I64LoweringVisitor { global_id };
-                visitor.visit(&mut body, arena);
+                visitor.visit(body, arena);
             }
         }
     }
