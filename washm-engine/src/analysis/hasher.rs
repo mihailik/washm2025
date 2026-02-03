@@ -1,4 +1,5 @@
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::visitor::ReadOnlyVisitor;
 use crate::ir::Literal;
 use std::hash::{Hash, Hasher};
@@ -12,18 +13,23 @@ impl<'a, H: Hasher> DeepHasher<'a, H> {
         Self { hasher }
     }
 
-    pub fn hash_expr(&mut self, expr: ExprRef<'a>) {
-        self.visit(expr);
+    pub fn hash_expr(&mut self, expr: ExpressionId, arena: &IdArena<ExpressionMarker, Expression>) {
+        self.visit(expr, arena);
     }
 }
 
-impl<'a, H: Hasher> ReadOnlyVisitor<'a> for DeepHasher<'a, H> {
-    fn visit_expression(&mut self, expr: ExprRef<'a>) {
+impl<'a, H: Hasher> ReadOnlyVisitor for DeepHasher<'a, H> {
+    fn visit_expression(
+        &mut self,
+        expr: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
+        let expression = &arena[expr];
         // Hash the kind discriminant
-        std::mem::discriminant(&expr.kind).hash(self.hasher);
-        expr.type_.hash(self.hasher);
+        std::mem::discriminant(&expression.kind).hash(self.hasher);
+        expression.type_.hash(self.hasher);
 
-        match &expr.kind {
+        match &expression.kind {
             ExpressionKind::Const(lit) => match lit {
                 Literal::I32(v) => v.hash(self.hasher),
                 Literal::I64(v) => v.hash(self.hasher),
@@ -31,7 +37,7 @@ impl<'a, H: Hasher> ReadOnlyVisitor<'a> for DeepHasher<'a, H> {
                 Literal::F64(v) => v.to_bits().hash(self.hasher),
                 Literal::V128(v) => v.hash(self.hasher),
             },
-            ExpressionKind::LocalGet { id }
+            ExpressionKind::LocalGet { id, .. }
             | ExpressionKind::LocalSet { id, .. }
             | ExpressionKind::LocalTee { id, .. } => {
                 id.hash(self.hasher);
@@ -60,10 +66,5 @@ impl<'a, H: Hasher> ReadOnlyVisitor<'a> for DeepHasher<'a, H> {
             // Add other fields as necessary
             _ => {}
         }
-
-        // Children are visited by default implementation of `visit` which calls `visit_children`
-        // But `visit` calls `visit_expression` then `visit_children`.
-        // So we just need to ensure `visit_children` traverses in order.
-        // `ReadOnlyVisitor::visit` does this.
     }
 }

@@ -1,7 +1,8 @@
 use crate::analysis::cfg::ControlFlowGraph;
 use crate::analysis::dominators::DominanceTree;
 use crate::analysis::ssa::{DefA, SSABuilder};
-use crate::ir::expression::ExprRef;
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionMarker};
 use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
@@ -16,64 +17,69 @@ impl Pass for TypeSSA {
         "type-ssa"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for (_, func) in &mut module.functions {
-            if let Some(mut body) = func.body() {
+    fn run(&mut self, module: &mut Module) {
+        let arena = &module.expressions;
+        let mut all_refinements = Vec::new();
+
+        for (_, func) in &module.functions {
+            if let Some(body) = func.body() {
                 // 1. Build SSA
-                let cfg = ControlFlowGraph::build(func, body);
+                let cfg = ControlFlowGraph::build(func, body, arena);
                 let dom = DominanceTree::build(&cfg);
-                let ssa = SSABuilder::build(func, &cfg, &dom);
+                let ssa = SSABuilder::build(func, &cfg, &dom, arena);
 
                 // 2. Refine types based on SSA definitions
                 let mut refinements = HashMap::new();
                 for (def, uses) in &ssa.def_uses {
                     let refined_type = match def {
-                        DefA::Instruction(expr) => expr.type_,
+                        DefA::Instruction(expr_id) => arena[*expr_id].type_,
                         DefA::Param(_idx) => {
                             // Parameters have a fixed declared type.
-                            // But maybe in a whole-module context they can be refined.
-                            // For now, keep as is.
                             continue;
                         }
                         DefA::Phi(_block, _local) => {
                             // A Phi's type is the LUB of its incoming definitions.
-                            // This is where real refinement happens.
                             continue; // TODO: Implement LUB propagation for Phis
                         }
                     };
 
-                    for &use_expr in uses {
+                    for &use_expr_id in uses {
+                        let use_expr = &arena[use_expr_id];
                         if refined_type.is_subtype_of(use_expr.type_)
                             && refined_type != use_expr.type_
                         {
-                            refinements.insert(use_expr.as_ptr(), refined_type);
+                            refinements.insert(use_expr_id, refined_type);
                         }
                     }
                 }
-
-                // 3. Apply refinements
-                let mut applier = TypeRefiner { refinements };
-                applier.visit(&mut body);
-                if let Some(mut_body) = func.body_mut() {
-                    *mut_body = body;
+                if !refinements.is_empty() {
+                    all_refinements.push((body, refinements));
                 }
             }
+        }
+
+        // 3. Apply refinements
+        for (mut body_id, refinements) in all_refinements {
+            let mut applier = TypeRefiner { refinements };
+            applier.visit(&mut body_id, &mut module.expressions);
         }
     }
 }
 
-struct TypeRefiner<'a> {
-    refinements: HashMap<*mut crate::ir::expression::Expression<'a>, Type>,
+struct TypeRefiner {
+    refinements: HashMap<ExpressionId, Type>,
 }
 
-impl<'a> Visitor<'a> for TypeRefiner<'a> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        self.visit_children(expr);
+impl Visitor for TypeRefiner {
+    fn visit_expression(
+        &mut self,
+        expr_id: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        self.visit_children(expr_id, arena);
 
-        // Safety: We use the pointer to lookup refinements.
-        // The pointer is stable during the visit.
-        if let Some(&new_type) = self.refinements.get(&(expr.as_ptr() as *mut _)) {
-            expr.type_ = new_type;
+        if let Some(&new_type) = self.refinements.get(expr_id) {
+            arena[*expr_id].type_ = new_type;
         }
     }
 }

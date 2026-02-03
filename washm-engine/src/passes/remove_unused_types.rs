@@ -10,7 +10,7 @@ impl Pass for RemoveUnusedTypes {
         "RemoveUnusedTypes"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         if module.types.is_empty() {
             return;
         }

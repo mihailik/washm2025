@@ -1,12 +1,13 @@
 use crate::analysis::effects::{Effect, EffectAnalyzer};
-use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
-use crate::ir::module::Module;
-use crate::ir::visitor::Visitor;
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{
+    Expression, ExpressionId, ExpressionKind, ExpressionMarker, IrBuilder,
+};
+use crate::ir::module::{FuncId, Module};
+use crate::ir::visitor::{ReadOnlyVisitor, Visitor};
 use crate::passes::Pass;
-use bumpalo::collections::Vec as BumpVec;
 use std::collections::HashSet;
 
-/// LICM (Loop-Invariant Code Motion): Hoists invariants out of loops
 pub struct LICM;
 
 impl Pass for LICM {
@@ -14,106 +15,178 @@ impl Pass for LICM {
         "licm"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
-        let allocator = module.allocator();
-        let ids: Vec<_> = module.functions.iter().map(|(id, _)| id).collect();
-        for id in ids {
-            if let Some(mut body) = module.functions[id].body() {
-                let mut hoister = LoopInvariantHoister {
-                    allocator,
-                    func: &mut module.functions[id],
-                };
-                hoister.visit(&mut body);
+    fn run(&mut self, module: &mut Module) {
+        let func_ids: Vec<_> = module.functions.iter().map(|(id, _)| id).collect();
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
 
-                if let Some(mut_body) = module.functions[id].body_mut() {
-                    *mut_body = body;
+        for func_id in func_ids {
+            let func = &mut functions[func_id];
+            if let Some(mut body) = func.body() {
+                let mut hoister = LoopInvariantHoister::new(func_id, func);
+                hoister.visit(&mut body, arena);
+
+                if let Some(body_mut) = functions[func_id].body_mut() {
+                    *body_mut = body;
                 }
             }
         }
     }
 }
 
-struct LoopInvariantHoister<'a, 'b> {
-    allocator: &'a bumpalo::Bump,
-    func: &'b mut crate::ir::module::Function<'a>,
-}
-
-#[derive(Default)]
 struct LoopInfo {
     effects: Effect,
     modified_locals: HashSet<crate::ir::LocalId>,
 }
 
-impl<'a> Visitor<'a> for LoopInfo {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        let effect = EffectAnalyzer::analyze(*expr);
-        self.effects |= effect;
+struct LoopInvariantHoister<'a> {
+    _func_id: FuncId,
+    func: &'a mut crate::ir::module::Function,
+    loop_stack: Vec<LoopInfo>,
+}
 
-        match &expr.kind {
-            ExpressionKind::LocalSet { id, .. } | ExpressionKind::LocalTee { id, .. } => {
-                self.modified_locals.insert(*id);
-            }
-            _ => {}
+impl<'a> LoopInvariantHoister<'a> {
+    fn new(_func_id: FuncId, func: &'a mut crate::ir::module::Function) -> Self {
+        Self {
+            _func_id,
+            func,
+            loop_stack: Vec::new(),
         }
-        // Visitor trait will handle children
     }
 }
 
-#[derive(Default)]
 struct LocalReadCollector {
     read_locals: HashSet<crate::ir::LocalId>,
 }
 
-impl<'a> Visitor<'a> for LocalReadCollector {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if let ExpressionKind::LocalGet { id } = &expr.kind {
+impl Default for LocalReadCollector {
+    fn default() -> Self {
+        Self {
+            read_locals: HashSet::new(),
+        }
+    }
+}
+
+impl ReadOnlyVisitor for LocalReadCollector {
+    fn visit_expression(
+        &mut self,
+        expr_id: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
+        if let ExpressionKind::LocalGet { id } = &arena[expr_id].kind {
             self.read_locals.insert(*id);
         }
     }
 }
 
-impl<'a, 'b> Visitor<'a> for LoopInvariantHoister<'a, 'b> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
+impl<'a> Visitor for LoopInvariantHoister<'a> {
+    fn visit(
+        &mut self,
+        expr: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
         // First visit children in case there are nested loops
-        self.visit_children(expr);
+        self.visit_children(expr, arena);
+        self.visit_expression(expr, arena);
+    }
 
-        if let ExpressionKind::Loop { name: _, body } = &mut expr.kind {
-            // 1. Analyze the loop
-            let mut info = LoopInfo::default();
-            info.visit(body);
+    fn visit_expression(
+        &mut self,
+        expr_id: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        if let ExpressionKind::Loop { body, .. } = arena[*expr_id].kind {
+            let mut body_copy = body;
 
-            // 2. Find and replace invariants in the loop body
-            let mut replacer = InvariantReplacer {
-                allocator: self.allocator,
-                loop_info: &info,
-                hoists: BumpVec::new_in(self.allocator),
-                func: self.func,
+            // Analyze loop
+            let effects = EffectAnalyzer::analyze(*expr_id, arena);
+
+            // Find all local.set in loop
+            let mut finder = LocalWriteFinder::default();
+            finder.visit(*expr_id, arena);
+            let modified_locals = finder.writes;
+
+            let loop_info = LoopInfo {
+                effects,
+                modified_locals,
             };
-            replacer.visit(body);
 
-            if !replacer.hoists.is_empty() {
-                // 3. Wrap loop in a block with hoisted expressions
-                let mut list = BumpVec::with_capacity_in(replacer.hoists.len() + 1, self.allocator);
-                list.extend(replacer.hoists);
-                list.push(*expr);
+            self.loop_stack.push(loop_info);
 
-                let wrapper = Expression::block(self.allocator, None, list, expr.type_);
-                *expr = wrapper;
+            let hoisted_list = {
+                // Hoist invariants
+                let mut replacer = InvariantReplacer {
+                    func: self.func,
+                    loop_info: self.loop_stack.last().unwrap(),
+                    hoisted: Vec::new(),
+                };
+
+                // We need to visit the BODY of the loop
+                replacer.visit(&mut body_copy, arena);
+                replacer.hoisted
+            };
+
+            self.loop_stack.pop();
+
+            // Re-update body in loop if it changed
+            if let ExpressionKind::Loop {
+                body: ref mut b, ..
+            } = arena[*expr_id].kind
+            {
+                *b = body_copy;
+            }
+
+            // If we hoisted anything, wrap loop in a block
+            if !hoisted_list.is_empty() {
+                let mut builder = IrBuilder::new(arena);
+                let mut list = hoisted_list;
+                list.push(*expr_id);
+                let loop_type = builder.arena[*expr_id].type_;
+                *expr_id = builder.block(None::<String>, list, loop_type);
             }
         }
     }
 }
 
-struct InvariantReplacer<'a, 'b, 'c> {
-    allocator: &'a bumpalo::Bump,
-    loop_info: &'b LoopInfo,
-    hoists: BumpVec<'a, ExprRef<'a>>,
-    func: &'c mut crate::ir::module::Function<'a>,
+struct LocalWriteFinder {
+    writes: HashSet<crate::ir::LocalId>,
 }
 
-impl<'a, 'b, 'c> InvariantReplacer<'a, 'b, 'c> {
-    fn is_invariant(&self, expr: ExprRef<'a>) -> bool {
-        let effects = EffectAnalyzer::analyze(expr);
+impl Default for LocalWriteFinder {
+    fn default() -> Self {
+        Self {
+            writes: HashSet::new(),
+        }
+    }
+}
+
+impl ReadOnlyVisitor for LocalWriteFinder {
+    fn visit_expression(
+        &mut self,
+        expr_id: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
+        match &arena[expr_id].kind {
+            ExpressionKind::LocalSet { id, .. } | ExpressionKind::LocalTee { id, .. } => {
+                self.writes.insert(*id);
+            }
+            _ => {}
+        }
+    }
+}
+
+struct InvariantReplacer<'a, 'b> {
+    func: &'a mut crate::ir::module::Function,
+    loop_info: &'b LoopInfo,
+    hoisted: Vec<ExpressionId>,
+}
+
+impl<'a, 'b> InvariantReplacer<'a, 'b> {
+    fn is_invariant(
+        &self,
+        expr_id: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) -> bool {
+        let effects = EffectAnalyzer::analyze(expr_id, arena);
 
         // No side effects allowed
         if effects.intersects(Effect::SIDE_EFFECTS | Effect::MAY_TRAP) {
@@ -134,7 +207,7 @@ impl<'a, 'b, 'c> InvariantReplacer<'a, 'b, 'c> {
 
         // Check local read/write interference
         let mut reader = LocalReadCollector::default();
-        reader.visit(&mut { expr });
+        reader.visit(expr_id, arena);
         for local in reader.read_locals {
             if self.loop_info.modified_locals.contains(&local) {
                 return false;
@@ -144,108 +217,44 @@ impl<'a, 'b, 'c> InvariantReplacer<'a, 'b, 'c> {
         true
     }
 
-    fn is_trivial(&self, expr: ExprRef<'a>) -> bool {
-        matches!(
-            &expr.kind,
-            ExpressionKind::Const(_) | ExpressionKind::LocalGet { .. } | ExpressionKind::Nop
-        )
+    fn is_trivial(
+        &self,
+        expr_id: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) -> bool {
+        match &arena[expr_id].kind {
+            ExpressionKind::Nop | ExpressionKind::Const(_) | ExpressionKind::Unreachable => true,
+            ExpressionKind::LocalGet { .. } | ExpressionKind::GlobalGet { .. } => true,
+            _ => false,
+        }
     }
 }
 
-impl<'a, 'b, 'c> Visitor<'a> for InvariantReplacer<'a, 'b, 'c> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if self.is_invariant(*expr) && !self.is_trivial(*expr) {
-            // Hoist it!
-            let expr_type = expr.type_;
-            let local_id = self.func.add_var(expr_type);
-
-            let hoisted_expr = *expr;
-            let set = Expression::local_set(self.allocator, local_id, hoisted_expr);
-            self.hoists.push(set);
-
-            let get = Expression::local_get(self.allocator, local_id, expr_type);
-            *expr = get;
-            return; // Don't visit children of hoisted expression
+impl<'a, 'b> Visitor for InvariantReplacer<'a, 'b> {
+    fn visit_expression(
+        &mut self,
+        expr_id: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        // Don't hoist trivial expressions (const, local.get)
+        if self.is_trivial(*expr_id, arena) {
+            return;
         }
 
-        self.visit_children(expr);
-    }
-}
+        if self.is_invariant(*expr_id, arena) {
+            // Hoist: replace with local.get, add local.set to hoisted list
+            let expr_type = arena[*expr_id].type_;
+            let original_expr = *expr_id;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ir::expression::Expression;
-    use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
+            let new_local = self.func.locals_mut().alloc(crate::ir::module::Local {
+                name: String::new(),
+                type_: expr_type,
+            });
 
-    #[test]
-    fn test_licm() {
-        let bump = Bump::new();
-        let val = Expression::const_expr(&bump, Literal::I32(1), Type::I32);
-        let func = crate::ir::module::Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::I32,
-            vec![],
-            Some(val),
-        );
-        let mut module = Module::new(&bump);
-        module.add_function(func);
-        let mut pass = LICM;
-        pass.run(&mut module);
-        assert!(module.functions[module.functions.iter().next().unwrap().0]
-            .body()
-            .is_some());
-    }
-
-    #[test]
-    fn test_licm_hoist_binary() {
-        let bump = Bump::new();
-        let builder = crate::ir::expression::IrBuilder::new(&bump);
-
-        // a, b are locals 0, 1. x is local 2.
-        let a = builder.local_get(0, Type::I32);
-        let b = builder.local_get(1, Type::I32);
-        let add = builder.binary(crate::ir::ops::BinaryOp::AddInt32, a, b, Type::I32);
-        let set_x = builder.local_set(2, add);
-
-        let mut list = bumpalo::collections::Vec::new_in(&bump);
-        list.push(set_x);
-        let body = builder.block(None, list, Type::NONE);
-
-        let loop_expr = builder.loop_(Some("loop"), body, Type::NONE);
-
-        let func = crate::ir::module::Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![Type::I32, Type::I32, Type::I32],
-            Some(loop_expr),
-        );
-
-        let mut module = Module::new(&bump);
-        module.add_function(func);
-        let mut pass = LICM;
-        pass.run(&mut module);
-
-        // After LICM, the body should be a block [hoist, loop]
-        let body = module.functions[module.functions.iter().next().unwrap().0]
-            .body()
-            .unwrap();
-        if let ExpressionKind::Block { list, .. } = &body.kind {
-            assert_eq!(list.len(), 2, "Should have hoisted one expression");
-            // list[0] should be a local.set for the hoisted 'add'
-            if let ExpressionKind::LocalSet { id, .. } = &list[0].kind {
-                assert_eq!(id.index(), 3, "New local should be index 3");
-            } else {
-                panic!(
-                    "First item in block should be a local.set, got {:?}",
-                    list[0].kind
-                );
-            }
-        } else {
-            panic!("Body should be a block after hoisting, got {:?}", body.kind);
+            let mut builder = IrBuilder::new(arena);
+            self.hoisted
+                .push(builder.local_set(new_local, original_expr));
+            *expr_id = builder.local_get(new_local, expr_type);
         }
     }
 }

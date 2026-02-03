@@ -73,7 +73,7 @@ use std::collections::HashMap;
 
 pub trait Pass {
     fn name(&self) -> &str;
-    fn run<'a>(&mut self, module: &mut Module<'a>);
+    fn run(&mut self, module: &mut Module);
 }
 
 #[derive(Debug, Clone)]
@@ -510,7 +510,7 @@ pub static PASS_REGISTRY: &[PassInfo] = &[
     PassInfo {
         name: "remove-imports",
         description: "removes imports",
-        create: |_| Box::new(crate::passes::remove_imports::RemoveImports),
+        create: |_| Box::new(crate::passes::remove_imports::RemoveImports::default()),
     },
     PassInfo {
         name: "remove-memory-init",
@@ -530,7 +530,7 @@ pub static PASS_REGISTRY: &[PassInfo] = &[
     PassInfo {
         name: "safe-heap",
         description: "instrument heap accesses for safety",
-        create: |_| Box::new(crate::passes::safe_heap::SafeHeap),
+        create: |_| Box::new(crate::passes::safe_heap::SafeHeap::default()),
     },
     PassInfo {
         name: "signature-pruning",
@@ -738,7 +738,7 @@ impl PassRunner {
         false
     }
 
-    pub fn run<'a>(&mut self, module: &mut Module<'a>) {
+    pub fn run(&mut self, module: &mut Module) {
         for pass in &mut self.passes {
             pass.run(module);
 
@@ -771,7 +771,7 @@ mod tests {
             "MockPass"
         }
 
-        fn run<'a>(&mut self, module: &mut Module<'a>) {
+        fn run(&mut self, module: &mut Module) {
             for (_, func) in &mut module.functions {
                 func.name.push_str("_visited");
             }
@@ -780,14 +780,14 @@ mod tests {
 
     #[test]
     fn test_pass_runner() {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
+        let nop = crate::ir::expression::IrBuilder::new(&mut module.expressions).nop();
         module.add_function(Function::new(
-            "test".to_string(),
+            "dummy".to_string(),
             Type::NONE,
             Type::NONE,
             vec![],
-            None,
+            nop,
         ));
 
         let mut runner = PassRunner::new();
@@ -796,22 +796,21 @@ mod tests {
 
         assert_eq!(
             module.functions[module.functions.iter().next().unwrap().0].name,
-            "test_visited"
+            "dummy_visited"
         );
     }
 
     #[test]
     fn test_pass_runner_validation_failure() {
-        use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
+        use crate::ir::expression::IrBuilder;
         use crate::ir::Literal;
-        use bumpalo::Bump;
 
         struct BrokenPass;
         impl Pass for BrokenPass {
             fn name(&self) -> &str {
                 "BrokenPass"
             }
-            fn run<'a>(&mut self, module: &mut Module<'a>) {
+            fn run(&mut self, module: &mut Module) {
                 // Break module validity: Change function return type but not body
                 let first_id = module.functions.iter().next().unwrap().0;
                 if let Some(func) = module.functions.get_mut(first_id) {
@@ -820,22 +819,13 @@ mod tests {
             }
         }
 
-        let bump = Bump::new();
-        let body = bump.alloc(Expression {
-            kind: ExpressionKind::Const(Literal::I32(42)),
-            type_: Type::I32,
-        });
+        let mut module = Module::new();
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(42))
+        };
 
-        let func = Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::I32,
-            vec![],
-            Some(ExprRef::new(body)),
-        );
-
-        let bump_module = bumpalo::Bump::new();
-        let mut module = Module::new(&bump_module);
+        let func = Function::new("test".to_string(), Type::NONE, Type::I32, vec![], body);
         module.add_function(func);
 
         let mut runner = PassRunner::new();

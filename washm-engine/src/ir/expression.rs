@@ -1,75 +1,39 @@
+use crate::collections::id_arena::{Id, IdArena};
 use crate::ir::ops::{BinaryOp, UnaryOp};
 use crate::ir::{
-    DataId, ElementId, FuncId, GlobalId, Literal, LocalId, MemoryId, TableId, Type, TypeId,
+    BlockType, DataId, ElementId, FuncId, GlobalId, Literal, LocalId, MemoryId, TableId, Type,
+    TypeId,
 };
-use bumpalo::collections::Vec as BumpVec;
-use bumpalo::Bump;
-use std::ops::{Deref, DerefMut};
-use std::ptr::NonNull;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct ExprRef<'a>(NonNull<Expression<'a>>);
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct ExpressionMarker;
+pub type ExpressionId = Id<ExpressionMarker>;
 
-impl<'a> ExprRef<'a> {
-    pub fn new(ptr: &'a mut Expression<'a>) -> Self {
-        Self(NonNull::from(ptr))
-    }
-
-    pub fn new_null() -> Self {
-        Self(NonNull::dangling())
-    }
-
-    pub fn is_null(&self) -> bool {
-        self.0 == NonNull::dangling()
-    }
-
-    pub fn as_ptr(&self) -> *mut Expression<'a> {
-        self.0.as_ptr()
-    }
-}
-
-unsafe impl<'a> Send for ExprRef<'a> {}
-unsafe impl<'a> Sync for ExprRef<'a> {}
-
-impl<'a> Deref for ExprRef<'a> {
-    type Target = Expression<'a>;
-    fn deref(&self) -> &Self::Target {
-        unsafe { self.0.as_ref() }
-    }
-}
-
-impl<'a> DerefMut for ExprRef<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.0.as_mut() }
-    }
-}
-
-#[derive(Debug)]
-pub struct Expression<'a> {
+#[derive(Debug, Clone)]
+pub struct Expression {
     pub type_: Type,
-    pub kind: ExpressionKind<'a>,
+    pub kind: ExpressionKind,
 }
 
-#[derive(Debug)]
-pub enum ExpressionKind<'a> {
+#[derive(Debug, Clone)]
+pub enum ExpressionKind {
     Block {
-        name: Option<&'a str>,
-        list: BumpVec<'a, ExprRef<'a>>,
+        name: Option<String>,
+        list: Vec<ExpressionId>,
     },
     Const(Literal),
     Unary {
         op: UnaryOp,
-        value: ExprRef<'a>,
+        value: ExpressionId,
     },
     Binary {
         op: BinaryOp,
-        left: ExprRef<'a>,
-        right: ExprRef<'a>,
+        left: ExpressionId,
+        right: ExpressionId,
     },
     Call {
         target: FuncId,
-        operands: BumpVec<'a, ExprRef<'a>>,
+        operands: Vec<ExpressionId>,
         is_return: bool,
     },
     LocalGet {
@@ -77,77 +41,78 @@ pub enum ExpressionKind<'a> {
     },
     LocalSet {
         id: LocalId,
-        value: ExprRef<'a>,
+        value: ExpressionId,
     },
     LocalTee {
         id: LocalId,
-        value: ExprRef<'a>,
+        value: ExpressionId,
     },
     GlobalGet {
         id: GlobalId,
     },
     GlobalSet {
         id: GlobalId,
-        value: ExprRef<'a>,
+        value: ExpressionId,
     },
     If {
-        condition: ExprRef<'a>,
-        if_true: ExprRef<'a>,
-        if_false: Option<ExprRef<'a>>,
+        name: Option<String>,
+        condition: ExpressionId,
+        if_true: ExpressionId,
+        if_false: Option<ExpressionId>,
     },
     Loop {
-        name: Option<&'a str>,
-        body: ExprRef<'a>,
+        name: Option<String>,
+        body: ExpressionId,
     },
     Break {
-        name: &'a str,
-        condition: Option<ExprRef<'a>>,
-        value: Option<ExprRef<'a>>,
+        name: String,
+        condition: Option<ExpressionId>,
+        value: Option<ExpressionId>,
     },
     Return {
-        value: Option<ExprRef<'a>>,
+        value: Option<ExpressionId>,
     },
     Unreachable,
     Drop {
-        value: ExprRef<'a>,
+        value: ExpressionId,
     },
     Select {
-        condition: ExprRef<'a>,
-        if_true: ExprRef<'a>,
-        if_false: ExprRef<'a>,
+        condition: ExpressionId,
+        if_true: ExpressionId,
+        if_false: ExpressionId,
     },
     Load {
         memory: MemoryId,
-        bytes: u32,       // 1, 2, 4, or 8
-        signed: bool,     // For sub-word loads
-        offset: u32,      // Memory offset
-        align: u32,       // Alignment (power of 2)
-        ptr: ExprRef<'a>, // Address to load from
+        bytes: u32,        // 1, 2, 4, or 8
+        signed: bool,      // For sub-word loads
+        offset: u32,       // Memory offset
+        align: u32,        // Alignment (power of 2)
+        ptr: ExpressionId, // Address to load from
     },
     Store {
         memory: MemoryId,
-        bytes: u32,         // 1, 2, 4, or 8
-        offset: u32,        // Memory offset
-        align: u32,         // Alignment
-        ptr: ExprRef<'a>,   // Address to store to
-        value: ExprRef<'a>, // Value to store
+        bytes: u32,          // 1, 2, 4, or 8
+        offset: u32,         // Memory offset
+        align: u32,          // Alignment
+        ptr: ExpressionId,   // Address to store to
+        value: ExpressionId, // Value to store
     },
     Nop,
     Switch {
-        names: BumpVec<'a, &'a str>, // List of target labels
-        default: &'a str,            // Default label
-        condition: ExprRef<'a>,      // Index
-        value: Option<ExprRef<'a>>,  // Value passing (nullable)
+        names: Vec<String>,          // List of target labels
+        default: String,             // Default label
+        condition: ExpressionId,     // Index
+        value: Option<ExpressionId>, // Value passing (nullable)
     },
     CallIndirect {
         table: TableId,
-        target: ExprRef<'a>, // Function index
-        operands: BumpVec<'a, ExprRef<'a>>,
+        target: ExpressionId, // Function index
+        operands: Vec<ExpressionId>,
         type_id: TypeId, // Signature ID
     },
     MemoryGrow {
         memory: MemoryId,
-        delta: ExprRef<'a>,
+        delta: ExpressionId,
     },
     MemorySize {
         memory: MemoryId,
@@ -158,36 +123,36 @@ pub enum ExpressionKind<'a> {
         op: crate::ir::ops::AtomicOp,
         bytes: u32,
         offset: u32,
-        ptr: ExprRef<'a>,
-        value: ExprRef<'a>,
+        ptr: ExpressionId,
+        value: ExpressionId,
     },
     AtomicCmpxchg {
         memory: MemoryId,
         bytes: u32,
         offset: u32,
-        ptr: ExprRef<'a>,
-        expected: ExprRef<'a>,
-        replacement: ExprRef<'a>,
+        ptr: ExpressionId,
+        expected: ExpressionId,
+        replacement: ExpressionId,
     },
     AtomicWait {
         memory: MemoryId,
-        ptr: ExprRef<'a>,
-        expected: ExprRef<'a>,
-        timeout: ExprRef<'a>,
+        ptr: ExpressionId,
+        expected: ExpressionId,
+        timeout: ExpressionId,
         expected_type: Type,
     },
     AtomicNotify {
         memory: MemoryId,
-        ptr: ExprRef<'a>,
-        count: ExprRef<'a>,
+        ptr: ExpressionId,
+        count: ExpressionId,
     },
     AtomicFence,
     // Tuple operations
     TupleMake {
-        operands: BumpVec<'a, ExprRef<'a>>,
+        operands: Vec<ExpressionId>,
     },
     TupleExtract {
-        tuple: ExprRef<'a>,
+        tuple: ExpressionId,
         index: u32,
     },
     // Reference types
@@ -195,55 +160,55 @@ pub enum ExpressionKind<'a> {
         type_: Type,
     },
     RefIsNull {
-        value: ExprRef<'a>,
+        value: ExpressionId,
     },
     RefFunc {
         func: FuncId,
     },
     RefEq {
-        left: ExprRef<'a>,
-        right: ExprRef<'a>,
+        left: ExpressionId,
+        right: ExpressionId,
     },
     RefAs {
         op: crate::ir::ops::RefAsOp,
-        value: ExprRef<'a>,
+        value: ExpressionId,
     },
     TableGet {
         table: TableId,
-        index: ExprRef<'a>,
+        index: ExpressionId,
     },
     TableSet {
         table: TableId,
-        index: ExprRef<'a>,
-        value: ExprRef<'a>,
+        index: ExpressionId,
+        value: ExpressionId,
     },
     TableSize {
         table: TableId,
     },
     TableGrow {
         table: TableId,
-        value: ExprRef<'a>,
-        delta: ExprRef<'a>,
+        value: ExpressionId,
+        delta: ExpressionId,
     },
     TableFill {
         table: TableId,
-        dest: ExprRef<'a>,
-        value: ExprRef<'a>,
-        size: ExprRef<'a>,
+        dest: ExpressionId,
+        value: ExpressionId,
+        size: ExpressionId,
     },
     TableCopy {
         dest_table: TableId,
         src_table: TableId,
-        dest: ExprRef<'a>,
-        src: ExprRef<'a>,
-        size: ExprRef<'a>,
+        dest: ExpressionId,
+        src: ExpressionId,
+        size: ExpressionId,
     },
     TableInit {
         table: TableId,
         segment: ElementId,
-        dest: ExprRef<'a>,
-        offset: ExprRef<'a>,
-        size: ExprRef<'a>,
+        dest: ExpressionId,
+        offset: ExpressionId,
+        size: ExpressionId,
     },
     ElemDrop {
         segment: ElementId,
@@ -251,9 +216,9 @@ pub enum ExpressionKind<'a> {
     MemoryInit {
         memory: MemoryId,
         segment: DataId,
-        dest: ExprRef<'a>,
-        offset: ExprRef<'a>,
-        size: ExprRef<'a>,
+        dest: ExpressionId,
+        offset: ExpressionId,
+        size: ExpressionId,
     },
     DataDrop {
         segment: DataId,
@@ -261,58 +226,58 @@ pub enum ExpressionKind<'a> {
     MemoryCopy {
         dest_memory: MemoryId,
         src_memory: MemoryId,
-        dest: ExprRef<'a>,
-        src: ExprRef<'a>,
-        size: ExprRef<'a>,
+        dest: ExpressionId,
+        src: ExpressionId,
+        size: ExpressionId,
     },
     MemoryFill {
         memory: MemoryId,
-        dest: ExprRef<'a>,
-        value: ExprRef<'a>,
-        size: ExprRef<'a>,
+        dest: ExpressionId,
+        value: ExpressionId,
+        size: ExpressionId,
     },
     Pop {
         type_: Type,
     },
     I31New {
-        value: ExprRef<'a>,
+        value: ExpressionId,
     },
     I31Get {
-        i31: ExprRef<'a>,
+        i31: ExpressionId,
         signed: bool,
     },
     SIMDExtract {
         op: crate::ir::ops::SIMDExtractOp,
-        vec: ExprRef<'a>,
+        vec: ExpressionId,
         index: u8,
     },
     SIMDReplace {
         op: crate::ir::ops::SIMDReplaceOp,
-        vec: ExprRef<'a>,
+        vec: ExpressionId,
         index: u8,
-        value: ExprRef<'a>,
+        value: ExpressionId,
     },
     SIMDShuffle {
-        left: ExprRef<'a>,
-        right: ExprRef<'a>,
+        left: ExpressionId,
+        right: ExpressionId,
         mask: [u8; 16],
     },
     SIMDTernary {
         op: crate::ir::ops::SIMDTernaryOp,
-        a: ExprRef<'a>,
-        b: ExprRef<'a>,
-        c: ExprRef<'a>,
+        a: ExpressionId,
+        b: ExpressionId,
+        c: ExpressionId,
     },
     SIMDShift {
         op: crate::ir::ops::SIMDShiftOp,
-        vec: ExprRef<'a>,
-        shift: ExprRef<'a>,
+        vec: ExpressionId,
+        shift: ExpressionId,
     },
     SIMDLoad {
         op: crate::ir::ops::SIMDLoadOp,
         offset: u32,
         align: u32,
-        ptr: ExprRef<'a>,
+        ptr: ExpressionId,
     },
     SIMDLoadStoreLane {
         op: crate::ir::ops::SIMDLoadStoreLaneOp,
@@ -320,81 +285,95 @@ pub enum ExpressionKind<'a> {
         align: u32,
         index: u8,
         is_store: bool,
-        ptr: ExprRef<'a>,
-        vec: ExprRef<'a>,
+        ptr: ExpressionId,
+        vec: ExpressionId,
     },
     StructNew {
         type_: Type, // Heap type
-        operands: BumpVec<'a, ExprRef<'a>>,
+        operands: Vec<ExpressionId>,
     },
     StructGet {
         type_: Type, // Heap type
-        ptr: ExprRef<'a>,
+        ptr: ExpressionId,
         index: u32,
         signed: bool,
     },
     StructSet {
         type_: Type, // Heap type
-        ptr: ExprRef<'a>,
+        ptr: ExpressionId,
         index: u32,
-        value: ExprRef<'a>,
+        value: ExpressionId,
     },
     ArrayNew {
         type_: Type, // Heap type
-        size: ExprRef<'a>,
-        init: Option<ExprRef<'a>>,
+        size: ExpressionId,
+        init: Option<ExpressionId>,
     },
     ArrayGet {
         type_: Type, // Heap type
-        ptr: ExprRef<'a>,
-        index: ExprRef<'a>,
+        ptr: ExpressionId,
+        index: ExpressionId,
         signed: bool,
     },
     ArraySet {
         type_: Type, // Heap type
-        ptr: ExprRef<'a>,
-        index: ExprRef<'a>,
-        value: ExprRef<'a>,
+        ptr: ExpressionId,
+        index: ExpressionId,
+        value: ExpressionId,
     },
     ArrayLen {
-        ptr: ExprRef<'a>,
+        ptr: ExpressionId,
     },
     Try {
-        name: Option<&'a str>,
-        body: ExprRef<'a>,
-        catch_tags: BumpVec<'a, &'a str>,
-        catch_bodies: BumpVec<'a, ExprRef<'a>>,
-        delegate: Option<&'a str>,
+        name: Option<String>,
+        body: ExpressionId,
+        catch_tags: Vec<String>,
+        catch_bodies: Vec<ExpressionId>,
+        delegate: Option<String>,
     },
     Throw {
-        tag: &'a str,
-        operands: BumpVec<'a, ExprRef<'a>>,
+        tag: String,
+        operands: Vec<ExpressionId>,
     },
     Rethrow {
-        target: &'a str,
+        target: String,
     },
     RefTest {
         op: crate::ir::ops::RefTestOp,
-        value: ExprRef<'a>,
+        value: ExpressionId,
         type_: Type,
     },
     RefCast {
         op: crate::ir::ops::RefCastOp,
-        value: ExprRef<'a>,
+        value: ExpressionId,
         type_: Type,
     },
     BrOn {
-        name: &'a str,
+        name: String,
         op: crate::ir::ops::BrOnOp,
-        value: ExprRef<'a>,
+        value: ExpressionId,
         type_: Type,
     },
 }
 
-impl<'a> ExpressionKind<'a> {
+impl Expression {
+    pub fn new(kind: ExpressionKind, type_: Type) -> Self {
+        Self { kind, type_ }
+    }
+
+    pub fn alloc(
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+        kind: ExpressionKind,
+        type_: Type,
+    ) -> ExpressionId {
+        arena.alloc(Expression { type_, kind })
+    }
+}
+
+impl ExpressionKind {
     pub fn for_each_child<F>(&self, mut f: F)
     where
-        F: FnMut(ExprRef<'a>),
+        F: FnMut(ExpressionId),
     {
         match self {
             ExpressionKind::Unary { value, .. }
@@ -413,7 +392,6 @@ impl<'a> ExpressionKind<'a> {
             | ExpressionKind::I31Get { i31: value, .. }
             | ExpressionKind::TupleExtract { tuple: value, .. }
             | ExpressionKind::SIMDExtract { vec: value, .. }
-            | ExpressionKind::SIMDShift { vec: value, .. }
             | ExpressionKind::SIMDLoad { ptr: value, .. }
             | ExpressionKind::StructGet { ptr: value, .. }
             | ExpressionKind::ArrayLen { ptr: value } => {
@@ -461,12 +439,21 @@ impl<'a> ExpressionKind<'a> {
                 ptr: left,
                 index: right,
                 ..
+            }
+            | ExpressionKind::SIMDShift {
+                vec: left,
+                shift: right,
+                ..
             } => {
                 f(*left);
                 f(*right);
             }
-            ExpressionKind::TableGet { table: _, index } => {
+            ExpressionKind::TableGet { index, .. } => {
                 f(*index);
+            }
+            ExpressionKind::TableGrow { value, delta, .. } => {
+                f(*value);
+                f(*delta);
             }
             ExpressionKind::Select {
                 if_true,
@@ -506,55 +493,6 @@ impl<'a> ExpressionKind<'a> {
                 f(*ptr);
                 f(*vec);
             }
-            ExpressionKind::If {
-                condition,
-                if_true,
-                if_false,
-            } => {
-                f(*condition);
-                f(*if_true);
-                if let Some(if_false) = if_false {
-                    f(*if_false);
-                }
-            }
-            ExpressionKind::ArrayNew { size, init, .. } => {
-                f(*size);
-                if let Some(init) = init {
-                    f(*init);
-                }
-            }
-            ExpressionKind::ArraySet {
-                ptr, index, value, ..
-            } => {
-                f(*ptr);
-                f(*index);
-                f(*value);
-            }
-            ExpressionKind::Block { list, .. }
-            | ExpressionKind::TupleMake { operands: list }
-            | ExpressionKind::Call { operands: list, .. }
-            | ExpressionKind::StructNew { operands: list, .. }
-            | ExpressionKind::Throw { operands: list, .. } => {
-                for &child in list {
-                    f(child);
-                }
-            }
-            ExpressionKind::CallIndirect {
-                target, operands, ..
-            } => {
-                f(*target);
-                for &child in operands {
-                    f(child);
-                }
-            }
-            ExpressionKind::Switch {
-                condition, value, ..
-            } => {
-                f(*condition);
-                if let Some(value) = value {
-                    f(*value);
-                }
-            }
             ExpressionKind::MemoryInit {
                 dest, offset, size, ..
             }
@@ -575,236 +513,444 @@ impl<'a> ExpressionKind<'a> {
                 f(*src);
                 f(*size);
             }
-            ExpressionKind::TableFill {
+            ExpressionKind::MemoryFill {
                 dest, value, size, ..
             }
-            | ExpressionKind::MemoryFill {
+            | ExpressionKind::TableFill {
                 dest, value, size, ..
             } => {
                 f(*dest);
                 f(*value);
                 f(*size);
             }
-            ExpressionKind::TableGrow { value, delta, .. } => {
+            ExpressionKind::Block { list, .. }
+            | ExpressionKind::Call { operands: list, .. }
+            | ExpressionKind::TupleMake { operands: list }
+            | ExpressionKind::StructNew { operands: list, .. }
+            | ExpressionKind::Throw { operands: list, .. } => {
+                for id in list {
+                    f(*id);
+                }
+            }
+            ExpressionKind::CallIndirect {
+                target, operands, ..
+            } => {
+                f(*target);
+                for id in operands {
+                    f(*id);
+                }
+            }
+            ExpressionKind::If {
+                condition,
+                if_true,
+                if_false,
+                ..
+            } => {
+                f(*condition);
+                f(*if_true);
+                if let Some(f_id) = if_false {
+                    f(*f_id);
+                }
+            }
+            ExpressionKind::Loop { body, .. } => {
+                f(*body);
+            }
+            ExpressionKind::Break {
+                condition, value, ..
+            } => {
+                if let Some(c) = condition {
+                    f(*c);
+                }
+                if let Some(v) = value {
+                    f(*v);
+                }
+            }
+            ExpressionKind::Switch {
+                condition, value, ..
+            } => {
+                f(*condition);
+                if let Some(v) = value {
+                    f(*v);
+                }
+            }
+            ExpressionKind::ArrayNew { size, init, .. } => {
+                f(*size);
+                if let Some(i) = init {
+                    f(*i);
+                }
+            }
+            ExpressionKind::ArraySet {
+                ptr, index, value, ..
+            } => {
+                f(*ptr);
+                f(*index);
                 f(*value);
-                f(*delta);
             }
             ExpressionKind::Try {
                 body, catch_bodies, ..
             } => {
                 f(*body);
-                for &catch_body in catch_bodies {
-                    f(catch_body);
+                for &b in catch_bodies {
+                    f(b);
                 }
             }
-            ExpressionKind::Loop { body, .. } => {
-                f(*body);
-            }
-            ExpressionKind::Pop { .. }
-            | ExpressionKind::Const(_)
+            ExpressionKind::Const(_)
             | ExpressionKind::LocalGet { .. }
             | ExpressionKind::GlobalGet { .. }
             | ExpressionKind::Unreachable
+            | ExpressionKind::Nop
             | ExpressionKind::AtomicFence
             | ExpressionKind::RefNull { .. }
             | ExpressionKind::RefFunc { .. }
-            | ExpressionKind::TableSize { .. }
-            | ExpressionKind::MemorySize { .. }
-            | ExpressionKind::DataDrop { .. }
             | ExpressionKind::ElemDrop { .. }
-            | ExpressionKind::Nop
-            | ExpressionKind::Rethrow { .. }
-            | ExpressionKind::Break {
-                condition: None,
-                value: None,
-                ..
-            } => {}
-            ExpressionKind::Break {
-                condition, value, ..
-            } => {
-                if let Some(cond) = condition {
-                    f(*cond);
-                }
-                if let Some(val) = value {
-                    f(*val);
-                }
-            }
+            | ExpressionKind::DataDrop { .. }
+            | ExpressionKind::MemorySize { .. }
+            | ExpressionKind::TableSize { .. }
+            | ExpressionKind::Pop { .. }
+            | ExpressionKind::Rethrow { .. } => {}
         }
     }
-}
-impl<'a> Expression<'a> {
-    /// Recompute the type of the expression based on its children
-    pub fn finalize(&mut self) {
-        match &mut self.kind {
-            ExpressionKind::Block { list, .. } => {
-                if let Some(last) = list.last() {
-                    self.type_ = last.type_;
-                } else {
-                    self.type_ = Type::NONE;
+
+    pub fn for_each_child_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&mut ExpressionId),
+    {
+        match self {
+            ExpressionKind::Unary { value, .. }
+            | ExpressionKind::LocalSet { value, .. }
+            | ExpressionKind::LocalTee { value, .. }
+            | ExpressionKind::GlobalSet { value, .. }
+            | ExpressionKind::Drop { value }
+            | ExpressionKind::Load { ptr: value, .. }
+            | ExpressionKind::MemoryGrow { delta: value, .. }
+            | ExpressionKind::RefIsNull { value }
+            | ExpressionKind::RefAs { value, .. }
+            | ExpressionKind::RefTest { value, .. }
+            | ExpressionKind::RefCast { value, .. }
+            | ExpressionKind::BrOn { value, .. }
+            | ExpressionKind::I31New { value }
+            | ExpressionKind::I31Get { i31: value, .. }
+            | ExpressionKind::TupleExtract { tuple: value, .. }
+            | ExpressionKind::SIMDExtract { vec: value, .. }
+            | ExpressionKind::SIMDLoad { ptr: value, .. }
+            | ExpressionKind::StructGet { ptr: value, .. }
+            | ExpressionKind::ArrayLen { ptr: value } => {
+                f(value);
+            }
+            ExpressionKind::Return { value } => {
+                if let Some(v) = value {
+                    f(v);
+                }
+            }
+            ExpressionKind::Binary { left, right, .. }
+            | ExpressionKind::Store {
+                ptr: left,
+                value: right,
+                ..
+            }
+            | ExpressionKind::AtomicRMW {
+                ptr: left,
+                value: right,
+                ..
+            }
+            | ExpressionKind::TableSet {
+                index: left,
+                value: right,
+                ..
+            }
+            | ExpressionKind::RefEq { left, right }
+            | ExpressionKind::AtomicNotify {
+                ptr: left,
+                count: right,
+                ..
+            }
+            | ExpressionKind::SIMDReplace {
+                vec: left,
+                value: right,
+                ..
+            }
+            | ExpressionKind::SIMDShuffle { left, right, .. }
+            | ExpressionKind::StructSet {
+                ptr: left,
+                value: right,
+                ..
+            }
+            | ExpressionKind::ArrayGet {
+                ptr: left,
+                index: right,
+                ..
+            }
+            | ExpressionKind::SIMDShift {
+                vec: left,
+                shift: right,
+                ..
+            } => {
+                f(left);
+                f(right);
+            }
+            ExpressionKind::TableGet { index, .. } => {
+                f(index);
+            }
+            ExpressionKind::TableGrow { value, delta, .. } => {
+                f(value);
+                f(delta);
+            }
+            ExpressionKind::Select {
+                if_true,
+                if_false,
+                condition,
+            } => {
+                f(if_true);
+                f(if_false);
+                f(condition);
+            }
+            ExpressionKind::AtomicCmpxchg {
+                ptr,
+                expected,
+                replacement,
+                ..
+            } => {
+                f(ptr);
+                f(expected);
+                f(replacement);
+            }
+            ExpressionKind::AtomicWait {
+                ptr,
+                expected,
+                timeout,
+                ..
+            } => {
+                f(ptr);
+                f(expected);
+                f(timeout);
+            }
+            ExpressionKind::SIMDTernary { a, b, c, .. } => {
+                f(a);
+                f(b);
+                f(c);
+            }
+            ExpressionKind::SIMDLoadStoreLane { ptr, vec, .. } => {
+                f(ptr);
+                f(vec);
+            }
+            ExpressionKind::MemoryInit {
+                dest, offset, size, ..
+            }
+            | ExpressionKind::TableInit {
+                dest, offset, size, ..
+            } => {
+                f(dest);
+                f(offset);
+                f(size);
+            }
+            ExpressionKind::MemoryCopy {
+                dest, src, size, ..
+            }
+            | ExpressionKind::TableCopy {
+                dest, src, size, ..
+            } => {
+                f(dest);
+                f(src);
+                f(size);
+            }
+            ExpressionKind::MemoryFill {
+                dest, value, size, ..
+            }
+            | ExpressionKind::TableFill {
+                dest, value, size, ..
+            } => {
+                f(dest);
+                f(value);
+                f(size);
+            }
+            ExpressionKind::Block { list, .. }
+            | ExpressionKind::Call { operands: list, .. }
+            | ExpressionKind::TupleMake { operands: list }
+            | ExpressionKind::StructNew { operands: list, .. }
+            | ExpressionKind::Throw { operands: list, .. } => {
+                for id in list {
+                    f(id);
+                }
+            }
+            ExpressionKind::CallIndirect {
+                target, operands, ..
+            } => {
+                f(target);
+                for id in operands {
+                    f(id);
                 }
             }
             ExpressionKind::If {
-                if_true, if_false, ..
+                condition,
+                if_true,
+                if_false,
+                ..
             } => {
-                if let Some(false_branch) = if_false {
-                    if if_true.type_ == false_branch.type_ {
-                        self.type_ = if_true.type_;
-                    } else if if_true.type_ == Type::UNREACHABLE {
-                        self.type_ = false_branch.type_;
-                    } else if false_branch.type_ == Type::UNREACHABLE {
-                        self.type_ = if_true.type_;
-                    } else {
-                        self.type_ = Type::NONE;
-                    }
-                } else {
-                    self.type_ = Type::NONE;
+                f(condition);
+                f(if_true);
+                if let Some(v) = if_false {
+                    f(v);
                 }
             }
             ExpressionKind::Loop { body, .. } => {
-                self.type_ = body.type_;
+                f(body);
             }
-            ExpressionKind::LocalSet { .. }
-            | ExpressionKind::GlobalSet { .. }
-            | ExpressionKind::Store { .. }
-            | ExpressionKind::Drop { .. }
-            | ExpressionKind::Nop => {
-                self.type_ = Type::NONE;
+            ExpressionKind::Break {
+                condition, value, ..
+            } => {
+                if let Some(v) = condition {
+                    f(v);
+                }
+                if let Some(v) = value {
+                    f(v);
+                }
             }
-            ExpressionKind::Const(lit) => {
-                self.type_ = lit.get_type();
+            ExpressionKind::Switch {
+                condition, value, ..
+            } => {
+                f(condition);
+                if let Some(v) = value {
+                    f(v);
+                }
             }
-            ExpressionKind::LocalTee { value, .. } => {
-                self.type_ = value.type_;
+            ExpressionKind::ArrayNew { size, init, .. } => {
+                f(size);
+                if let Some(i) = init {
+                    f(i);
+                }
             }
-            ExpressionKind::LocalGet { .. } | ExpressionKind::GlobalGet { .. } => {
-                // type_ should already be correct, or set at creation
+            ExpressionKind::ArraySet {
+                ptr, index, value, ..
+            } => {
+                f(ptr);
+                f(index);
+                f(value);
             }
-            ExpressionKind::Return { .. } | ExpressionKind::Unreachable => {
-                self.type_ = Type::UNREACHABLE;
+            ExpressionKind::Try {
+                body, catch_bodies, ..
+            } => {
+                f(body);
+                for b in catch_bodies {
+                    f(b);
+                }
             }
-            _ => {
-                // For other expressions, keep the current type or refine if possible
-            }
+            _ => {}
         }
-    }
-}
-
-impl<'a> Expression<'a> {
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new(bump: &'a Bump, kind: ExpressionKind<'a>, type_: Type) -> ExprRef<'a> {
-        ExprRef(NonNull::from(bump.alloc(Expression { kind, type_ })))
-    }
-
-    /// Create a new nop expression
-    pub fn nop(bump: &'a Bump) -> ExprRef<'a> {
-        ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::Nop,
-            type_: Type::NONE,
-        }))
-    }
-
-    /// Create a new const expression
-    pub fn const_expr(bump: &'a Bump, lit: Literal, ty: Type) -> ExprRef<'a> {
-        ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::Const(lit),
-            type_: ty,
-        }))
-    }
-
-    /// Create a new block
-    pub fn block(
-        bump: &'a Bump,
-        name: Option<&'a str>,
-        list: BumpVec<'a, ExprRef<'a>>,
-        ty: Type,
-    ) -> ExprRef<'a> {
-        ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::Block { name, list },
-            type_: ty,
-        }))
-    }
-
-    /// Create local.set
-    pub fn local_set(bump: &'a Bump, id: LocalId, value: ExprRef<'a>) -> ExprRef<'a> {
-        ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::LocalSet { id, value },
-            type_: Type::NONE,
-        }))
-    }
-
-    /// Create local.get
-    pub fn local_get(bump: &'a Bump, id: LocalId, ty: Type) -> ExprRef<'a> {
-        ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::LocalGet { id },
-            type_: ty,
-        }))
-    }
-
-    /// Create local.tee
-    pub fn local_tee(bump: &'a Bump, id: LocalId, value: ExprRef<'a>, ty: Type) -> ExprRef<'a> {
-        ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::LocalTee { id, value },
-            type_: ty,
-        }))
     }
 }
 
 // Helpers for construction
-#[derive(Clone, Copy)]
+
+pub trait LabelName {
+    fn to_option_string(self) -> Option<String>;
+}
+
+impl LabelName for String {
+    fn to_option_string(self) -> Option<String> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(self)
+        }
+    }
+}
+
+impl<'a> LabelName for &'a str {
+    fn to_option_string(self) -> Option<String> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(self.to_string())
+        }
+    }
+}
+
+impl LabelName for Option<String> {
+    fn to_option_string(self) -> Option<String> {
+        self.and_then(|s| if s.is_empty() { None } else { Some(s) })
+    }
+}
+
+impl<'a> LabelName for Option<&'a str> {
+    fn to_option_string(self) -> Option<String> {
+        self.and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+    }
+}
+
 pub struct IrBuilder<'a> {
-    pub bump: &'a Bump,
+    pub arena: &'a mut IdArena<ExpressionMarker, Expression>,
 }
 
 impl<'a> IrBuilder<'a> {
-    pub fn new(bump: &'a Bump) -> Self {
-        Self { bump }
+    pub fn new(arena: &'a mut IdArena<ExpressionMarker, Expression>) -> Self {
+        Self { arena }
     }
 
-    pub fn nop(&self) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::Nop, Type::NONE)
+    pub fn nop(&mut self) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::Nop, Type::NONE)
     }
 
-    pub fn const_(&self, value: Literal) -> ExprRef<'a> {
+    pub fn const_(&mut self, value: Literal) -> ExpressionId {
         let type_ = value.get_type();
-        Expression::new(self.bump, ExpressionKind::Const(value), type_)
+        Expression::alloc(self.arena, ExpressionKind::Const(value), type_)
     }
 
     pub fn block(
-        &self,
-        name: Option<&'a str>,
-        list: BumpVec<'a, ExprRef<'a>>,
-        type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::Block { name, list }, type_)
+        &mut self,
+        name: impl LabelName,
+        list: Vec<ExpressionId>,
+        type_: impl Into<BlockType>,
+    ) -> ExpressionId {
+        let name = name.to_option_string();
+        let type_ = type_.into();
+        let actual_type = match type_ {
+            BlockType::Empty => Type::NONE,
+            BlockType::Type(t) => t,
+        };
+        Expression::alloc(
+            self.arena,
+            ExpressionKind::Block { name, list },
+            actual_type,
+        )
     }
 
-    pub fn unary(&self, op: UnaryOp, value: ExprRef<'a>, type_: Type) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::Unary { op, value }, type_)
+    pub fn unary(&mut self, op: UnaryOp, value: ExpressionId, type_: Type) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::Unary { op, value }, type_)
     }
 
     pub fn binary(
-        &self,
+        &mut self,
         op: BinaryOp,
-        left: ExprRef<'a>,
-        right: ExprRef<'a>,
+        left: ExpressionId,
+        right: ExpressionId,
         type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::Binary { op, left, right }, type_)
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
+            ExpressionKind::Binary { op, left, right },
+            type_,
+        )
     }
 
-    pub fn drop(&self, value: ExprRef<'a>) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::Drop { value }, Type::NONE)
+    pub fn drop(&mut self, value: ExpressionId) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::Drop { value }, Type::NONE)
     }
 
     pub fn call(
-        &self,
+        &mut self,
         target: impl Into<FuncId>,
-        operands: BumpVec<'a, ExprRef<'a>>,
+        operands: Vec<ExpressionId>,
         type_: Type,
         is_return: bool,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::Call {
                 target: target.into(),
                 operands,
@@ -815,15 +961,15 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn call_indirect(
-        &self,
+        &mut self,
         table: impl Into<TableId>,
-        target: ExprRef<'a>,
-        operands: BumpVec<'a, ExprRef<'a>>,
+        target: ExpressionId,
+        operands: Vec<ExpressionId>,
         type_id: TypeId,
         type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::CallIndirect {
                 table: table.into(),
                 target,
@@ -834,13 +980,17 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn local_get(&self, id: impl Into<LocalId>, type_: Type) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::LocalGet { id: id.into() }, type_)
+    pub fn local_get(&mut self, id: impl Into<LocalId>, type_: Type) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
+            ExpressionKind::LocalGet { id: id.into() },
+            type_,
+        )
     }
 
-    pub fn local_set(&self, id: impl Into<LocalId>, value: ExprRef<'a>) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    pub fn local_set(&mut self, id: impl Into<LocalId>, value: ExpressionId) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::LocalSet {
                 id: id.into(),
                 value,
@@ -850,13 +1000,13 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn local_tee(
-        &self,
+        &mut self,
         id: impl Into<LocalId>,
-        value: ExprRef<'a>,
+        value: ExpressionId,
         type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::LocalTee {
                 id: id.into(),
                 value,
@@ -865,17 +1015,17 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn global_get(&self, id: impl Into<GlobalId>, type_: Type) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    pub fn global_get(&mut self, id: impl Into<GlobalId>, type_: Type) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::GlobalGet { id: id.into() },
             type_,
         )
     }
 
-    pub fn global_set(&self, id: impl Into<GlobalId>, value: ExprRef<'a>) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    pub fn global_set(&mut self, id: impl Into<GlobalId>, value: ExpressionId) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::GlobalSet {
                 id: id.into(),
                 value,
@@ -885,14 +1035,14 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn switch(
-        &self,
-        names: BumpVec<'a, &'a str>,
-        default: &'a str,
-        condition: ExprRef<'a>,
-        value: Option<ExprRef<'a>>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        &mut self,
+        names: Vec<String>,
+        default: String,
+        condition: ExpressionId,
+        value: Option<ExpressionId>,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::Switch {
                 names,
                 default,
@@ -904,58 +1054,84 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn if_(
-        &self,
-        condition: ExprRef<'a>,
-        if_true: ExprRef<'a>,
-        if_false: Option<ExprRef<'a>>,
-        type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        &mut self,
+        name: impl LabelName,
+        condition: ExpressionId,
+        if_true: ExpressionId,
+        if_false: Option<ExpressionId>,
+        type_: impl Into<BlockType>,
+    ) -> ExpressionId {
+        let name = name.to_option_string();
+        let type_ = type_.into();
+        let actual_type = match type_ {
+            BlockType::Empty => Type::NONE,
+            BlockType::Type(t) => t,
+        };
+        Expression::alloc(
+            self.arena,
             ExpressionKind::If {
+                name,
                 condition,
                 if_true,
                 if_false,
             },
-            type_,
+            actual_type,
         )
     }
 
-    pub fn loop_(&self, name: Option<&'a str>, body: ExprRef<'a>, type_: Type) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::Loop { name, body }, type_)
+    pub fn loop_(
+        &mut self,
+        name: impl LabelName,
+        body: ExpressionId,
+        type_: impl Into<BlockType>,
+    ) -> ExpressionId {
+        let name = name.to_option_string();
+        let type_ = type_.into();
+        let actual_type = match type_ {
+            BlockType::Empty => Type::NONE,
+            BlockType::Type(t) => t,
+        };
+        Expression::alloc(self.arena, ExpressionKind::Loop { name, body }, actual_type)
     }
 
     pub fn break_(
-        &self,
-        name: &'a str,
-        condition: Option<ExprRef<'a>>,
-        value: Option<ExprRef<'a>>,
-        type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        &mut self,
+        name: impl LabelName,
+        condition: Option<ExpressionId>,
+        value: Option<ExpressionId>,
+        type_: impl Into<BlockType>,
+    ) -> ExpressionId {
+        let name = name.to_option_string();
+        let name = name.unwrap_or_default();
+        let type_ = type_.into();
+        let actual_type = match type_ {
+            BlockType::Empty => Type::NONE,
+            BlockType::Type(t) => t,
+        };
+        Expression::alloc(
+            self.arena,
             ExpressionKind::Break {
                 name,
                 condition,
                 value,
             },
-            type_,
+            actual_type,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn load(
-        &self,
+        &mut self,
         memory: impl Into<MemoryId>,
         bytes: u32,
         signed: bool,
         offset: u32,
         align: u32,
-        ptr: ExprRef<'a>,
+        ptr: ExpressionId,
         type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::Load {
                 memory: memory.into(),
                 bytes,
@@ -969,16 +1145,16 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn store(
-        &self,
+        &mut self,
         memory: impl Into<MemoryId>,
         bytes: u32,
         offset: u32,
         align: u32,
-        ptr: ExprRef<'a>,
-        value: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        ptr: ExpressionId,
+        value: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::Store {
                 memory: memory.into(),
                 bytes,
@@ -991,27 +1167,37 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn return_(&self, value: Option<ExprRef<'a>>) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    pub fn return_(&mut self, value: Option<ExpressionId>) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::Return { value },
             Type::UNREACHABLE,
         )
     }
 
-    pub fn unreachable(&self) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::Unreachable, Type::UNREACHABLE)
+    pub fn unreachable(&mut self) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::Unreachable, Type::UNREACHABLE)
+    }
+
+    pub fn memory_size(&mut self, memory: impl Into<MemoryId>) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
+            ExpressionKind::MemorySize {
+                memory: memory.into(),
+            },
+            Type::I32,
+        )
     }
 
     pub fn select(
-        &self,
-        condition: ExprRef<'a>,
-        if_true: ExprRef<'a>,
-        if_false: ExprRef<'a>,
+        &mut self,
+        condition: ExpressionId,
+        if_true: ExpressionId,
+        if_false: ExpressionId,
         type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::Select {
                 condition,
                 if_true,
@@ -1021,19 +1207,13 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn memory_size(&self, memory: impl Into<MemoryId>) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
-            ExpressionKind::MemorySize {
-                memory: memory.into(),
-            },
-            Type::I32,
-        )
-    }
-
-    pub fn memory_grow(&self, memory: impl Into<MemoryId>, delta: ExprRef<'a>) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    pub fn memory_grow(
+        &mut self,
+        memory: impl Into<MemoryId>,
+        delta: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::MemoryGrow {
                 memory: memory.into(),
                 delta,
@@ -1044,17 +1224,17 @@ impl<'a> IrBuilder<'a> {
 
     #[allow(clippy::too_many_arguments)]
     pub fn atomic_rmw(
-        &self,
+        &mut self,
         memory: MemoryId,
         op: crate::ir::ops::AtomicOp,
         bytes: u32,
         offset: u32,
-        ptr: ExprRef<'a>,
-        value: ExprRef<'a>,
+        ptr: ExpressionId,
+        value: ExpressionId,
         type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::AtomicRMW {
                 memory,
                 op,
@@ -1069,17 +1249,17 @@ impl<'a> IrBuilder<'a> {
 
     #[allow(clippy::too_many_arguments)]
     pub fn atomic_cmpxchg(
-        &self,
+        &mut self,
         memory: MemoryId,
         bytes: u32,
         offset: u32,
-        ptr: ExprRef<'a>,
-        expected: ExprRef<'a>,
-        replacement: ExprRef<'a>,
+        ptr: ExpressionId,
+        expected: ExpressionId,
+        replacement: ExpressionId,
         type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::AtomicCmpxchg {
                 memory,
                 bytes,
@@ -1093,15 +1273,15 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn atomic_wait(
-        &self,
+        &mut self,
         memory: MemoryId,
-        ptr: ExprRef<'a>,
-        expected: ExprRef<'a>,
-        timeout: ExprRef<'a>,
+        ptr: ExpressionId,
+        expected: ExpressionId,
+        timeout: ExpressionId,
         expected_type: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::AtomicWait {
                 memory,
                 ptr,
@@ -1114,32 +1294,32 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn atomic_notify(
-        &self,
+        &mut self,
         memory: MemoryId,
-        ptr: ExprRef<'a>,
-        count: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        ptr: ExpressionId,
+        count: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::AtomicNotify { memory, ptr, count },
             Type::I32,
         )
     }
 
-    pub fn atomic_fence(&self) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::AtomicFence, Type::NONE)
+    pub fn atomic_fence(&mut self) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::AtomicFence, Type::NONE)
     }
 
     pub fn memory_init(
-        &self,
+        &mut self,
         memory: MemoryId,
         segment: DataId,
-        dest: ExprRef<'a>,
-        offset: ExprRef<'a>,
-        size: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        dest: ExpressionId,
+        offset: ExpressionId,
+        size: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::MemoryInit {
                 memory,
                 segment,
@@ -1151,20 +1331,20 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn data_drop(&self, segment: DataId) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::DataDrop { segment }, Type::NONE)
+    pub fn data_drop(&mut self, segment: DataId) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::DataDrop { segment }, Type::NONE)
     }
 
     pub fn memory_copy(
-        &self,
+        &mut self,
         dest_memory: MemoryId,
         src_memory: MemoryId,
-        dest: ExprRef<'a>,
-        src: ExprRef<'a>,
-        size: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        dest: ExpressionId,
+        src: ExpressionId,
+        size: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::MemoryCopy {
                 dest_memory,
                 src_memory,
@@ -1177,14 +1357,14 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn memory_fill(
-        &self,
+        &mut self,
         memory: MemoryId,
-        dest: ExprRef<'a>,
-        value: ExprRef<'a>,
-        size: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        dest: ExpressionId,
+        value: ExpressionId,
+        size: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::MemoryFill {
                 memory,
                 dest,
@@ -1195,13 +1375,18 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn table_get(&self, table: TableId, index: ExprRef<'a>, type_: Type) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::TableGet { table, index }, type_)
+    pub fn table_get(&mut self, table: TableId, index: ExpressionId, type_: Type) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::TableGet { table, index }, type_)
     }
 
-    pub fn table_set(&self, table: TableId, index: ExprRef<'a>, value: ExprRef<'a>) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    pub fn table_set(
+        &mut self,
+        table: TableId,
+        index: ExpressionId,
+        value: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::TableSet {
                 table,
                 index,
@@ -1211,18 +1396,18 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn table_size(&self, table: TableId) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::TableSize { table }, Type::I32)
+    pub fn table_size(&mut self, table: TableId) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::TableSize { table }, Type::I32)
     }
 
     pub fn table_grow(
-        &self,
+        &mut self,
         table: TableId,
-        delta: ExprRef<'a>,
-        value: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        delta: ExpressionId,
+        value: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::TableGrow {
                 table,
                 delta,
@@ -1233,14 +1418,14 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn table_fill(
-        &self,
+        &mut self,
         table: TableId,
-        dest: ExprRef<'a>,
-        value: ExprRef<'a>,
-        size: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        dest: ExpressionId,
+        value: ExpressionId,
+        size: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::TableFill {
                 table,
                 dest,
@@ -1252,15 +1437,15 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn table_copy(
-        &self,
+        &mut self,
         dest_table: TableId,
         src_table: TableId,
-        dest: ExprRef<'a>,
-        src: ExprRef<'a>,
-        size: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        dest: ExpressionId,
+        src: ExpressionId,
+        size: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::TableCopy {
                 dest_table,
                 src_table,
@@ -1273,15 +1458,15 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn table_init(
-        &self,
+        &mut self,
         table: TableId,
         segment: ElementId,
-        dest: ExprRef<'a>,
-        offset: ExprRef<'a>,
-        size: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        dest: ExpressionId,
+        offset: ExpressionId,
+        size: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::TableInit {
                 table,
                 segment,
@@ -1293,33 +1478,33 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn elem_drop(&self, segment: ElementId) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::ElemDrop { segment }, Type::NONE)
+    pub fn elem_drop(&mut self, segment: ElementId) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::ElemDrop { segment }, Type::NONE)
     }
 
     pub fn simd_extract(
-        &self,
+        &mut self,
         op: crate::ir::ops::SIMDExtractOp,
-        vec: ExprRef<'a>,
+        vec: ExpressionId,
         index: u8,
         type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::SIMDExtract { op, vec, index },
             type_,
         )
     }
 
     pub fn simd_replace(
-        &self,
+        &mut self,
         op: crate::ir::ops::SIMDReplaceOp,
-        vec: ExprRef<'a>,
+        vec: ExpressionId,
         index: u8,
-        value: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        value: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::SIMDReplace {
                 op,
                 vec,
@@ -1331,54 +1516,54 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn simd_shuffle(
-        &self,
-        left: ExprRef<'a>,
-        right: ExprRef<'a>,
+        &mut self,
+        left: ExpressionId,
+        right: ExpressionId,
         mask: [u8; 16],
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::SIMDShuffle { left, right, mask },
             Type::V128,
         )
     }
 
     pub fn simd_ternary(
-        &self,
+        &mut self,
         op: crate::ir::ops::SIMDTernaryOp,
-        a: ExprRef<'a>,
-        b: ExprRef<'a>,
-        c: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        a: ExpressionId,
+        b: ExpressionId,
+        c: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::SIMDTernary { op, a, b, c },
             Type::V128,
         )
     }
 
     pub fn simd_shift(
-        &self,
+        &mut self,
         op: crate::ir::ops::SIMDShiftOp,
-        vec: ExprRef<'a>,
-        shift: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        vec: ExpressionId,
+        shift: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::SIMDShift { op, vec, shift },
             Type::V128,
         )
     }
 
     pub fn simd_load(
-        &self,
+        &mut self,
         op: crate::ir::ops::SIMDLoadOp,
         offset: u32,
         align: u32,
-        ptr: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        ptr: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::SIMDLoad {
                 op,
                 offset,
@@ -1389,48 +1574,52 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn ref_null(&self, type_: Type) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::RefNull { type_ }, type_)
+    pub fn ref_null(&mut self, type_: Type) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::RefNull { type_ }, type_)
     }
 
-    pub fn ref_is_null(&self, value: ExprRef<'a>) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::RefIsNull { value }, Type::I32)
+    pub fn ref_is_null(&mut self, value: ExpressionId) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::RefIsNull { value }, Type::I32)
     }
 
-    pub fn ref_func(&self, func: FuncId) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::RefFunc { func }, Type::FUNCREF)
+    pub fn ref_func(&mut self, func: FuncId) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::RefFunc { func }, Type::FUNCREF)
     }
 
-    pub fn ref_eq(&self, left: ExprRef<'a>, right: ExprRef<'a>) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::RefEq { left, right }, Type::I32)
+    pub fn ref_eq(&mut self, left: ExpressionId, right: ExpressionId) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::RefEq { left, right }, Type::I32)
     }
 
-    pub fn i31_new(&self, value: ExprRef<'a>) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::I31New { value }, Type::I31REF)
+    pub fn i31_new(&mut self, value: ExpressionId) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::I31New { value }, Type::I31REF)
     }
 
-    pub fn i31_get(&self, i31: ExprRef<'a>, signed: bool) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::I31Get { i31, signed }, Type::I32)
+    pub fn i31_get(&mut self, i31: ExpressionId, signed: bool) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
+            ExpressionKind::I31Get { i31, signed },
+            Type::I32,
+        )
     }
 
-    pub fn struct_new(&self, type_: Type, operands: BumpVec<'a, ExprRef<'a>>) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    pub fn struct_new(&mut self, type_: Type, operands: Vec<ExpressionId>) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::StructNew { type_, operands },
             type_,
         )
     }
 
     pub fn struct_get(
-        &self,
+        &mut self,
         type_: Type,
-        ptr: ExprRef<'a>,
+        ptr: ExpressionId,
         index: u32,
         signed: bool,
         field_type: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::StructGet {
                 type_,
                 ptr,
@@ -1442,14 +1631,14 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn struct_set(
-        &self,
+        &mut self,
         type_: Type,
-        ptr: ExprRef<'a>,
+        ptr: ExpressionId,
         index: u32,
-        value: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        value: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::StructSet {
                 type_,
                 ptr,
@@ -1461,28 +1650,28 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn array_new(
-        &self,
+        &mut self,
         type_: Type,
-        size: ExprRef<'a>,
-        init: Option<ExprRef<'a>>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        size: ExpressionId,
+        init: Option<ExpressionId>,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::ArrayNew { type_, size, init },
             type_,
         )
     }
 
     pub fn array_get(
-        &self,
+        &mut self,
         type_: Type,
-        ptr: ExprRef<'a>,
-        index: ExprRef<'a>,
+        ptr: ExpressionId,
+        index: ExpressionId,
         signed: bool,
         field_type: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::ArrayGet {
                 type_,
                 ptr,
@@ -1494,14 +1683,14 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn array_set(
-        &self,
+        &mut self,
         type_: Type,
-        ptr: ExprRef<'a>,
-        index: ExprRef<'a>,
-        value: ExprRef<'a>,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+        ptr: ExpressionId,
+        index: ExpressionId,
+        value: ExpressionId,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::ArraySet {
                 type_,
                 ptr,
@@ -1512,45 +1701,45 @@ impl<'a> IrBuilder<'a> {
         )
     }
 
-    pub fn array_len(&self, ptr: ExprRef<'a>) -> ExprRef<'a> {
-        Expression::new(self.bump, ExpressionKind::ArrayLen { ptr }, Type::I32)
+    pub fn array_len(&mut self, ptr: ExpressionId) -> ExpressionId {
+        Expression::alloc(self.arena, ExpressionKind::ArrayLen { ptr }, Type::I32)
     }
 
     pub fn ref_test(
-        &self,
+        &mut self,
         op: crate::ir::ops::RefTestOp,
-        value: ExprRef<'a>,
+        value: ExpressionId,
         type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::RefTest { op, value, type_ },
             Type::I32,
         )
     }
 
     pub fn ref_cast(
-        &self,
+        &mut self,
         op: crate::ir::ops::RefCastOp,
-        value: ExprRef<'a>,
+        value: ExpressionId,
         type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::RefCast { op, value, type_ },
             type_,
         )
     }
 
     pub fn br_on(
-        &self,
-        name: &'a str,
+        &mut self,
+        name: String,
         op: crate::ir::ops::BrOnOp,
-        value: ExprRef<'a>,
+        value: ExpressionId,
         type_: Type,
-    ) -> ExprRef<'a> {
-        Expression::new(
-            self.bump,
+    ) -> ExpressionId {
+        Expression::alloc(
+            self.arena,
             ExpressionKind::BrOn {
                 name,
                 op,
@@ -1562,94 +1751,95 @@ impl<'a> IrBuilder<'a> {
     }
 
     /// Deep clone an expression tree
-    pub fn deep_clone(&self, expr: ExprRef<'a>) -> ExprRef<'a> {
-        let kind = match &expr.kind {
-            ExpressionKind::Block { name, list } => {
-                let mut new_list = BumpVec::with_capacity_in(list.len(), self.bump);
-                for child in list.iter() {
-                    new_list.push(self.deep_clone(*child));
-                }
-                ExpressionKind::Block {
-                    name: *name,
-                    list: new_list,
-                }
-            }
+    pub fn deep_clone(&mut self, id: ExpressionId) -> ExpressionId {
+        let (kind, type_) = {
+            let expr = &self.arena[id];
+            (expr.kind.clone(), expr.type_)
+        };
+        let cloned_kind = kind.clone_in_arena(self);
+        Expression::alloc(self.arena, cloned_kind, type_)
+    }
+}
+
+impl ExpressionKind {
+    pub fn clone_in_arena(&self, builder: &mut IrBuilder) -> ExpressionKind {
+        match self {
+            ExpressionKind::Block { name, list } => ExpressionKind::Block {
+                name: name.clone(),
+                list: list.iter().map(|&c| builder.deep_clone(c)).collect(),
+            },
             ExpressionKind::Const(lit) => ExpressionKind::Const(*lit),
             ExpressionKind::Unary { op, value } => ExpressionKind::Unary {
                 op: *op,
-                value: self.deep_clone(*value),
+                value: builder.deep_clone(*value),
             },
             ExpressionKind::Binary { op, left, right } => ExpressionKind::Binary {
                 op: *op,
-                left: self.deep_clone(*left),
-                right: self.deep_clone(*right),
+                left: builder.deep_clone(*left),
+                right: builder.deep_clone(*right),
             },
             ExpressionKind::Call {
                 target,
                 operands,
                 is_return,
-            } => {
-                let mut new_operands = BumpVec::with_capacity_in(operands.len(), self.bump);
-                for op in operands.iter() {
-                    new_operands.push(self.deep_clone(*op));
-                }
-                ExpressionKind::Call {
-                    target: *target,
-                    operands: new_operands,
-                    is_return: *is_return,
-                }
-            }
+            } => ExpressionKind::Call {
+                target: *target,
+                operands: operands.iter().map(|&c| builder.deep_clone(c)).collect(),
+                is_return: *is_return,
+            },
             ExpressionKind::LocalGet { id } => ExpressionKind::LocalGet { id: *id },
             ExpressionKind::LocalSet { id, value } => ExpressionKind::LocalSet {
                 id: *id,
-                value: self.deep_clone(*value),
+                value: builder.deep_clone(*value),
             },
             ExpressionKind::LocalTee { id, value } => ExpressionKind::LocalTee {
                 id: *id,
-                value: self.deep_clone(*value),
+                value: builder.deep_clone(*value),
             },
             ExpressionKind::GlobalGet { id } => ExpressionKind::GlobalGet { id: *id },
             ExpressionKind::GlobalSet { id, value } => ExpressionKind::GlobalSet {
                 id: *id,
-                value: self.deep_clone(*value),
+                value: builder.deep_clone(*value),
             },
             ExpressionKind::If {
+                name,
                 condition,
                 if_true,
                 if_false,
             } => ExpressionKind::If {
-                condition: self.deep_clone(*condition),
-                if_true: self.deep_clone(*if_true),
-                if_false: if_false.map(|e| self.deep_clone(e)),
+                name: name.clone(),
+                condition: builder.deep_clone(*condition),
+                if_true: builder.deep_clone(*if_true),
+                if_false: if_false.map(|e| builder.deep_clone(e)),
             },
             ExpressionKind::Loop { name, body } => ExpressionKind::Loop {
-                name: *name,
-                body: self.deep_clone(*body),
+                name: name.clone(),
+                body: builder.deep_clone(*body),
             },
             ExpressionKind::Break {
                 name,
                 condition,
                 value,
             } => ExpressionKind::Break {
-                name,
-                condition: condition.map(|e| self.deep_clone(e)),
-                value: value.map(|e| self.deep_clone(e)),
+                name: name.clone(),
+                condition: condition.map(|e| builder.deep_clone(e)),
+                value: value.map(|e| builder.deep_clone(e)),
             },
             ExpressionKind::Return { value } => ExpressionKind::Return {
-                value: value.map(|e| self.deep_clone(e)),
+                value: value.map(|e| builder.deep_clone(e)),
             },
             ExpressionKind::Unreachable => ExpressionKind::Unreachable,
             ExpressionKind::Drop { value } => ExpressionKind::Drop {
-                value: self.deep_clone(*value),
+                value: builder.deep_clone(*value),
             },
             ExpressionKind::Select {
                 condition,
                 if_true,
                 if_false,
             } => ExpressionKind::Select {
-                condition: self.deep_clone(*condition),
-                if_true: self.deep_clone(*if_true),
-                if_false: self.deep_clone(*if_false),
+                condition: builder.deep_clone(*condition),
+                if_true: builder.deep_clone(*if_true),
+                if_false: builder.deep_clone(*if_false),
             },
             ExpressionKind::Load {
                 memory,
@@ -1664,7 +1854,7 @@ impl<'a> IrBuilder<'a> {
                 signed: *signed,
                 offset: *offset,
                 align: *align,
-                ptr: self.deep_clone(*ptr),
+                ptr: builder.deep_clone(*ptr),
             },
             ExpressionKind::Store {
                 memory,
@@ -1678,8 +1868,8 @@ impl<'a> IrBuilder<'a> {
                 bytes: *bytes,
                 offset: *offset,
                 align: *align,
-                ptr: self.deep_clone(*ptr),
-                value: self.deep_clone(*value),
+                ptr: builder.deep_clone(*ptr),
+                value: builder.deep_clone(*value),
             },
             ExpressionKind::Nop => ExpressionKind::Nop,
             ExpressionKind::Switch {
@@ -1689,30 +1879,24 @@ impl<'a> IrBuilder<'a> {
                 value,
             } => ExpressionKind::Switch {
                 names: names.clone(),
-                default,
-                condition: self.deep_clone(*condition),
-                value: value.map(|e| self.deep_clone(e)),
+                default: default.clone(),
+                condition: builder.deep_clone(*condition),
+                value: value.map(|e| builder.deep_clone(e)),
             },
             ExpressionKind::CallIndirect {
                 table,
                 target,
                 operands,
                 type_id,
-            } => {
-                let mut new_operands = BumpVec::with_capacity_in(operands.len(), self.bump);
-                for op in operands.iter() {
-                    new_operands.push(self.deep_clone(*op));
-                }
-                ExpressionKind::CallIndirect {
-                    table: *table,
-                    target: self.deep_clone(*target),
-                    operands: new_operands,
-                    type_id: *type_id,
-                }
-            }
+            } => ExpressionKind::CallIndirect {
+                table: *table,
+                target: builder.deep_clone(*target),
+                operands: operands.iter().map(|&c| builder.deep_clone(c)).collect(),
+                type_id: *type_id,
+            },
             ExpressionKind::MemoryGrow { memory, delta } => ExpressionKind::MemoryGrow {
                 memory: *memory,
-                delta: self.deep_clone(*delta),
+                delta: builder.deep_clone(*delta),
             },
             ExpressionKind::MemorySize { memory } => ExpressionKind::MemorySize { memory: *memory },
             ExpressionKind::AtomicRMW {
@@ -1727,8 +1911,8 @@ impl<'a> IrBuilder<'a> {
                 op: *op,
                 bytes: *bytes,
                 offset: *offset,
-                ptr: self.deep_clone(*ptr),
-                value: self.deep_clone(*value),
+                ptr: builder.deep_clone(*ptr),
+                value: builder.deep_clone(*value),
             },
             ExpressionKind::AtomicCmpxchg {
                 memory,
@@ -1741,9 +1925,9 @@ impl<'a> IrBuilder<'a> {
                 memory: *memory,
                 bytes: *bytes,
                 offset: *offset,
-                ptr: self.deep_clone(*ptr),
-                expected: self.deep_clone(*expected),
-                replacement: self.deep_clone(*replacement),
+                ptr: builder.deep_clone(*ptr),
+                expected: builder.deep_clone(*expected),
+                replacement: builder.deep_clone(*replacement),
             },
             ExpressionKind::AtomicWait {
                 memory,
@@ -1753,20 +1937,20 @@ impl<'a> IrBuilder<'a> {
                 expected_type,
             } => ExpressionKind::AtomicWait {
                 memory: *memory,
-                ptr: self.deep_clone(*ptr),
-                expected: self.deep_clone(*expected),
-                timeout: self.deep_clone(*timeout),
+                ptr: builder.deep_clone(*ptr),
+                expected: builder.deep_clone(*expected),
+                timeout: builder.deep_clone(*timeout),
                 expected_type: *expected_type,
             },
             ExpressionKind::AtomicNotify { memory, ptr, count } => ExpressionKind::AtomicNotify {
                 memory: *memory,
-                ptr: self.deep_clone(*ptr),
-                count: self.deep_clone(*count),
+                ptr: builder.deep_clone(*ptr),
+                count: builder.deep_clone(*count),
             },
             ExpressionKind::AtomicFence => ExpressionKind::AtomicFence,
             ExpressionKind::SIMDExtract { op, vec, index } => ExpressionKind::SIMDExtract {
                 op: *op,
-                vec: self.deep_clone(*vec),
+                vec: builder.deep_clone(*vec),
                 index: *index,
             },
             ExpressionKind::SIMDReplace {
@@ -1776,25 +1960,25 @@ impl<'a> IrBuilder<'a> {
                 value,
             } => ExpressionKind::SIMDReplace {
                 op: *op,
-                vec: self.deep_clone(*vec),
+                vec: builder.deep_clone(*vec),
                 index: *index,
-                value: self.deep_clone(*value),
+                value: builder.deep_clone(*value),
             },
             ExpressionKind::SIMDShuffle { left, right, mask } => ExpressionKind::SIMDShuffle {
-                left: self.deep_clone(*left),
-                right: self.deep_clone(*right),
+                left: builder.deep_clone(*left),
+                right: builder.deep_clone(*right),
                 mask: *mask,
             },
             ExpressionKind::SIMDTernary { op, a, b, c } => ExpressionKind::SIMDTernary {
                 op: *op,
-                a: self.deep_clone(*a),
-                b: self.deep_clone(*b),
-                c: self.deep_clone(*c),
+                a: builder.deep_clone(*a),
+                b: builder.deep_clone(*b),
+                c: builder.deep_clone(*c),
             },
             ExpressionKind::SIMDShift { op, vec, shift } => ExpressionKind::SIMDShift {
                 op: *op,
-                vec: self.deep_clone(*vec),
-                shift: self.deep_clone(*shift),
+                vec: builder.deep_clone(*vec),
+                shift: builder.deep_clone(*shift),
             },
             ExpressionKind::SIMDLoad {
                 op,
@@ -1805,7 +1989,7 @@ impl<'a> IrBuilder<'a> {
                 op: *op,
                 offset: *offset,
                 align: *align,
-                ptr: self.deep_clone(*ptr),
+                ptr: builder.deep_clone(*ptr),
             },
             ExpressionKind::SIMDLoadStoreLane {
                 is_store,
@@ -1821,8 +2005,8 @@ impl<'a> IrBuilder<'a> {
                 offset: *offset,
                 align: *align,
                 index: *index,
-                ptr: self.deep_clone(*ptr),
-                vec: self.deep_clone(*vec),
+                ptr: builder.deep_clone(*ptr),
+                vec: builder.deep_clone(*vec),
             },
             ExpressionKind::MemoryInit {
                 memory,
@@ -1833,9 +2017,9 @@ impl<'a> IrBuilder<'a> {
             } => ExpressionKind::MemoryInit {
                 memory: *memory,
                 segment: *segment,
-                dest: self.deep_clone(*dest),
-                offset: self.deep_clone(*offset),
-                size: self.deep_clone(*size),
+                dest: builder.deep_clone(*dest),
+                offset: builder.deep_clone(*offset),
+                size: builder.deep_clone(*size),
             },
             ExpressionKind::DataDrop { segment } => ExpressionKind::DataDrop { segment: *segment },
             ExpressionKind::MemoryCopy {
@@ -1847,9 +2031,9 @@ impl<'a> IrBuilder<'a> {
             } => ExpressionKind::MemoryCopy {
                 dest_memory: *dest_memory,
                 src_memory: *src_memory,
-                dest: self.deep_clone(*dest),
-                src: self.deep_clone(*src),
-                size: self.deep_clone(*size),
+                dest: builder.deep_clone(*dest),
+                src: builder.deep_clone(*src),
+                size: builder.deep_clone(*size),
             },
             ExpressionKind::MemoryFill {
                 memory,
@@ -1858,13 +2042,13 @@ impl<'a> IrBuilder<'a> {
                 size,
             } => ExpressionKind::MemoryFill {
                 memory: *memory,
-                dest: self.deep_clone(*dest),
-                value: self.deep_clone(*value),
-                size: self.deep_clone(*size),
+                dest: builder.deep_clone(*dest),
+                value: builder.deep_clone(*value),
+                size: builder.deep_clone(*size),
             },
             ExpressionKind::TableGet { table, index } => ExpressionKind::TableGet {
                 table: *table,
-                index: self.deep_clone(*index),
+                index: builder.deep_clone(*index),
             },
             ExpressionKind::TableSet {
                 table,
@@ -1872,8 +2056,8 @@ impl<'a> IrBuilder<'a> {
                 value,
             } => ExpressionKind::TableSet {
                 table: *table,
-                index: self.deep_clone(*index),
-                value: self.deep_clone(*value),
+                index: builder.deep_clone(*index),
+                value: builder.deep_clone(*value),
             },
             ExpressionKind::TableSize { table } => ExpressionKind::TableSize { table: *table },
             ExpressionKind::TableGrow {
@@ -1882,8 +2066,8 @@ impl<'a> IrBuilder<'a> {
                 value,
             } => ExpressionKind::TableGrow {
                 table: *table,
-                delta: self.deep_clone(*delta),
-                value: self.deep_clone(*value),
+                delta: builder.deep_clone(*delta),
+                value: builder.deep_clone(*value),
             },
             ExpressionKind::TableFill {
                 table,
@@ -1892,9 +2076,9 @@ impl<'a> IrBuilder<'a> {
                 size,
             } => ExpressionKind::TableFill {
                 table: *table,
-                dest: self.deep_clone(*dest),
-                value: self.deep_clone(*value),
-                size: self.deep_clone(*size),
+                dest: builder.deep_clone(*dest),
+                value: builder.deep_clone(*value),
+                size: builder.deep_clone(*size),
             },
             ExpressionKind::TableCopy {
                 dest_table,
@@ -1905,9 +2089,9 @@ impl<'a> IrBuilder<'a> {
             } => ExpressionKind::TableCopy {
                 dest_table: *dest_table,
                 src_table: *src_table,
-                dest: self.deep_clone(*dest),
-                src: self.deep_clone(*src),
-                size: self.deep_clone(*size),
+                dest: builder.deep_clone(*dest),
+                src: builder.deep_clone(*src),
+                size: builder.deep_clone(*size),
             },
             ExpressionKind::TableInit {
                 table,
@@ -1918,33 +2102,27 @@ impl<'a> IrBuilder<'a> {
             } => ExpressionKind::TableInit {
                 table: *table,
                 segment: *segment,
-                dest: self.deep_clone(*dest),
-                offset: self.deep_clone(*offset),
-                size: self.deep_clone(*size),
+                dest: builder.deep_clone(*dest),
+                offset: builder.deep_clone(*offset),
+                size: builder.deep_clone(*size),
             },
             ExpressionKind::RefNull { type_ } => ExpressionKind::RefNull { type_: *type_ },
             ExpressionKind::RefIsNull { value } => ExpressionKind::RefIsNull {
-                value: self.deep_clone(*value),
+                value: builder.deep_clone(*value),
             },
             ExpressionKind::RefAs { op, value } => ExpressionKind::RefAs {
                 op: *op,
-                value: self.deep_clone(*value),
+                value: builder.deep_clone(*value),
             },
             ExpressionKind::RefEq { left, right } => ExpressionKind::RefEq {
-                left: self.deep_clone(*left),
-                right: self.deep_clone(*right),
+                left: builder.deep_clone(*left),
+                right: builder.deep_clone(*right),
             },
             ExpressionKind::RefFunc { func } => ExpressionKind::RefFunc { func: *func },
-            ExpressionKind::StructNew { type_, operands } => {
-                let mut new_operands = BumpVec::with_capacity_in(operands.len(), self.bump);
-                for op in operands.iter() {
-                    new_operands.push(self.deep_clone(*op));
-                }
-                ExpressionKind::StructNew {
-                    type_: *type_,
-                    operands: new_operands,
-                }
-            }
+            ExpressionKind::StructNew { type_, operands } => ExpressionKind::StructNew {
+                type_: *type_,
+                operands: operands.iter().map(|&c| builder.deep_clone(c)).collect(),
+            },
             ExpressionKind::StructGet {
                 index,
                 ptr,
@@ -1952,7 +2130,7 @@ impl<'a> IrBuilder<'a> {
                 signed,
             } => ExpressionKind::StructGet {
                 index: *index,
-                ptr: self.deep_clone(*ptr),
+                ptr: builder.deep_clone(*ptr),
                 type_: *type_,
                 signed: *signed,
             },
@@ -1963,14 +2141,14 @@ impl<'a> IrBuilder<'a> {
                 type_,
             } => ExpressionKind::StructSet {
                 index: *index,
-                ptr: self.deep_clone(*ptr),
-                value: self.deep_clone(*value),
+                ptr: builder.deep_clone(*ptr),
+                value: builder.deep_clone(*value),
                 type_: *type_,
             },
             ExpressionKind::ArrayNew { type_, size, init } => ExpressionKind::ArrayNew {
                 type_: *type_,
-                size: self.deep_clone(*size),
-                init: init.map(|i| self.deep_clone(i)),
+                size: builder.deep_clone(*size),
+                init: init.map(|i| builder.deep_clone(i)),
             },
             ExpressionKind::ArrayGet {
                 ptr,
@@ -1978,8 +2156,8 @@ impl<'a> IrBuilder<'a> {
                 type_,
                 signed,
             } => ExpressionKind::ArrayGet {
-                ptr: self.deep_clone(*ptr),
-                index: self.deep_clone(*index),
+                ptr: builder.deep_clone(*ptr),
+                index: builder.deep_clone(*index),
                 type_: *type_,
                 signed: *signed,
             },
@@ -1989,13 +2167,13 @@ impl<'a> IrBuilder<'a> {
                 value,
                 type_,
             } => ExpressionKind::ArraySet {
-                ptr: self.deep_clone(*ptr),
-                index: self.deep_clone(*index),
-                value: self.deep_clone(*value),
+                ptr: builder.deep_clone(*ptr),
+                index: builder.deep_clone(*index),
+                value: builder.deep_clone(*value),
                 type_: *type_,
             },
             ExpressionKind::ArrayLen { ptr } => ExpressionKind::ArrayLen {
-                ptr: self.deep_clone(*ptr),
+                ptr: builder.deep_clone(*ptr),
             },
             ExpressionKind::ElemDrop { segment } => ExpressionKind::ElemDrop { segment: *segment },
             ExpressionKind::Try {
@@ -2004,59 +2182,46 @@ impl<'a> IrBuilder<'a> {
                 catch_tags,
                 catch_bodies,
                 delegate,
-            } => {
-                let mut new_catch_bodies = BumpVec::with_capacity_in(catch_bodies.len(), self.bump);
-                for b in catch_bodies.iter() {
-                    new_catch_bodies.push(self.deep_clone(*b));
-                }
-                ExpressionKind::Try {
-                    name: *name,
-                    body: self.deep_clone(*body),
-                    catch_tags: catch_tags.clone(),
-                    catch_bodies: new_catch_bodies,
-                    delegate: *delegate,
-                }
-            }
-            ExpressionKind::Throw { tag, operands } => {
-                let mut new_operands = BumpVec::with_capacity_in(operands.len(), self.bump);
-                for op in operands.iter() {
-                    new_operands.push(self.deep_clone(*op));
-                }
-                ExpressionKind::Throw {
-                    tag,
-                    operands: new_operands,
-                }
-            }
-            ExpressionKind::Rethrow { target } => ExpressionKind::Rethrow { target },
-            ExpressionKind::TupleMake { operands } => {
-                let mut new_operands = BumpVec::with_capacity_in(operands.len(), self.bump);
-                for op in operands.iter() {
-                    new_operands.push(self.deep_clone(*op));
-                }
-                ExpressionKind::TupleMake {
-                    operands: new_operands,
-                }
-            }
+            } => ExpressionKind::Try {
+                name: name.clone(),
+                body: builder.deep_clone(*body),
+                catch_tags: catch_tags.clone(),
+                catch_bodies: catch_bodies
+                    .iter()
+                    .map(|&c| builder.deep_clone(c))
+                    .collect(),
+                delegate: delegate.clone(),
+            },
+            ExpressionKind::Throw { tag, operands } => ExpressionKind::Throw {
+                tag: tag.clone(),
+                operands: operands.iter().map(|&c| builder.deep_clone(c)).collect(),
+            },
+            ExpressionKind::Rethrow { target } => ExpressionKind::Rethrow {
+                target: target.clone(),
+            },
+            ExpressionKind::TupleMake { operands } => ExpressionKind::TupleMake {
+                operands: operands.iter().map(|&c| builder.deep_clone(c)).collect(),
+            },
             ExpressionKind::TupleExtract { index, tuple } => ExpressionKind::TupleExtract {
                 index: *index,
-                tuple: self.deep_clone(*tuple),
+                tuple: builder.deep_clone(*tuple),
             },
             ExpressionKind::Pop { type_ } => ExpressionKind::Pop { type_: *type_ },
             ExpressionKind::I31New { value } => ExpressionKind::I31New {
-                value: self.deep_clone(*value),
+                value: builder.deep_clone(*value),
             },
             ExpressionKind::I31Get { i31, signed } => ExpressionKind::I31Get {
-                i31: self.deep_clone(*i31),
+                i31: builder.deep_clone(*i31),
                 signed: *signed,
             },
             ExpressionKind::RefTest { op, value, type_ } => ExpressionKind::RefTest {
                 op: *op,
-                value: self.deep_clone(*value),
+                value: builder.deep_clone(*value),
                 type_: *type_,
             },
             ExpressionKind::RefCast { op, value, type_ } => ExpressionKind::RefCast {
                 op: *op,
-                value: self.deep_clone(*value),
+                value: builder.deep_clone(*value),
                 type_: *type_,
             },
             ExpressionKind::BrOn {
@@ -2065,14 +2230,12 @@ impl<'a> IrBuilder<'a> {
                 value,
                 type_,
             } => ExpressionKind::BrOn {
-                name,
+                name: name.clone(),
                 op: *op,
-                value: self.deep_clone(*value),
+                value: builder.deep_clone(*value),
                 type_: *type_,
             },
-        };
-
-        Expression::new(self.bump, kind, expr.type_)
+        }
     }
 }
 
@@ -2080,21 +2243,23 @@ impl<'a> IrBuilder<'a> {
 mod tests {
     use super::*;
     use crate::ir::{Literal, Type};
-    use bumpalo::collections::Vec as BumpVec;
-    use bumpalo::Bump;
 
     #[test]
     fn test_expression_nop() {
-        let bump = Bump::new();
-        let nop = Expression::nop(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
+        let nop_id = builder.nop();
+        let nop = &arena[nop_id];
         assert!(matches!(nop.kind, ExpressionKind::Nop));
         assert_eq!(nop.type_, Type::NONE);
     }
 
     #[test]
-    fn test_expression_const_expr() {
-        let bump = Bump::new();
-        let const_expr = Expression::const_expr(&bump, Literal::I32(42), Type::I32);
+    fn test_expression_const() {
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
+        let const_id = builder.const_(Literal::I32(42));
+        let const_expr = &arena[const_id];
         assert!(matches!(
             const_expr.kind,
             ExpressionKind::Const(Literal::I32(42))
@@ -2104,12 +2269,13 @@ mod tests {
 
     #[test]
     fn test_expression_block() {
-        let bump = Bump::new();
-        let mut list = BumpVec::new_in(&bump);
-        list.push(Expression::nop(&bump));
-        list.push(Expression::const_expr(&bump, Literal::I32(1), Type::I32));
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
+        let nop_id = builder.nop();
+        let const_id = builder.const_(Literal::I32(1));
 
-        let block = Expression::block(&bump, None, list, Type::I32);
+        let block_id = builder.block(None::<String>, vec![nop_id, const_id], Type::I32);
+        let block = &arena[block_id];
         assert!(matches!(block.kind, ExpressionKind::Block { .. }));
         assert_eq!(block.type_, Type::I32);
 
@@ -2120,9 +2286,11 @@ mod tests {
 
     #[test]
     fn test_expression_local_set() {
-        let bump = Bump::new();
-        let val = Expression::const_expr(&bump, Literal::I32(10), Type::I32);
-        let set = Expression::local_set(&bump, 0.into(), val);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
+        let val = builder.const_(Literal::I32(10));
+        let set_id = builder.local_set(LocalId::from(0), val);
+        let set = &arena[set_id];
 
         assert!(matches!(
             set.kind,
@@ -2133,8 +2301,10 @@ mod tests {
 
     #[test]
     fn test_expression_local_get() {
-        let bump = Bump::new();
-        let get = Expression::local_get(&bump, 0.into(), Type::I32);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
+        let get_id = builder.local_get(LocalId::from(0), Type::I32);
+        let get = &arena[get_id];
 
         assert!(matches!(get.kind, ExpressionKind::LocalGet { id } if id.index() == 0));
         assert_eq!(get.type_, Type::I32);
@@ -2142,9 +2312,11 @@ mod tests {
 
     #[test]
     fn test_expression_local_tee() {
-        let bump = Bump::new();
-        let val = Expression::const_expr(&bump, Literal::I32(5), Type::I32);
-        let tee = Expression::local_tee(&bump, 0.into(), val, Type::I32);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
+        let val = builder.const_(Literal::I32(5));
+        let tee_id = builder.local_tee(LocalId::from(0), val, Type::I32);
+        let tee = &arena[tee_id];
 
         assert!(matches!(
             tee.kind,
@@ -2155,24 +2327,28 @@ mod tests {
 
     #[test]
     fn test_expression_helpers_integration() {
-        let bump = Bump::new();
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         // Build: (block (local.set $0 (i32.const 42)) (local.get $0))
-        let const_val = Expression::const_expr(&bump, Literal::I32(42), Type::I32);
-        let set = Expression::local_set(&bump, 0.into(), const_val);
-        let get = Expression::local_get(&bump, 0.into(), Type::I32);
+        let const_val = builder.const_(Literal::I32(42));
+        let set = builder.local_set(LocalId::from(0), const_val);
+        let get = builder.local_get(LocalId::from(0), Type::I32);
 
-        let mut list = BumpVec::new_in(&bump);
-        list.push(set);
-        list.push(get);
-
-        let block = Expression::block(&bump, None, list, Type::I32);
+        let block_id = builder.block(None::<String>, vec![set, get], Type::I32);
+        let block = &arena[block_id];
 
         // Verify structure
         if let ExpressionKind::Block { list, .. } = &block.kind {
             assert_eq!(list.len(), 2);
-            assert!(matches!(list[0].kind, ExpressionKind::LocalSet { .. }));
-            assert!(matches!(list[1].kind, ExpressionKind::LocalGet { .. }));
+            assert!(matches!(
+                arena[list[0]].kind,
+                ExpressionKind::LocalSet { .. }
+            ));
+            assert!(matches!(
+                arena[list[1]].kind,
+                ExpressionKind::LocalGet { .. }
+            ));
         } else {
             panic!("Expected Block");
         }

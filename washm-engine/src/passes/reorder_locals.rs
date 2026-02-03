@@ -9,7 +9,7 @@ impl Pass for ReorderLocals {
         "ReorderLocals"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         for (_, func) in &mut module.functions {
             if let crate::ir::module::FunctionKind::Local {
                 var_ids, locals, ..

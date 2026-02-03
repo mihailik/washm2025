@@ -1,4 +1,5 @@
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::Function;
 use crate::ir::visitor::ReadOnlyVisitor;
 
@@ -31,11 +32,11 @@ pub struct Cost {
 
 impl CostEstimator {
     /// Estimate cost of inlining this function
-    pub fn inline_cost(func: &Function) -> Cost {
+    pub fn inline_cost(func: &Function, arena: &IdArena<ExpressionMarker, Expression>) -> Cost {
         let mut calculator = CostCalculator::new(func);
-        if let Some(body) = &func.body() {
-            calculator.visit(*body);
-            calculator.analyze_trivial(*body);
+        if let Some(body) = func.body() {
+            calculator.visit(body, arena);
+            calculator.analyze_trivial(body, arena);
         }
         calculator.cost
     }
@@ -60,14 +61,20 @@ impl CostCalculator {
         }
     }
 
-    fn analyze_trivial<'a>(&mut self, body: ExprRef<'a>) {
+    fn analyze_trivial(
+        &mut self,
+        body: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
         // A function is trivial if its body is a single instruction.
         // If it's a block with one instruction, that's also trivial.
-        let mut current = body;
+        let mut current_id = body;
+        let mut current_expr = &arena[current_id];
 
-        if let ExpressionKind::Block { list, .. } = &current.kind {
+        if let ExpressionKind::Block { list, .. } = &current_expr.kind {
             if list.len() == 1 {
-                current = list[0];
+                current_id = list[0];
+                current_expr = &arena[current_id];
             } else if list.is_empty() {
                 // Empty block is also trivial (shrinks)
                 self.cost.trivial_instruction = TrivialInstruction::Shrinks;
@@ -77,7 +84,7 @@ impl CostCalculator {
             }
         }
 
-        match &current.kind {
+        match &current_expr.kind {
             ExpressionKind::Block { .. }
             | ExpressionKind::Loop { .. }
             | ExpressionKind::If { .. }
@@ -96,7 +103,7 @@ impl CostCalculator {
 
         // Check operands if it's a simple instruction
         let mut operands = Vec::new();
-        match &current.kind {
+        match &current_expr.kind {
             ExpressionKind::Unary { value, .. } => operands.push(*value),
             ExpressionKind::Binary { left, right, .. } => {
                 operands.push(*left);
@@ -132,8 +139,8 @@ impl CostCalculator {
         }
 
         let mut shrink = true;
-        for (i, op) in operands.iter().enumerate() {
-            if let ExpressionKind::LocalGet { id } = &op.kind {
+        for (i, op_id) in operands.iter().enumerate() {
+            if let ExpressionKind::LocalGet { id } = &arena[*op_id].kind {
                 if id.index() != i as u32 {
                     shrink = false;
                     break;
@@ -152,11 +159,15 @@ impl CostCalculator {
     }
 }
 
-impl<'a> ReadOnlyVisitor<'a> for CostCalculator {
-    fn visit_expression(&mut self, expr: ExprRef<'a>) {
+impl ReadOnlyVisitor for CostCalculator {
+    fn visit_expression(
+        &mut self,
+        expr_id: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
         self.cost.instruction_count += 1;
 
-        match &expr.kind {
+        match &arena[expr_id].kind {
             ExpressionKind::Call { .. } | ExpressionKind::CallIndirect { .. } => {
                 self.cost.call_count += 1;
             }
@@ -177,13 +188,12 @@ impl<'a> ReadOnlyVisitor<'a> for CostCalculator {
 mod tests {
     use super::*;
     use crate::ir::expression::IrBuilder;
-    use crate::ir::Type;
-    use bumpalo::Bump;
+    use crate::ir::{FuncId, Type};
 
     #[test]
     fn test_cost_estimation() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         // (block
         //   (nop)
@@ -196,30 +206,16 @@ mod tests {
 
         let nop1 = builder.nop();
         let nop2 = builder.nop();
-        let loop_ = builder.loop_(None, nop2, Type::NONE);
-        let call = builder.call(
-            "foo",
-            bumpalo::collections::Vec::new_in(&bump),
-            Type::NONE,
-            false,
-        );
+        let loop_ = builder.loop_(None::<String>, nop2, Type::NONE);
+        let call = builder.call(FuncId::from_u32(0), vec![], Type::NONE, false);
 
-        let mut list = bumpalo::collections::Vec::new_in(&bump);
-        list.push(nop1);
-        list.push(loop_);
-        list.push(call);
+        let list = vec![nop1, loop_, call];
 
-        let block = builder.block(None, list, Type::NONE);
+        let block = builder.block(None::<String>, list, Type::NONE);
 
-        let func = Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(block),
-        );
+        let func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], block);
 
-        let cost = CostEstimator::inline_cost(&func);
+        let cost = CostEstimator::inline_cost(&func, &arena);
 
         assert_eq!(cost.instruction_count, 5);
         assert_eq!(cost.loop_count, 1);

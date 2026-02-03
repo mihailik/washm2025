@@ -51,6 +51,53 @@ impl<T> std::fmt::Debug for Id<T> {
     }
 }
 
+impl<T> Id<T> {
+    pub fn new(index: u32, generation: u32) -> Self {
+        Self {
+            index,
+            generation,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn new_null() -> Self {
+        Self::null()
+    }
+
+    pub fn from_raw_parts(index: u32, generation: u32) -> Self {
+        Self {
+            index,
+            generation,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn from_u32(index: u32) -> Self {
+        Self::from_raw_parts(index, 0)
+    }
+
+    pub fn null() -> Self {
+        Self::from_raw_parts(u32::MAX, u32::MAX)
+    }
+
+    pub fn is_null(self) -> bool {
+        self.index == u32::MAX && self.generation == u32::MAX
+    }
+
+    pub fn index(self) -> u32 {
+        self.index
+    }
+
+    pub fn generation(self) -> u32 {
+        self.generation
+    }
+
+    /// Cast this ID to another type marker.
+    pub fn cast<U>(self) -> Id<U> {
+        Id::from_raw_parts(self.index, self.generation)
+    }
+}
+
 impl<T> std::fmt::Display for Id<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Id({}:{})", self.index, self.generation)
@@ -66,34 +113,6 @@ impl<T> From<u32> for Id<T> {
 impl<T> From<&str> for Id<T> {
     fn from(_: &str) -> Self {
         Self::from_raw_parts(0, 0)
-    }
-}
-
-impl<T> Id<T> {
-    /// Create a new ID from indices. Internal use only usually.
-    pub fn from_raw_parts(index: u32, generation: u32) -> Self {
-        Self {
-            index,
-            generation,
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn from_u32(index: u32) -> Self {
-        Self::from_raw_parts(index, 0)
-    }
-
-    pub fn index(self) -> u32 {
-        self.index
-    }
-
-    pub fn generation(self) -> u32 {
-        self.generation
-    }
-
-    /// Cast this ID to another type marker.
-    pub fn cast<U>(self) -> Id<U> {
-        Id::from_raw_parts(self.index, self.generation)
     }
 }
 

@@ -1,10 +1,11 @@
-use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{
+    Expression, ExpressionId, ExpressionKind, ExpressionMarker, IrBuilder,
+};
 use crate::ir::module::{Global, GlobalId, GlobalKind, Module};
 use crate::ir::visitor::Visitor;
 use crate::ir::{Literal, Type};
 use crate::passes::Pass;
-use bumpalo::collections::Vec as BumpVec;
-use bumpalo::Bump;
 
 pub struct I64ToI32Lowering;
 
@@ -13,10 +14,10 @@ impl Pass for I64ToI32Lowering {
         "i64-to-i32-lowering"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         // Add a global to store the high 32 bits of an i64
         let global_name = "i64_to_i32_high_bits".to_string();
-        let global_init = Expression::const_expr(module.allocator, Literal::I32(0), Type::I32);
+        let global_init = IrBuilder::new(&mut module.expressions).const_(Literal::I32(0));
 
         let global_id = module.add_global(Global {
             name: global_name,
@@ -25,98 +26,90 @@ impl Pass for I64ToI32Lowering {
             kind: GlobalKind::Local { init: global_init },
         });
 
-        for (_, func) in &mut module.functions {
-            if let Some(body) = func.body_mut() {
-                let mut visitor = I64LoweringVisitor {
-                    allocator: module.allocator,
-                    global_id,
-                };
-                visitor.visit(body);
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+
+        for (_, func) in functions {
+            if let Some(mut body) = func.body_mut() {
+                let mut visitor = I64LoweringVisitor { global_id };
+                visitor.visit(&mut body, arena);
             }
         }
     }
 }
 
-struct I64LoweringVisitor<'a> {
-    allocator: &'a Bump,
+struct I64LoweringVisitor {
     global_id: GlobalId,
 }
 
-impl<'a> Visitor<'a> for I64LoweringVisitor<'a> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
+impl Visitor for I64LoweringVisitor {
+    fn visit(
+        &mut self,
+        expr_id: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
         // Handle ConstInt64
-        let replacement = if let ExpressionKind::Const(Literal::I64(val)) = expr.kind {
+        let replacement = if let ExpressionKind::Const(Literal::I64(val)) = arena[*expr_id].kind {
             let low = val as i32;
             let high = (val >> 32) as i32;
 
-            let const_high = Expression::const_expr(self.allocator, Literal::I32(high), Type::I32);
+            let mut builder = IrBuilder::new(arena);
+            let const_high = builder.const_(Literal::I32(high));
 
-            let set_global = Expression::new(
-                self.allocator,
-                ExpressionKind::GlobalSet {
-                    id: self.global_id,
-                    value: const_high,
-                },
-                Type::NONE,
-            );
+            let set_global = builder.global_set(self.global_id, const_high);
 
-            let const_low = Expression::const_expr(self.allocator, Literal::I32(low), Type::I32);
+            let const_low = builder.const_(Literal::I32(low));
 
-            let mut list = BumpVec::new_in(self.allocator);
-            list.push(set_global);
-            list.push(const_low);
+            let list = vec![set_global, const_low];
 
-            // Expression::block returns ExprRef
-            Some(Expression::block(self.allocator, None, list, Type::I32))
+            Some(builder.block("", list, Type::I32))
         } else {
             None
         };
 
         if let Some(new_expr) = replacement {
-            *expr = new_expr;
+            *expr_id = new_expr;
         }
+        self.visit_children(expr_id, arena);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::expression::{Expression, ExpressionKind};
     use crate::ir::module::Function;
     use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
 
     #[test]
     fn test_i64_to_i32_lowering_const() {
-        let allocator = Bump::new();
-        let mut module = Module::new(&allocator);
+        let mut module = Module::new();
 
         // Function returning i64 const
         let val: i64 = 0x123456789ABCDEF0u64 as i64;
-        let const_expr = Expression::const_expr(&allocator, Literal::I64(val), Type::I64);
+        let const_expr = IrBuilder::new(&mut module.expressions).const_(Literal::I64(val));
 
         let func = Function::new(
             "test_func".to_string(),
             Type::NONE,
             Type::I64,
             vec![],
-            Some(const_expr),
+            const_expr,
         );
         module.add_function(func);
 
         let mut pass = I64ToI32Lowering;
         pass.run(&mut module);
 
-        let func = module.get_function(0.into() /* test_func */).unwrap();
-        let body = func.body().unwrap();
+        let func = module.functions.iter().next().unwrap().1;
+        let body_id = func.body().unwrap();
+        let body = &module.expressions[body_id];
 
-        match body.kind {
-            ExpressionKind::Block { ref list, .. } => {
+        match &body.kind {
+            ExpressionKind::Block { list, .. } => {
                 assert_eq!(list.len(), 2);
-                match list[0].kind {
-                    ExpressionKind::GlobalSet { id, ref value } => {
-                        assert_eq!(id, module.globals.ids().next().unwrap().cast()); // First global
-                        match value.kind {
+                match module.expressions[list[0]].kind {
+                    ExpressionKind::GlobalSet { id, value } => {
+                        assert_eq!(id, module.globals.iter().next().unwrap().0); // First global
+                        match module.expressions[value].kind {
                             ExpressionKind::Const(Literal::I32(v)) => {
                                 assert_eq!(v, (val >> 32) as i32);
                             }
@@ -125,7 +118,7 @@ mod tests {
                     }
                     _ => panic!("Expected GlobalSet"),
                 }
-                match list[1].kind {
+                match module.expressions[list[1]].kind {
                     ExpressionKind::Const(Literal::I32(v)) => {
                         assert_eq!(v, val as i32);
                     }

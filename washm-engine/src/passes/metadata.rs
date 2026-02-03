@@ -9,7 +9,7 @@ impl Pass for NameTypes {
         "NameTypes"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         module.type_names.clear();
         for i in 0..module.types.len() {
             module.type_names.push(format!("type${}", i));
@@ -25,7 +25,7 @@ impl Pass for EmitTargetFeatures {
         "EmitTargetFeatures"
     }
 
-    fn run<'a>(&mut self, _module: &mut Module<'a>) {
+    fn run(&mut self, _module: &mut Module) {
         // Synchronize and validate features based on module content.
         // For now, we ensure the FeatureSet is updated to include essential features
         // if they are used. In a full implementation, this would scan all expressions.

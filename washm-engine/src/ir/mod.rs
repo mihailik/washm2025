@@ -7,7 +7,7 @@ pub use literal::*;
 pub mod annotation;
 pub mod expression;
 pub mod module;
-pub use module::{DataId, ElementId, FuncId, GlobalId, LocalId, MemoryId, TableId, TypeId};
+pub use module::{DataId, ElementId, FuncId, GlobalId, LocalId, MemoryId, Module, TableId, TypeId};
 pub mod ops;
 pub mod visitor;
 pub mod wasm_features;

@@ -1,5 +1,6 @@
 use crate::analysis::hasher::DeepHasher;
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::{FuncId, Module};
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
@@ -15,11 +16,13 @@ impl Pass for DuplicateFunctionElimination {
         "duplicate-function-elimination"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+
         // 1. Compute hashes
         let mut hashes: HashMap<u64, Vec<FuncId>> = HashMap::new();
 
-        for (id, func) in &module.functions {
+        for (id, func) in functions.iter() {
             if let Some(body) = func.body() {
                 let mut hasher = DefaultHasher::new();
                 // Hash signature too!
@@ -28,8 +31,8 @@ impl Pass for DuplicateFunctionElimination {
                 func.vars().hash(&mut hasher);
 
                 // Hash body
-                let mut visitor = DeepHasher::new(&mut hasher);
-                visitor.hash_expr(body);
+                let mut deep_hasher = DeepHasher::new(&mut hasher);
+                deep_hasher.hash_expr(body, arena);
 
                 let hash = hasher.finish();
                 hashes.entry(hash).or_default().push(id);
@@ -58,17 +61,17 @@ impl Pass for DuplicateFunctionElimination {
         }
 
         // 3. Redirect calls
-        for (_, func) in &mut module.functions {
-            if let Some(body) = func.body_mut() {
+        for (_, func) in functions.iter_mut() {
+            if let Some(mut body) = func.body_mut() {
                 let mut rewriter = CallRedirector {
                     replacements: &replacements,
                 };
-                rewriter.visit(body);
+                rewriter.visit(&mut body, arena);
             }
         }
 
         // 4. Remove functions
-        module.functions.retain(|id, _| !to_remove.contains(&id));
+        functions.retain(|id, _| !to_remove.contains(&id));
     }
 }
 
@@ -76,68 +79,53 @@ struct CallRedirector<'b> {
     replacements: &'b HashMap<FuncId, FuncId>,
 }
 
-impl<'a, 'b> Visitor<'a> for CallRedirector<'b> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if let ExpressionKind::Call { target, .. } = &mut expr.kind {
+impl<'b> Visitor for CallRedirector<'b> {
+    fn visit_expression(
+        &mut self,
+        _expr_id: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        if let ExpressionKind::Call { target, .. } = &mut arena[*_expr_id].kind {
             if let Some(&replacement) = self.replacements.get(target) {
                 *target = replacement;
             }
         }
-        self.visit_children(expr);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::expression::{ExpressionKind, IrBuilder};
+    use crate::ir::expression::IrBuilder;
     use crate::ir::module::Function;
     use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
 
     #[test]
     fn test_dfe() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut module = Module::new();
+
+        let (body1, body2) = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let b1 = builder.const_(Literal::I32(42));
+            let b2 = builder.const_(Literal::I32(42));
+            (b1, b2)
+        };
 
         // Func1: (i32.const 42)
-        let body1 = builder.const_(Literal::I32(42));
-        let func1 = Function::new(
-            "func1".to_string(),
-            Type::NONE,
-            Type::I32,
-            vec![],
-            Some(body1),
-        );
+        let func1 = Function::new("func1".to_string(), Type::NONE, Type::I32, vec![], body1);
 
         // Func2: (i32.const 42) - Identical
-        let body2 = builder.const_(Literal::I32(42));
-        let func2 = Function::new(
-            "func2".to_string(),
-            Type::NONE,
-            Type::I32,
-            vec![],
-            Some(body2),
-        );
+        let func2 = Function::new("func2".to_string(), Type::NONE, Type::I32, vec![], body2);
+
+        let id1 = module.add_function(func1);
+        let id2 = module.add_function(func2);
 
         // Func3: (call $func2)
-        let call = builder.call(
-            "func2",
-            bumpalo::collections::Vec::new_in(&bump),
-            Type::I32,
-            false,
-        );
-        let func3 = Function::new(
-            "func3".to_string(),
-            Type::NONE,
-            Type::I32,
-            vec![],
-            Some(call),
-        );
-
-        let mut module = Module::new(&bump);
-        let id1 = module.add_function(func1);
-        let _id2 = module.add_function(func2);
+        let call = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.call(id2, vec![], Type::I32, false)
+        };
+        let func3 = Function::new("func3".to_string(), Type::NONE, Type::I32, vec![], call);
         let id3 = module.add_function(func3);
 
         let mut pass = DuplicateFunctionElimination;
@@ -150,7 +138,8 @@ mod tests {
         let func3 = module.functions.get(id3).unwrap();
         assert_eq!(func3.name, "func3");
 
-        if let ExpressionKind::Call { target, .. } = func3.body().unwrap().kind {
+        let body_id = func3.body().unwrap();
+        if let ExpressionKind::Call { target, .. } = module.expressions[body_id].kind {
             assert_eq!(target, id1);
         } else {
             panic!("Expected Call");

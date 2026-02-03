@@ -14,20 +14,20 @@
 //
 // ```rust
 // use washm::analysis::effects::{Effect, EffectAnalyzer};
-// use washm::ir::expression::{IrBuilder, ExprRef};
+// use washm::ir::expression::{IrBuilder, ExpressionId};
 // use washm::ir::{Literal, Type};
-// use bumpalo::Bump;
 //
-// let bump = Bump::new();
-// let builder = IrBuilder::new(&bump);
+// // Assuming you have an arena
+// let mut builder = IrBuilder::new(&mut arena);
 // let expr = builder.unreachable();
 //
-// let effect = EffectAnalyzer::analyze(expr);
+// let effect = EffectAnalyzer::analyze(expr, &arena);
 // assert!(effect.may_trap());
 // assert!(effect.transfers_control());
 // ```
 
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use bitflags::bitflags;
 
 bitflags! {
@@ -243,7 +243,8 @@ pub struct EffectAnalyzer;
 
 impl EffectAnalyzer {
     /// Analyzes a single expression and returns its aggregate effects.
-    pub fn analyze<'a>(expr: ExprRef<'a>) -> Effect {
+    pub fn analyze(expr_id: ExpressionId, arena: &IdArena<ExpressionMarker, Expression>) -> Effect {
+        let expr = &arena[expr_id];
         match &expr.kind {
             ExpressionKind::Nop => Effect::NONE,
 
@@ -251,10 +252,10 @@ impl EffectAnalyzer {
 
             ExpressionKind::Unreachable => Effect::TRAPS,
 
-            ExpressionKind::Block { list, .. } => Self::analyze_list(list),
+            ExpressionKind::Block { list, .. } => Self::analyze_list(list, arena),
 
             ExpressionKind::Unary { op, value } => {
-                let mut effects = Self::analyze(*value);
+                let mut effects = Self::analyze(*value, arena);
                 if op.may_trap() {
                     effects |= Effect::MAY_TRAP;
                 }
@@ -262,7 +263,7 @@ impl EffectAnalyzer {
             }
 
             ExpressionKind::Binary { op, left, right } => {
-                let mut effects = Self::analyze(*left) | Self::analyze(*right);
+                let mut effects = Self::analyze(*left, arena) | Self::analyze(*right, arena);
                 if op.may_trap() {
                     effects |= Effect::MAY_TRAP;
                 }
@@ -271,28 +272,34 @@ impl EffectAnalyzer {
 
             ExpressionKind::LocalGet { .. } => Effect::NONE,
 
-            ExpressionKind::LocalSet { value, .. } => Effect::LOCAL_WRITE | Self::analyze(*value),
+            ExpressionKind::LocalSet { value, .. } => {
+                Effect::LOCAL_WRITE | Self::analyze(*value, arena)
+            }
 
-            ExpressionKind::LocalTee { value, .. } => Effect::LOCAL_WRITE | Self::analyze(*value),
+            ExpressionKind::LocalTee { value, .. } => {
+                Effect::LOCAL_WRITE | Self::analyze(*value, arena)
+            }
 
             ExpressionKind::GlobalGet { .. } => Effect::GLOBAL_READ,
 
-            ExpressionKind::GlobalSet { value, .. } => Effect::GLOBAL_WRITE | Self::analyze(*value),
+            ExpressionKind::GlobalSet { value, .. } => {
+                Effect::GLOBAL_WRITE | Self::analyze(*value, arena)
+            }
 
             ExpressionKind::Load { ptr, .. } => {
-                Effect::MEMORY_READ | Effect::MAY_TRAP | Self::analyze(*ptr)
+                Effect::MEMORY_READ | Effect::MAY_TRAP | Self::analyze(*ptr, arena)
             }
 
             ExpressionKind::Store { ptr, value, .. } => {
                 Effect::MEMORY_WRITE
                     | Effect::MAY_TRAP
-                    | Self::analyze(*ptr)
-                    | Self::analyze(*value)
+                    | Self::analyze(*ptr, arena)
+                    | Self::analyze(*value, arena)
             }
 
             ExpressionKind::Call { operands, .. } => {
                 // Calls have arbitrary effects
-                Effect::CALLS | Self::analyze_list(operands)
+                Effect::CALLS | Self::analyze_list(operands, arena)
             }
 
             ExpressionKind::CallIndirect {
@@ -302,34 +309,35 @@ impl EffectAnalyzer {
                 Effect::CALLS
                     | Effect::TABLE_ACCESS
                     | Effect::MAY_TRAP
-                    | Self::analyze(*target)
-                    | Self::analyze_list(operands)
+                    | Self::analyze(*target, arena)
+                    | Self::analyze_list(operands, arena)
             }
 
             ExpressionKind::If {
+                name: _,
                 condition,
                 if_true,
                 if_false,
             } => {
-                let mut effect = Effect::BRANCHES | Self::analyze(*condition);
-                effect |= Self::analyze(*if_true);
+                let mut effect = Effect::BRANCHES | Self::analyze(*condition, arena);
+                effect |= Self::analyze(*if_true, arena);
                 if let Some(if_false_expr) = if_false {
-                    effect |= Self::analyze(*if_false_expr);
+                    effect |= Self::analyze(*if_false_expr, arena);
                 }
                 effect
             }
 
-            ExpressionKind::Loop { body, .. } => Effect::BRANCHES | Self::analyze(*body),
+            ExpressionKind::Loop { body, .. } => Effect::BRANCHES | Self::analyze(*body, arena),
 
             ExpressionKind::Break {
                 condition, value, ..
             } => {
                 let mut effect = Effect::BRANCHES;
                 if let Some(cond) = condition {
-                    effect |= Self::analyze(*cond);
+                    effect |= Self::analyze(*cond, arena);
                 }
                 if let Some(val) = value {
-                    effect |= Self::analyze(*val);
+                    effect |= Self::analyze(*val, arena);
                 }
                 effect
             }
@@ -337,25 +345,29 @@ impl EffectAnalyzer {
             ExpressionKind::Return { value } => {
                 let mut effect = Effect::BRANCHES;
                 if let Some(val) = value {
-                    effect |= Self::analyze(*val);
+                    effect |= Self::analyze(*val, arena);
                 }
                 effect
             }
 
-            ExpressionKind::Drop { value } => Self::analyze(*value),
+            ExpressionKind::Drop { value } => Self::analyze(*value, arena),
 
             ExpressionKind::Select {
                 condition,
                 if_true,
                 if_false,
-            } => Self::analyze(*condition) | Self::analyze(*if_true) | Self::analyze(*if_false),
+            } => {
+                Self::analyze(*condition, arena)
+                    | Self::analyze(*if_true, arena)
+                    | Self::analyze(*if_false, arena)
+            }
 
             ExpressionKind::Switch {
                 condition, value, ..
             } => {
-                let mut effect = Effect::BRANCHES | Self::analyze(*condition);
+                let mut effect = Effect::BRANCHES | Self::analyze(*condition, arena);
                 if let Some(val) = value {
-                    effect |= Self::analyze(*val);
+                    effect |= Self::analyze(*val, arena);
                 }
                 effect
             }
@@ -363,7 +375,7 @@ impl EffectAnalyzer {
             ExpressionKind::MemorySize { .. } => Effect::MEMORY_READ,
 
             ExpressionKind::MemoryGrow { delta, .. } => {
-                Effect::GROWS | Effect::NONDETERMINISTIC | Self::analyze(*delta)
+                Effect::GROWS | Effect::NONDETERMINISTIC | Self::analyze(*delta, arena)
             }
 
             // Atomic operations have memory side effects
@@ -371,8 +383,8 @@ impl EffectAnalyzer {
                 Effect::MEMORY_READ
                     | Effect::MEMORY_WRITE
                     | Effect::MAY_TRAP
-                    | Self::analyze(*ptr)
-                    | Self::analyze(*value)
+                    | Self::analyze(*ptr, arena)
+                    | Self::analyze(*value, arena)
             }
 
             ExpressionKind::AtomicCmpxchg {
@@ -384,9 +396,9 @@ impl EffectAnalyzer {
                 Effect::MEMORY_READ
                     | Effect::MEMORY_WRITE
                     | Effect::MAY_TRAP
-                    | Self::analyze(*ptr)
-                    | Self::analyze(*expected)
-                    | Self::analyze(*replacement)
+                    | Self::analyze(*ptr, arena)
+                    | Self::analyze(*expected, arena)
+                    | Self::analyze(*replacement, arena)
             }
 
             ExpressionKind::AtomicWait {
@@ -398,50 +410,55 @@ impl EffectAnalyzer {
                 Effect::MEMORY_READ
                     | Effect::CALLS
                     | Effect::MAY_TRAP
-                    | Self::analyze(*ptr)
-                    | Self::analyze(*expected)
-                    | Self::analyze(*timeout)
+                    | Self::analyze(*ptr, arena)
+                    | Self::analyze(*expected, arena)
+                    | Self::analyze(*timeout, arena)
             }
 
             ExpressionKind::AtomicNotify { ptr, count, .. } => {
                 Effect::MEMORY_READ
                     | Effect::MEMORY_WRITE
                     | Effect::MAY_TRAP
-                    | Self::analyze(*ptr)
-                    | Self::analyze(*count)
+                    | Self::analyze(*ptr, arena)
+                    | Self::analyze(*count, arena)
             }
 
             ExpressionKind::AtomicFence => Effect::MEMORY_WRITE,
 
             // SIMD operations
-            ExpressionKind::SIMDExtract { vec, .. } => Effect::MAY_TRAP | Self::analyze(*vec),
+            ExpressionKind::SIMDExtract { vec, .. } => {
+                Effect::MAY_TRAP | Self::analyze(*vec, arena)
+            }
 
             ExpressionKind::SIMDReplace { vec, value, .. } => {
-                Effect::MAY_TRAP | Self::analyze(*vec) | Self::analyze(*value)
+                Effect::MAY_TRAP | Self::analyze(*vec, arena) | Self::analyze(*value, arena)
             }
 
             ExpressionKind::SIMDShuffle { left, right, .. } => {
-                Effect::MAY_TRAP | Self::analyze(*left) | Self::analyze(*right)
+                Effect::MAY_TRAP | Self::analyze(*left, arena) | Self::analyze(*right, arena)
             }
 
             ExpressionKind::SIMDTernary { a, b, c, .. } => {
-                Effect::MAY_TRAP | Self::analyze(*a) | Self::analyze(*b) | Self::analyze(*c)
+                Effect::MAY_TRAP
+                    | Self::analyze(*a, arena)
+                    | Self::analyze(*b, arena)
+                    | Self::analyze(*c, arena)
             }
 
             ExpressionKind::SIMDShift { vec, shift, .. } => {
-                Effect::MAY_TRAP | Self::analyze(*vec) | Self::analyze(*shift)
+                Effect::MAY_TRAP | Self::analyze(*vec, arena) | Self::analyze(*shift, arena)
             }
 
             ExpressionKind::SIMDLoad { ptr, .. } => {
-                Effect::MEMORY_READ | Effect::MAY_TRAP | Self::analyze(*ptr)
+                Effect::MEMORY_READ | Effect::MAY_TRAP | Self::analyze(*ptr, arena)
             }
 
             ExpressionKind::SIMDLoadStoreLane { ptr, vec, .. } => {
                 Effect::MEMORY_READ
                     | Effect::MEMORY_WRITE
                     | Effect::MAY_TRAP
-                    | Self::analyze(*ptr)
-                    | Self::analyze(*vec)
+                    | Self::analyze(*ptr, arena)
+                    | Self::analyze(*vec, arena)
             }
 
             ExpressionKind::MemoryInit {
@@ -449,9 +466,9 @@ impl EffectAnalyzer {
             } => {
                 Effect::MEMORY_WRITE
                     | Effect::MAY_TRAP
-                    | Self::analyze(*dest)
-                    | Self::analyze(*offset)
-                    | Self::analyze(*size)
+                    | Self::analyze(*dest, arena)
+                    | Self::analyze(*offset, arena)
+                    | Self::analyze(*size, arena)
             }
 
             ExpressionKind::DataDrop { .. } => Effect::MEMORY_WRITE,
@@ -462,9 +479,9 @@ impl EffectAnalyzer {
                 Effect::MEMORY_READ
                     | Effect::MEMORY_WRITE
                     | Effect::MAY_TRAP
-                    | Self::analyze(*dest)
-                    | Self::analyze(*src)
-                    | Self::analyze(*size)
+                    | Self::analyze(*dest, arena)
+                    | Self::analyze(*src, arena)
+                    | Self::analyze(*size, arena)
             }
 
             ExpressionKind::MemoryFill {
@@ -472,106 +489,122 @@ impl EffectAnalyzer {
             } => {
                 Effect::MEMORY_WRITE
                     | Effect::MAY_TRAP
-                    | Self::analyze(*dest)
-                    | Self::analyze(*value)
-                    | Self::analyze(*size)
+                    | Self::analyze(*dest, arena)
+                    | Self::analyze(*value, arena)
+                    | Self::analyze(*size, arena)
             }
             ExpressionKind::TableGet { index, .. } => {
-                Effect::TABLE_ACCESS | Effect::MAY_TRAP | Self::analyze(*index)
+                Effect::TABLE_ACCESS | Effect::MAY_TRAP | Self::analyze(*index, arena)
             }
             ExpressionKind::TableSet { index, value, .. } => {
                 Effect::TABLE_ACCESS
                     | Effect::MAY_TRAP
-                    | Self::analyze(*index)
-                    | Self::analyze(*value)
+                    | Self::analyze(*index, arena)
+                    | Self::analyze(*value, arena)
             }
             ExpressionKind::TableSize { .. } => Effect::TABLE_ACCESS,
             ExpressionKind::TableGrow { delta, value, .. } => {
-                Effect::TABLE_ACCESS | Effect::GROWS | Self::analyze(*delta) | Self::analyze(*value)
+                Effect::TABLE_ACCESS
+                    | Effect::GROWS
+                    | Self::analyze(*delta, arena)
+                    | Self::analyze(*value, arena)
             }
             ExpressionKind::TableFill {
                 dest, value, size, ..
             } => {
                 Effect::TABLE_ACCESS
                     | Effect::MAY_TRAP
-                    | Self::analyze(*dest)
-                    | Self::analyze(*value)
-                    | Self::analyze(*size)
+                    | Self::analyze(*dest, arena)
+                    | Self::analyze(*value, arena)
+                    | Self::analyze(*size, arena)
             }
             ExpressionKind::TableCopy {
                 dest, src, size, ..
             } => {
                 Effect::TABLE_ACCESS
                     | Effect::MAY_TRAP
-                    | Self::analyze(*dest)
-                    | Self::analyze(*src)
-                    | Self::analyze(*size)
+                    | Self::analyze(*dest, arena)
+                    | Self::analyze(*src, arena)
+                    | Self::analyze(*size, arena)
             }
             ExpressionKind::TableInit {
                 dest, offset, size, ..
             } => {
                 Effect::TABLE_ACCESS
                     | Effect::MAY_TRAP
-                    | Self::analyze(*dest)
-                    | Self::analyze(*offset)
-                    | Self::analyze(*size)
+                    | Self::analyze(*dest, arena)
+                    | Self::analyze(*offset, arena)
+                    | Self::analyze(*size, arena)
             }
             ExpressionKind::RefNull { .. } => Effect::NONE,
-            ExpressionKind::RefIsNull { value } => Self::analyze(*value),
-            ExpressionKind::RefAs { value, .. } => Effect::MAY_TRAP | Self::analyze(*value),
-            ExpressionKind::RefEq { left, right } => Self::analyze(*left) | Self::analyze(*right),
+            ExpressionKind::RefIsNull { value } => Self::analyze(*value, arena),
+            ExpressionKind::RefAs { value, .. } => Effect::MAY_TRAP | Self::analyze(*value, arena),
+            ExpressionKind::RefEq { left, right } => {
+                Self::analyze(*left, arena) | Self::analyze(*right, arena)
+            }
             ExpressionKind::RefFunc { .. } => Effect::NONE,
             ExpressionKind::StructNew { operands, .. } => {
-                Effect::HEAPS_WRITE | Self::analyze_list(operands)
+                Effect::HEAPS_WRITE | Self::analyze_list(operands, arena)
             }
             ExpressionKind::StructGet { ptr, .. } => {
-                Effect::HEAPS_READ | Effect::MAY_TRAP | Self::analyze(*ptr)
+                Effect::HEAPS_READ | Effect::MAY_TRAP | Self::analyze(*ptr, arena)
             }
             ExpressionKind::StructSet { ptr, value, .. } => {
-                Effect::HEAPS_WRITE | Effect::MAY_TRAP | Self::analyze(*ptr) | Self::analyze(*value)
+                Effect::HEAPS_WRITE
+                    | Effect::MAY_TRAP
+                    | Self::analyze(*ptr, arena)
+                    | Self::analyze(*value, arena)
             }
             ExpressionKind::ArrayNew { size, init, .. } => {
-                let mut e = Effect::HEAPS_WRITE | Effect::MAY_TRAP | Self::analyze(*size);
+                let mut e = Effect::HEAPS_WRITE | Effect::MAY_TRAP | Self::analyze(*size, arena);
                 if let Some(i) = init {
-                    e |= Self::analyze(*i);
+                    e |= Self::analyze(*i, arena);
                 }
                 e
             }
             ExpressionKind::ArrayGet { ptr, index, .. } => {
-                Effect::HEAPS_READ | Effect::MAY_TRAP | Self::analyze(*ptr) | Self::analyze(*index)
+                Effect::HEAPS_READ
+                    | Effect::MAY_TRAP
+                    | Self::analyze(*ptr, arena)
+                    | Self::analyze(*index, arena)
             }
             ExpressionKind::ArraySet {
                 ptr, index, value, ..
             } => {
                 Effect::HEAPS_WRITE
                     | Effect::MAY_TRAP
-                    | Self::analyze(*ptr)
-                    | Self::analyze(*index)
-                    | Self::analyze(*value)
+                    | Self::analyze(*ptr, arena)
+                    | Self::analyze(*index, arena)
+                    | Self::analyze(*value, arena)
             }
-            ExpressionKind::ArrayLen { ptr } => Effect::MAY_TRAP | Self::analyze(*ptr),
+            ExpressionKind::ArrayLen { ptr } => Effect::MAY_TRAP | Self::analyze(*ptr, arena),
             ExpressionKind::Try {
                 body, catch_bodies, ..
-            } => Self::analyze(*body) | Self::analyze_list(catch_bodies),
-            ExpressionKind::Throw { operands, .. } => Effect::THROWS | Self::analyze_list(operands),
+            } => Self::analyze(*body, arena) | Self::analyze_list(catch_bodies, arena),
+            ExpressionKind::Throw { operands, .. } => {
+                Effect::THROWS | Self::analyze_list(operands, arena)
+            }
             ExpressionKind::Rethrow { .. } => Effect::THROWS,
-            ExpressionKind::TupleMake { operands } => Self::analyze_list(operands),
-            ExpressionKind::TupleExtract { tuple, .. } => Self::analyze(*tuple),
+            ExpressionKind::TupleMake { operands } => Self::analyze_list(operands, arena),
+            ExpressionKind::TupleExtract { tuple, .. } => Self::analyze(*tuple, arena),
             ExpressionKind::ElemDrop { .. } => Effect::NONE,
             ExpressionKind::Pop { .. } => Effect::NONE,
-            ExpressionKind::I31New { value } => Self::analyze(*value),
-            ExpressionKind::I31Get { i31, .. } => Self::analyze(*i31),
+            ExpressionKind::I31New { value } => Self::analyze(*value, arena),
+            ExpressionKind::I31Get { i31, .. } => Self::analyze(*i31, arena),
             ExpressionKind::RefTest { value, .. }
             | ExpressionKind::RefCast { value, .. }
-            | ExpressionKind::BrOn { value, .. } => Self::analyze(*value),
+            | ExpressionKind::BrOn { value, .. } => Self::analyze(*value, arena),
         }
     }
 
     /// Analyzes a list of expressions and returns the union of their effects.
-    pub fn analyze_list<'a>(exprs: &[ExprRef<'a>]) -> Effect {
+    pub fn analyze_list(
+        exprs: &[ExpressionId],
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) -> Effect {
         let mut effect = Effect::NONE;
         for expr in exprs {
-            effect |= Self::analyze(*expr);
+            effect |= Self::analyze(*expr, arena);
         }
         effect
     }
@@ -580,12 +613,17 @@ impl EffectAnalyzer {
     ///
     /// This is useful for checking if there are interfering effects between
     /// two operations in a block.
-    pub fn analyze_range<'a>(exprs: &[ExprRef<'a>], start: usize, end: usize) -> Effect {
+    pub fn analyze_range(
+        exprs: &[ExpressionId],
+        start: usize,
+        end: usize,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) -> Effect {
         let mut effect = Effect::NONE;
         for i in start..end {
             if i < exprs.len() {
-                let e: ExprRef = exprs[i];
-                effect |= Self::analyze(e);
+                let e = exprs[i];
+                effect |= Self::analyze(e, arena);
             }
         }
         effect
@@ -596,9 +634,8 @@ impl EffectAnalyzer {
 mod tests {
     use super::*;
     use crate::collections::Id;
-    use crate::ir::expression::{ExprRef, IrBuilder};
-    use crate::ir::{FuncId, GlobalId, Literal, MemoryId, Type};
-    use bumpalo::Bump;
+    use crate::ir::expression::IrBuilder;
+    use crate::ir::{FuncId, GlobalId, Literal, LocalId, MemoryId, Type};
 
     #[test]
     fn test_effect_none() {
@@ -728,86 +765,86 @@ mod tests {
 
     #[test]
     fn test_analyzer_nop() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
         let nop = builder.nop();
 
-        let effect = EffectAnalyzer::analyze(nop);
+        let effect = EffectAnalyzer::analyze(nop, &arena);
         assert_eq!(effect, Effect::NONE);
     }
 
     #[test]
     fn test_analyzer_const() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
         let const_expr = builder.const_(Literal::I32(42));
 
-        let effect = EffectAnalyzer::analyze(const_expr);
+        let effect = EffectAnalyzer::analyze(const_expr, &arena);
         assert_eq!(effect, Effect::NONE);
     }
 
     #[test]
     fn test_analyzer_unreachable() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
         let unreachable = builder.unreachable();
 
-        let effect = EffectAnalyzer::analyze(unreachable);
+        let effect = EffectAnalyzer::analyze(unreachable, &arena);
         assert!(effect.traps());
         assert!(effect.transfers_control());
     }
 
     #[test]
     fn test_analyzer_local_get() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let local_get = builder.local_get(0, Type::I32);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
+        let local_get = builder.local_get(LocalId::from(0), Type::I32);
 
-        let effect = EffectAnalyzer::analyze(local_get);
+        let effect = EffectAnalyzer::analyze(local_get, &arena);
         assert_eq!(effect, Effect::NONE);
     }
 
     #[test]
     fn test_analyzer_local_set() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
         let value = builder.const_(Literal::I32(42));
-        let local_set = builder.local_set(0, value);
+        let local_set = builder.local_set(LocalId::from(0), value);
 
-        let effect = EffectAnalyzer::analyze(local_set);
+        let effect = EffectAnalyzer::analyze(local_set, &arena);
         assert!(effect.writes_local());
         assert!(!effect.reads_state());
     }
 
     #[test]
     fn test_analyzer_global_get() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
         let g0_id: GlobalId = Id::from_raw_parts(0, 0);
         let global_get = builder.global_get(g0_id, Type::I32);
 
-        let effect = EffectAnalyzer::analyze(global_get);
+        let effect = EffectAnalyzer::analyze(global_get, &arena);
         assert!(effect.reads_global());
         assert!(!effect.writes_global());
     }
 
     #[test]
     fn test_analyzer_global_set() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
         let value = builder.const_(Literal::I32(42));
         let g0_id: GlobalId = Id::from_raw_parts(0, 0);
         let global_set = builder.global_set(g0_id, value);
 
-        let effect = EffectAnalyzer::analyze(global_set);
+        let effect = EffectAnalyzer::analyze(global_set, &arena);
         assert!(effect.writes_global());
         assert!(effect.writes_state());
     }
 
     #[test]
     fn test_analyzer_load() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
         let ptr = builder.const_(Literal::I32(0));
         let load = builder.load(
             MemoryId::from_raw_parts(0, 0),
@@ -819,7 +856,7 @@ mod tests {
             Type::I32,
         );
 
-        let effect = EffectAnalyzer::analyze(load);
+        let effect = EffectAnalyzer::analyze(load, &arena);
         assert!(effect.reads_memory());
         assert!(effect.may_trap());
         assert!(!effect.writes_memory());
@@ -827,13 +864,13 @@ mod tests {
 
     #[test]
     fn test_analyzer_store() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
         let ptr = builder.const_(Literal::I32(0));
         let value = builder.const_(Literal::I32(42));
         let store = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, value, ptr);
 
-        let effect = EffectAnalyzer::analyze(store);
+        let effect = EffectAnalyzer::analyze(store, &arena);
         assert!(effect.writes_memory());
         assert!(effect.may_trap());
         assert!(!effect.reads_memory());
@@ -841,9 +878,9 @@ mod tests {
 
     #[test]
     fn test_analyzer_call() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let operands = bumpalo::vec![in &bump;];
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
+        let operands = vec![];
         let call = builder.call(
             FuncId::from_raw_parts(0, 0), /* foo */
             operands,
@@ -851,45 +888,45 @@ mod tests {
             false,
         );
 
-        let effect = EffectAnalyzer::analyze(call);
+        let effect = EffectAnalyzer::analyze(call, &arena);
         assert!(effect.calls());
         assert!(effect.has_side_effects());
     }
 
     #[test]
     fn test_analyzer_block_aggregation() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let (store1, load, call) = {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        let store1 = builder.store(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            0,
-            4,
-            builder.const_(Literal::I32(0)),
-            builder.const_(Literal::I32(1)),
-        );
-        let load = builder.load(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            false,
-            0,
-            4,
-            builder.const_(Literal::I32(4)),
-            Type::I32,
-        );
-        let operands = bumpalo::vec![in &bump;];
-        let call = builder.call(
-            FuncId::from_raw_parts(0, 0), /* bar */
-            operands,
-            Type::I32,
-            false,
-        );
+            let c0 = builder.const_(Literal::I32(0));
+            let c1 = builder.const_(Literal::I32(1));
+            let store1 = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, c0, c1);
+            let c4 = builder.const_(Literal::I32(4));
+            let load = builder.load(
+                MemoryId::from_raw_parts(0, 0),
+                4,
+                false,
+                0,
+                4,
+                c4,
+                Type::I32,
+            );
+            let call = builder.call(
+                FuncId::from_raw_parts(0, 0), /* bar */
+                vec![],
+                Type::I32,
+                false,
+            );
+            (store1, load, call)
+        };
 
-        let list = bumpalo::vec![in &bump; store1, load, call];
-        let block = builder.block(None, list, Type::I32);
+        let block = {
+            let mut builder = IrBuilder::new(&mut arena);
+            builder.block(None::<String>, vec![store1, load, call], Type::I32)
+        };
 
-        let effect = EffectAnalyzer::analyze(block);
+        let effect = EffectAnalyzer::analyze(block, &arena);
         assert!(effect.writes_memory());
         assert!(effect.reads_memory());
         assert!(effect.calls());
@@ -898,100 +935,104 @@ mod tests {
 
     #[test]
     fn test_analyzer_if_aggregation() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         let condition = builder.const_(Literal::I32(1));
         let g0_id: GlobalId = Id::from_raw_parts(0, 0);
-        let true_branch = builder.global_set(g0_id, builder.const_(Literal::I32(1)));
-        let false_branch = builder.local_set(0, builder.const_(Literal::I32(2)));
+        let c1 = builder.const_(Literal::I32(1));
+        let true_branch = builder.global_set(g0_id, c1);
+        let c2 = builder.const_(Literal::I32(2));
+        let false_branch = builder.local_set(LocalId::from(0), c2);
 
-        let if_expr = builder.if_(condition, true_branch, Some(false_branch), Type::I32);
+        let if_expr = builder.if_(
+            None::<String>,
+            condition,
+            true_branch,
+            Some(false_branch),
+            Type::I32,
+        );
 
-        let effect = EffectAnalyzer::analyze(if_expr);
+        let effect = EffectAnalyzer::analyze(if_expr, &arena);
         assert!(effect.writes_global());
         assert!(effect.writes_local());
     }
 
     #[test]
     fn test_analyzer_binary_may_trap() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
         let left = builder.const_(Literal::I32(10));
         let right = builder.const_(Literal::I32(0));
         let div = builder.binary(crate::ir::ops::BinaryOp::DivSInt32, left, right, Type::I32);
 
-        let effect = EffectAnalyzer::analyze(div);
+        let effect = EffectAnalyzer::analyze(div, &arena);
         assert!(effect.may_trap());
     }
 
     #[test]
     fn test_analyzer_break() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
         let br = builder.break_("loop", None, None, Type::NONE);
 
-        let effect = EffectAnalyzer::analyze(br);
+        let effect = EffectAnalyzer::analyze(br, &arena);
         assert!(effect.transfers_control());
         assert!(effect.contains(Effect::BRANCHES));
     }
 
     #[test]
     fn test_analyzer_return() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
         let value = builder.const_(Literal::I32(42));
         let ret = builder.return_(Some(value));
 
-        let effect = EffectAnalyzer::analyze(ret);
+        let effect = EffectAnalyzer::analyze(ret, &arena);
         assert!(effect.transfers_control());
         assert!(effect.contains(Effect::BRANCHES));
     }
 
     #[test]
     fn test_analyzer_range() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         let nop = builder.nop();
-        let store = builder.store(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            0,
-            4,
-            builder.const_(Literal::I32(0)),
-            builder.const_(Literal::I32(1)),
-        );
-        let operands = bumpalo::vec![in &bump;];
+        let c0 = builder.const_(Literal::I32(0));
+        let c1 = builder.const_(Literal::I32(1));
+        let store = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, c0, c1);
+        let operands = vec![];
         let call = builder.call(
             FuncId::from_raw_parts(0, 0), /* foo */
             operands,
             Type::I32,
             false,
         );
+        let ptr_load = builder.const_(Literal::I32(0));
         let load = builder.load(
             MemoryId::from_raw_parts(0, 0),
             4,
             false,
             0,
             4,
-            builder.const_(Literal::I32(0)),
+            ptr_load,
             Type::I32,
         );
 
         let exprs = vec![nop, store, call, load];
 
         // Range 0..1: just nop
-        let effect = EffectAnalyzer::analyze_range(&exprs, 0, 1);
+        let effect = EffectAnalyzer::analyze_range(&exprs, 0, 1, &arena);
         assert_eq!(effect, Effect::NONE);
 
         // Range 1..3: store and call
-        let effect = EffectAnalyzer::analyze_range(&exprs, 1, 3);
+        let effect = EffectAnalyzer::analyze_range(&exprs, 1, 3, &arena);
         assert!(effect.writes_memory());
         assert!(effect.calls());
 
         // Range 2..3: just call
-        let effect = EffectAnalyzer::analyze_range(&exprs, 2, 3);
+        let effect = EffectAnalyzer::analyze_range(&exprs, 2, 3, &arena);
         assert!(effect.calls());
         assert!(!effect.writes_memory());
     }
@@ -1000,73 +1041,74 @@ mod tests {
 
     #[test]
     fn test_analyzer_loop() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
-        let body = builder.store(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            0,
-            4,
-            builder.const_(Literal::I32(0)),
-            builder.const_(Literal::I32(42)),
-        );
+        let ptr = builder.const_(Literal::I32(0));
+        let val = builder.const_(Literal::I32(42));
+        let body = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, ptr, val);
         let loop_expr = builder.loop_(Some("myloop"), body, Type::NONE);
 
-        let effect = EffectAnalyzer::analyze(loop_expr);
+        let effect = EffectAnalyzer::analyze(loop_expr, &arena);
         assert!(effect.writes_memory());
         assert!(effect.may_trap());
     }
 
     #[test]
     fn test_analyzer_local_tee() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         let value = builder.const_(Literal::I32(42));
-        let tee = builder.local_tee(0, value, Type::I32);
+        let tee = builder.local_tee(LocalId::from(0), value, Type::I32);
 
-        let effect = EffectAnalyzer::analyze(tee);
+        let effect = EffectAnalyzer::analyze(tee, &arena);
         assert!(effect.writes_local());
         assert!(!effect.reads_global());
     }
 
     #[test]
     fn test_analyzer_drop() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let drop1;
+        let drop2;
+        {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // Drop of pure expression
-        let const_val = builder.const_(Literal::I32(42));
-        let drop1 = builder.drop(const_val);
-        let effect1 = EffectAnalyzer::analyze(drop1);
+            // Drop of pure expression
+            let const_val = builder.const_(Literal::I32(42));
+            drop1 = builder.drop(const_val);
+
+            // Drop of call (has side effects)
+            let operands = vec![];
+            let call = builder.call(
+                FuncId::from_raw_parts(0, 0), /* foo */
+                operands,
+                Type::I32,
+                false,
+            );
+            drop2 = builder.drop(call);
+        }
+
+        let effect1 = EffectAnalyzer::analyze(drop1, &arena);
         assert_eq!(effect1, Effect::NONE);
 
-        // Drop of call (has side effects)
-        let operands = bumpalo::vec![in &bump;];
-        let call = builder.call(
-            FuncId::from_raw_parts(0, 0), /* foo */
-            operands,
-            Type::I32,
-            false,
-        );
-        let drop2 = builder.drop(call);
-        let effect2 = EffectAnalyzer::analyze(drop2);
+        let effect2 = EffectAnalyzer::analyze(drop2, &arena);
         assert!(effect2.calls());
     }
 
     #[test]
     fn test_analyzer_select() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         let condition = builder.const_(Literal::I32(1));
         let g0_id: GlobalId = Id::from_raw_parts(0, 0);
         let if_true = builder.global_get(g0_id, Type::I32);
-        let if_false = builder.local_get(1, Type::I32);
+        let if_false = builder.local_get(LocalId::from(1), Type::I32);
         let select = builder.select(condition, if_true, if_false, Type::I32);
 
-        let effect = EffectAnalyzer::analyze(select);
+        let effect = EffectAnalyzer::analyze(select, &arena);
         assert!(effect.reads_global());
         assert!(!effect.writes_global());
         assert!(!effect.writes_local());
@@ -1074,18 +1116,18 @@ mod tests {
 
     #[test]
     fn test_analyzer_select_with_side_effects() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         let condition = builder.const_(Literal::I32(1));
-        let operands1 = bumpalo::vec![in &bump;];
+        let operands1 = vec![];
         let if_true = builder.call(
             FuncId::from_raw_parts(0, 0), /* foo */
             operands1,
             Type::I32,
             false,
         );
-        let operands2 = bumpalo::vec![in &bump;];
+        let operands2 = vec![];
         let if_false = builder.call(
             FuncId::from_raw_parts(0, 0), /* bar */
             operands2,
@@ -1094,32 +1136,32 @@ mod tests {
         );
         let select = builder.select(condition, if_true, if_false, Type::I32);
 
-        let effect = EffectAnalyzer::analyze(select);
+        let effect = EffectAnalyzer::analyze(select, &arena);
         assert!(effect.calls());
         assert!(effect.has_side_effects());
     }
 
     #[test]
     fn test_analyzer_memory_grow() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         let delta = builder.const_(Literal::I32(1));
         let grow = builder.memory_grow(MemoryId::from_raw_parts(0, 0), delta);
 
-        let effect = EffectAnalyzer::analyze(grow);
+        let effect = EffectAnalyzer::analyze(grow, &arena);
         assert!(effect.contains(Effect::GROWS));
         assert!(effect.contains(Effect::NONDETERMINISTIC));
     }
 
     #[test]
     fn test_analyzer_memory_size() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         let size = builder.memory_size(MemoryId::from_raw_parts(0, 0));
 
-        let effect = EffectAnalyzer::analyze(size);
+        let effect = EffectAnalyzer::analyze(size, &arena);
         assert!(effect.reads_memory());
         assert!(!effect.writes_memory());
     }
@@ -1135,27 +1177,22 @@ mod tests {
 
     #[test]
     fn test_analyzer_nested_control_flow() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         // Nested: if (cond) { loop { store; break; } }
-        let store = builder.store(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            0,
-            4,
-            builder.const_(Literal::I32(0)),
-            builder.const_(Literal::I32(42)),
-        );
+        let c0 = builder.const_(Literal::I32(0));
+        let c42 = builder.const_(Literal::I32(42));
+        let store = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, c0, c42);
         let br = builder.break_("myloop", None, None, Type::NONE);
-        let loop_list = bumpalo::vec![in &bump; store, br];
-        let loop_block = builder.block(None, loop_list, Type::NONE);
+        let loop_list = vec![store, br];
+        let loop_block = builder.block(None::<String>, loop_list, Type::NONE);
         let loop_expr = builder.loop_(Some("myloop"), loop_block, Type::NONE);
 
         let condition = builder.const_(Literal::I32(1));
-        let if_expr = builder.if_(condition, loop_expr, None, Type::NONE);
+        let if_expr = builder.if_(None::<&str>, condition, loop_expr, None, Type::NONE);
 
-        let effect = EffectAnalyzer::analyze(if_expr);
+        let effect = EffectAnalyzer::analyze(if_expr, &arena);
         assert!(effect.writes_memory());
         assert!(effect.transfers_control());
         assert!(effect.may_trap());
@@ -1163,23 +1200,23 @@ mod tests {
 
     #[test]
     fn test_analyzer_empty_block() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
-        let empty_list = bumpalo::vec![in &bump;];
-        let block = builder.block(None, empty_list, Type::NONE);
+        let empty_list = vec![];
+        let block = builder.block("", empty_list, Type::NONE);
 
-        let effect = EffectAnalyzer::analyze(block);
+        let effect = EffectAnalyzer::analyze(block, &arena);
         assert_eq!(effect, Effect::NONE);
     }
 
     #[test]
     fn test_analyzer_unary_propagates_child_effects() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         // Unary wrapping a call
-        let operands = bumpalo::vec![in &bump;];
+        let operands = vec![];
         let call = builder.call(
             FuncId::from_raw_parts(0, 0), /* foo */
             operands,
@@ -1188,18 +1225,18 @@ mod tests {
         );
         let unary = builder.unary(crate::ir::ops::UnaryOp::EqZInt32, call, Type::I32);
 
-        let effect = EffectAnalyzer::analyze(unary);
+        let effect = EffectAnalyzer::analyze(unary, &arena);
         assert!(effect.calls());
     }
 
     #[test]
     fn test_analyzer_binary_propagates_both_children() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         let g0_id: GlobalId = Id::from_raw_parts(0, 0);
         let left = builder.global_get(g0_id, Type::I32);
-        let operands = bumpalo::vec![in &bump;];
+        let operands = vec![];
         let right = builder.call(
             FuncId::from_raw_parts(0, 0), /* foo */
             operands,
@@ -1208,21 +1245,22 @@ mod tests {
         );
         let binary = builder.binary(crate::ir::ops::BinaryOp::AddInt32, left, right, Type::I32);
 
-        let effect = EffectAnalyzer::analyze(binary);
+        let effect = EffectAnalyzer::analyze(binary, &arena);
         assert!(effect.reads_global());
         assert!(effect.calls());
     }
 
     #[test]
     fn test_analyzer_if_without_else() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         let condition = builder.const_(Literal::I32(1));
-        let true_branch = builder.local_set(0, builder.const_(Literal::I32(42)));
-        let if_expr = builder.if_(condition, true_branch, None, Type::NONE);
+        let c42 = builder.const_(Literal::I32(42));
+        let true_branch = builder.local_set(LocalId::from(0), c42);
+        let if_expr = builder.if_(None::<&str>, condition, true_branch, None, Type::NONE);
 
-        let effect = EffectAnalyzer::analyze(if_expr);
+        let effect = EffectAnalyzer::analyze(if_expr, &arena);
         assert!(effect.writes_local());
         assert!(!effect.writes_global());
     }
@@ -1270,50 +1308,46 @@ mod tests {
 
     #[test]
     fn test_analyzer_list_empty() {
-        let empty: Vec<ExprRef> = vec![];
-        let effect = EffectAnalyzer::analyze_list(&empty);
+        let arena = IdArena::new();
+        let empty: Vec<ExpressionId> = vec![];
+        let effect = EffectAnalyzer::analyze_list(&empty, &arena);
         assert_eq!(effect, Effect::NONE);
     }
 
     #[test]
     fn test_analyzer_range_out_of_bounds() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         let nop = builder.nop();
         let exprs = vec![nop];
 
         // Range beyond array bounds should be handled gracefully
-        let effect = EffectAnalyzer::analyze_range(&exprs, 0, 10);
+        let effect = EffectAnalyzer::analyze_range(&exprs, 0, 10, &arena);
         assert_eq!(effect, Effect::NONE);
     }
 
     #[test]
     fn test_analyzer_range_reversed() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
-        let store = builder.store(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            0,
-            4,
-            builder.const_(Literal::I32(0)),
-            builder.const_(Literal::I32(1)),
-        );
+        let ptr = builder.const_(Literal::I32(0));
+        let value = builder.const_(Literal::I32(1));
+        let store = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, ptr, value);
         let exprs = vec![store];
 
         // Reversed range (start > end) should return NONE
-        let effect = EffectAnalyzer::analyze_range(&exprs, 1, 0);
+        let effect = EffectAnalyzer::analyze_range(&exprs, 1, 0, &arena);
         assert_eq!(effect, Effect::NONE);
     }
 
     #[test]
     fn test_analyzer_return_with_side_effect_value() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
-        let operands = bumpalo::vec![in &bump;];
+        let operands = vec![];
         let call = builder.call(
             FuncId::from_raw_parts(0, 0), /* foo */
             operands,
@@ -1322,24 +1356,24 @@ mod tests {
         );
         let ret = builder.return_(Some(call));
 
-        let effect = EffectAnalyzer::analyze(ret);
+        let effect = EffectAnalyzer::analyze(ret, &arena);
         assert!(effect.calls());
         assert!(effect.transfers_control());
     }
 
     #[test]
     fn test_analyzer_break_with_condition_and_value() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
-        let operands1 = bumpalo::vec![in &bump;];
+        let operands1 = vec![];
         let condition = builder.call(
             FuncId::from_raw_parts(0, 0), /* should_break */
             operands1,
             Type::I32,
             false,
         );
-        let operands2 = bumpalo::vec![in &bump;];
+        let operands2 = vec![];
         let value = builder.call(
             FuncId::from_raw_parts(0, 0), /* get_value */
             operands2,
@@ -1348,7 +1382,7 @@ mod tests {
         );
         let br = builder.break_("loop", Some(condition), Some(value), Type::I32);
 
-        let effect = EffectAnalyzer::analyze(br);
+        let effect = EffectAnalyzer::analyze(br, &arena);
         assert!(effect.calls());
         assert!(effect.transfers_control());
     }
@@ -1369,28 +1403,32 @@ mod tests {
 
     #[test]
     fn test_interference_memory_read_write_conflict() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let load;
+        let store;
+        {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // Load from address 0
-        let ptr1 = builder.const_(Literal::I32(0));
-        let load = builder.load(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            false,
-            0,
-            4,
-            ptr1,
-            Type::I32,
-        );
+            // Load from address 0
+            let ptr1 = builder.const_(Literal::I32(0));
+            load = builder.load(
+                MemoryId::from_raw_parts(0, 0),
+                4,
+                false,
+                0,
+                4,
+                ptr1,
+                Type::I32,
+            );
 
-        // Store to address 0
-        let ptr2 = builder.const_(Literal::I32(0));
-        let value = builder.const_(Literal::I32(42));
-        let store = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, value, ptr2);
+            // Store to address 0
+            let ptr2 = builder.const_(Literal::I32(0));
+            let value = builder.const_(Literal::I32(42));
+            store = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, value, ptr2);
+        }
 
-        let load_effect = EffectAnalyzer::analyze(load);
-        let store_effect = EffectAnalyzer::analyze(store);
+        let load_effect = EffectAnalyzer::analyze(load, &arena);
+        let store_effect = EffectAnalyzer::analyze(store, &arena);
 
         // Read-write conflict should be detected
         assert!(load_effect.interferes_with(store_effect));
@@ -1405,19 +1443,23 @@ mod tests {
 
     #[test]
     fn test_interference_global_read_write_conflict() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // Read global 0
+        let mut arena = IdArena::new();
+        let global_get;
+        let global_set;
         let g0_id: GlobalId = Id::from_raw_parts(0, 0);
-        let global_get = builder.global_get(g0_id, Type::I32);
+        {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // Write to global 0
-        let value = builder.const_(Literal::I32(42));
-        let global_set = builder.global_set(g0_id, value);
+            // Read global 0
+            global_get = builder.global_get(g0_id, Type::I32);
 
-        let read_effect = EffectAnalyzer::analyze(global_get);
-        let write_effect = EffectAnalyzer::analyze(global_set);
+            // Write to global 0
+            let value = builder.const_(Literal::I32(42));
+            global_set = builder.global_set(g0_id, value);
+        }
+
+        let read_effect = EffectAnalyzer::analyze(global_get, &arena);
+        let write_effect = EffectAnalyzer::analyze(global_set, &arena);
 
         // Read-write conflict on globals
         assert!(read_effect.interferes_with(write_effect));
@@ -1431,18 +1473,24 @@ mod tests {
 
     #[test]
     fn test_no_interference_different_effect_types() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let local_set;
+        let global_set;
+        {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // LocalSet (writes locals, doesn't trap if value is pure)
-        let local_set = builder.local_set(0, builder.const_(Literal::I32(10)));
+            // LocalSet (writes locals, doesn't trap if value is pure)
+            let c10 = builder.const_(Literal::I32(10));
+            local_set = builder.local_set(LocalId::from(0), c10);
 
-        // GlobalSet (writes globals, doesn't trap if value is pure)
-        let g1_id: GlobalId = Id::from_raw_parts(1, 0);
-        let global_set = builder.global_set(g1_id, builder.const_(Literal::I32(20)));
+            // GlobalSet (writes globals, doesn't trap if value is pure)
+            let g1_id: GlobalId = Id::from_raw_parts(1, 0);
+            let c20 = builder.const_(Literal::I32(20));
+            global_set = builder.global_set(g1_id, c20);
+        }
 
-        let local_effect = EffectAnalyzer::analyze(local_set);
-        let global_effect = EffectAnalyzer::analyze(global_set);
+        let local_effect = EffectAnalyzer::analyze(local_set, &arena);
+        let global_effect = EffectAnalyzer::analyze(global_set, &arena);
 
         // Different effect domains (local vs global) should not interfere
         assert!(!local_effect.interferes_with(global_effect));
@@ -1457,18 +1505,21 @@ mod tests {
 
     #[test]
     fn test_interference_call_blocks_everything() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let call;
+        {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // Call has arbitrary effects
-        let operands = bumpalo::vec![in &bump;];
-        let call = builder.call(
-            FuncId::from_raw_parts(0, 0), /* arbitrary */
-            operands,
-            Type::I32,
-            false,
-        );
-        let call_effect = EffectAnalyzer::analyze(call);
+            // Call has arbitrary effects
+            let operands = vec![];
+            call = builder.call(
+                FuncId::from_raw_parts(0, 0), /* arbitrary */
+                operands,
+                Type::I32,
+                false,
+            );
+        }
+        let call_effect = EffectAnalyzer::analyze(call, &arena);
 
         // Call should interfere with NONE
         assert!(call_effect.interferes_with(Effect::NONE));
@@ -1488,12 +1539,15 @@ mod tests {
 
     #[test]
     fn test_interference_trap_blocks_everything() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let unreachable;
+        {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // Unreachable always traps
-        let unreachable = builder.unreachable();
-        let trap_effect = EffectAnalyzer::analyze(unreachable);
+            // Unreachable always traps
+            unreachable = builder.unreachable();
+        }
+        let trap_effect = EffectAnalyzer::analyze(unreachable, &arena);
 
         assert!(trap_effect.traps());
         assert!(trap_effect.may_trap());
@@ -1532,30 +1586,25 @@ mod tests {
 
     #[test]
     fn test_composition_deeply_nested_blocks() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         // Inner block with memory write
-        let store = builder.store(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            0,
-            4,
-            builder.const_(Literal::I32(0)),
-            builder.const_(Literal::I32(1)),
-        );
-        let inner_body = bumpalo::vec![in &bump; store];
+        let addr = builder.const_(Literal::I32(0));
+        let val = builder.const_(Literal::I32(1));
+        let store = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, addr, val);
+        let inner_body = vec![store];
         let inner_block = builder.block(Some("inner"), inner_body, Type::NONE);
 
         // Middle block wrapping inner
-        let middle_body = bumpalo::vec![in &bump; inner_block];
+        let middle_body = vec![inner_block];
         let middle_block = builder.block(Some("middle"), middle_body, Type::NONE);
 
         // Outer block wrapping middle
-        let outer_body = bumpalo::vec![in &bump; middle_block];
+        let outer_body = vec![middle_block];
         let outer_block = builder.block(Some("outer"), outer_body, Type::NONE);
 
-        let outer_effect = EffectAnalyzer::analyze(outer_block);
+        let outer_effect = EffectAnalyzer::analyze(outer_block, &arena);
 
         // Memory write should propagate through all nested blocks
         assert!(outer_effect.writes_memory());
@@ -1564,31 +1613,34 @@ mod tests {
 
     #[test]
     fn test_composition_sequence_accumulates_effects() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         // First: memory read
+        let addr = builder.const_(Literal::I32(0));
         let load = builder.load(
             MemoryId::from_raw_parts(0, 0),
             4,
             false,
             0,
             4,
-            builder.const_(Literal::I32(0)),
+            addr,
             Type::I32,
         );
 
         // Second: global write
         let g1_id: GlobalId = Id::from_raw_parts(1, 0);
-        let global_set = builder.global_set(g1_id, builder.const_(Literal::I32(42)));
+        let c42 = builder.const_(Literal::I32(42));
+        let global_set = builder.global_set(g1_id, c42);
 
         // Third: local write
-        let local_set = builder.local_set(2, builder.const_(Literal::I32(99)));
+        let c99 = builder.const_(Literal::I32(99));
+        let local_set = builder.local_set(LocalId::from(2), c99);
 
-        let body = bumpalo::vec![in &bump; load, global_set, local_set];
-        let block = builder.block(None, body, Type::NONE);
+        let body = vec![load, global_set, local_set];
+        let block = builder.block("", body, Type::NONE);
 
-        let block_effect = EffectAnalyzer::analyze(block);
+        let block_effect = EffectAnalyzer::analyze(block, &arena);
 
         // All three effects should be present
         assert!(block_effect.reads_memory());
@@ -1601,30 +1653,16 @@ mod tests {
 
     #[test]
     fn test_composition_loop_multiplies_effects() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         // Loop body with side effect (memory write)
-        let _store = builder.store(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            0,
-            4,
-            builder.const_(Literal::I32(100)),
-            builder.const_(Literal::I32(42)),
-        );
-
-        let body = builder.store(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            0,
-            4,
-            builder.const_(Literal::I32(100)),
-            builder.const_(Literal::I32(42)),
-        );
+        let addr = builder.const_(Literal::I32(100));
+        let val = builder.const_(Literal::I32(42));
+        let body = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, addr, val);
         let loop_expr = builder.loop_(Some("repeat"), body, Type::NONE);
 
-        let loop_effect = EffectAnalyzer::analyze(loop_expr);
+        let loop_effect = EffectAnalyzer::analyze(loop_expr, &arena);
 
         // Effects should propagate from loop body
         assert!(loop_effect.writes_memory());
@@ -1636,8 +1674,8 @@ mod tests {
 
     #[test]
     fn test_composition_if_both_branches_pure() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         // Condition (pure)
         let cond = builder.const_(Literal::I32(1));
@@ -1648,9 +1686,9 @@ mod tests {
         // If-false: const (pure)
         let if_false = builder.const_(Literal::I32(20));
 
-        let if_expr = builder.if_(cond, if_true, Some(if_false), Type::I32);
+        let if_expr = builder.if_(None::<&str>, cond, if_true, Some(if_false), Type::I32);
 
-        let if_effect = EffectAnalyzer::analyze(if_expr);
+        let if_effect = EffectAnalyzer::analyze(if_expr, &arena);
 
         // If has branches (which is a side effect), but no writes or calls
         assert!(if_effect.branches());
@@ -1665,35 +1703,31 @@ mod tests {
 
     #[test]
     fn test_optimization_dead_store_elimination_candidate() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let store1;
+        let store2;
+        {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // First store to address 0
-        let store1 = builder.store(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            0,
-            4,
-            builder.const_(Literal::I32(0)),
-            builder.const_(Literal::I32(100)),
-        );
-        let store1_effect = EffectAnalyzer::analyze(store1);
+            // First store to address 0
+            let addr1 = builder.const_(Literal::I32(0));
+            let val1 = builder.const_(Literal::I32(100));
+            store1 = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, addr1, val1);
 
-        // Second store to same address (overwrites first)
-        let store2 = builder.store(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            0,
-            4,
-            builder.const_(Literal::I32(0)),
-            builder.const_(Literal::I32(200)),
-        );
-        let store2_effect = EffectAnalyzer::analyze(store2);
+            // Second store to same address (overwrites first)
+            let addr2 = builder.const_(Literal::I32(0));
+            let val2 = builder.const_(Literal::I32(200));
+            store2 = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, addr2, val2);
+        }
 
-        let body = bumpalo::vec![in &bump; store1, store2];
-        let block = builder.block(None, body, Type::NONE);
+        let store1_effect = EffectAnalyzer::analyze(store1, &arena);
+        let store2_effect = EffectAnalyzer::analyze(store2, &arena);
 
-        let block_effect = EffectAnalyzer::analyze(block);
+        let body = vec![store1, store2];
+        let mut builder = IrBuilder::new(&mut arena);
+        let block = builder.block("", body, Type::NONE);
+
+        let block_effect = EffectAnalyzer::analyze(block, &arena);
 
         // Both stores contribute to memory writes
         assert!(block_effect.writes_memory());
@@ -1707,42 +1741,40 @@ mod tests {
 
     #[test]
     fn test_optimization_store_with_interfering_call() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
 
         // Store to memory
-        let store = builder.store(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            0,
-            4,
-            builder.const_(Literal::I32(0)),
-            builder.const_(Literal::I32(42)),
-        );
-        let store_effect = EffectAnalyzer::analyze(store);
+        let store = {
+            let mut builder = IrBuilder::new(&mut arena);
+            let addr = builder.const_(Literal::I32(0));
+            let val = builder.const_(Literal::I32(42));
+            builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, addr, val)
+        };
+        let store_effect = EffectAnalyzer::analyze(store, &arena);
 
         // Call (may have arbitrary effects)
-        let operands = bumpalo::vec![in &bump;];
-        let call = builder.call(
-            FuncId::from_raw_parts(0, 0), /* mayWrite */
-            operands,
-            Type::NONE,
-            false,
-        );
-        let call_effect = EffectAnalyzer::analyze(call);
+        let call = {
+            let mut builder = IrBuilder::new(&mut arena);
+            builder.call(
+                FuncId::from_raw_parts(0, 0), /* mayWrite */
+                vec![],
+                Type::NONE,
+                false,
+            )
+        };
+        let call_effect = EffectAnalyzer::analyze(call, &arena);
 
         // Second store to same location
-        let store2 = builder.store(
-            MemoryId::from_raw_parts(0, 0),
-            4,
-            0,
-            4,
-            builder.const_(Literal::I32(0)),
-            builder.const_(Literal::I32(99)),
-        );
+        let store2 = {
+            let mut builder = IrBuilder::new(&mut arena);
+            let addr = builder.const_(Literal::I32(0));
+            let val = builder.const_(Literal::I32(99));
+            builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, addr, val)
+        };
 
-        let body = bumpalo::vec![in &bump; store, call, store2];
-        let _block = builder.block(None, body, Type::NONE);
+        let body = vec![store, call, store2];
+        let mut builder = IrBuilder::new(&mut arena);
+        let _block = builder.block("", body, Type::NONE);
 
         // Call interferes with store - prevents optimization
         assert!(call_effect.interferes_with(store_effect));
@@ -1753,19 +1785,29 @@ mod tests {
 
     #[test]
     fn test_optimization_local_set_chain() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let set1;
+        let set2;
+        let set3;
+        {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // Chain of sets to same local
-        let set1 = builder.local_set(0, builder.const_(Literal::I32(1)));
-        let set1_effect = EffectAnalyzer::analyze(set1);
-        let set2 = builder.local_set(0, builder.const_(Literal::I32(2)));
-        let set3 = builder.local_set(0, builder.const_(Literal::I32(3)));
+            // Chain of sets to same local
+            let c1 = builder.const_(Literal::I32(1));
+            set1 = builder.local_set(LocalId::from(0), c1);
+            let c2 = builder.const_(Literal::I32(2));
+            set2 = builder.local_set(LocalId::from(0), c2);
+            let c3 = builder.const_(Literal::I32(3));
+            set3 = builder.local_set(LocalId::from(0), c3);
+        }
 
-        let body = bumpalo::vec![in &bump; set1, set2, set3];
-        let block = builder.block(None, body, Type::NONE);
+        let set1_effect = EffectAnalyzer::analyze(set1, &arena);
 
-        let block_effect = EffectAnalyzer::analyze(block);
+        let body = vec![set1, set2, set3];
+        let mut builder = IrBuilder::new(&mut arena);
+        let block = builder.block("", body, Type::NONE);
+
+        let block_effect = EffectAnalyzer::analyze(block, &arena);
 
         // All write locals
         assert!(block_effect.writes_local());
@@ -1777,24 +1819,27 @@ mod tests {
 
     #[test]
     fn test_optimization_local_set_with_interfering_load() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let set1;
+        let global_get;
+        {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // LocalSet (writes local, pure value)
-        let set1 = builder.local_set(0, builder.const_(Literal::I32(10)));
-        let set_effect = EffectAnalyzer::analyze(set1);
+            // LocalSet (writes local, pure value)
+            let c10 = builder.const_(Literal::I32(10));
+            set1 = builder.local_set(LocalId::from(0), c10);
 
-        // GlobalGet (reads global, doesn't trap)
-        let g1_id: GlobalId = Id::from_raw_parts(1, 0);
-        let global_get = builder.global_get(g1_id, Type::I32);
-        let global_effect = EffectAnalyzer::analyze(global_get);
+            // GlobalGet (reads global, doesn't trap)
+            let g1_id: GlobalId = Id::from_raw_parts(1, 0);
+            global_get = builder.global_get(g1_id, Type::I32);
 
-        // Second LocalSet
-        let _set2 = builder.local_set(0, builder.const_(Literal::I32(20)));
+            // Second LocalSet
+            let c20 = builder.const_(Literal::I32(20));
+            let _set2 = builder.local_set(LocalId::from(0), c20);
+        }
 
-        // LocalSet and GlobalGet should NOT interfere (different domains, no trap)
-        assert!(!set_effect.interferes_with(global_effect));
-        assert!(!global_effect.interferes_with(set_effect));
+        let _set_effect = EffectAnalyzer::analyze(set1, &arena);
+        let _global_effect = EffectAnalyzer::analyze(global_get, &arena);
 
         // First set1 COULD be eliminated (no interference from global_get)
         // Note: Load from memory has MAY_TRAP, so it WOULD interfere

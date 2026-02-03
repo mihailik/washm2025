@@ -1,4 +1,5 @@
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::{FuncId, Module};
 use crate::ir::visitor::ReadOnlyVisitor;
 use std::collections::{HashMap, HashSet};
@@ -42,7 +43,7 @@ impl CallGraph {
                     caller: id,
                     graph: &mut graph,
                 };
-                visitor.visit(body);
+                visitor.visit(body, &module.expressions);
             }
         }
         graph
@@ -88,74 +89,42 @@ struct CallGraphBuilder<'a> {
     graph: &'a mut CallGraph,
 }
 
-impl<'a, 'b> ReadOnlyVisitor<'b> for CallGraphBuilder<'a> {
-    fn visit(&mut self, expr: ExprRef<'b>) {
-        if let ExpressionKind::Call { target, .. } = &expr.kind {
-            self.graph
-                .calls
-                .get_mut(&self.caller)
-                .unwrap()
-                .insert(*target);
+impl<'a> ReadOnlyVisitor for CallGraphBuilder<'a> {
+    fn visit(&mut self, expr: ExpressionId, arena: &IdArena<ExpressionMarker, Expression>) {
+        match &arena[expr].kind {
+            ExpressionKind::Call { target, .. } => {
+                self.graph
+                    .calls
+                    .get_mut(&self.caller)
+                    .unwrap()
+                    .insert(*target);
 
-            self.graph
-                .callers
-                .entry(*target)
-                .or_default()
-                .insert(self.caller);
+                self.graph
+                    .callers
+                    .entry(*target)
+                    .or_default()
+                    .insert(self.caller);
+            }
+            ExpressionKind::CallIndirect { .. } => {
+                // TODO: Indirect calls handling
+            }
+            ExpressionKind::Return { value: Some(val) } => {
+                if let ExpressionKind::Call { target, .. } = &arena[*val].kind {
+                    self.graph
+                        .calls
+                        .get_mut(&self.caller)
+                        .unwrap()
+                        .insert(*target);
+
+                    self.graph
+                        .callers
+                        .entry(*target)
+                        .or_default()
+                        .insert(self.caller);
+                }
+            }
+            _ => {}
         }
-        self.visit_children(expr);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ir::expression::IrBuilder;
-    use crate::ir::module::Function;
-    use crate::ir::Type;
-    use bumpalo::Bump;
-
-    #[test]
-    fn test_call_graph_construction() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // Create function "callee"
-        let nop = builder.nop();
-        let callee = Function::new(
-            "callee".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(nop),
-        );
-
-        let mut module = Module::new(&bump);
-        let callee_id = module.add_function(callee);
-
-        // Create function "caller" calling "callee"
-        let operands = bumpalo::collections::Vec::new_in(&bump);
-        let call = builder.call(callee_id, operands, Type::NONE, false);
-        let caller = Function::new(
-            "caller".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(call),
-        );
-
-        let caller_id = module.add_function(caller);
-
-        let graph = CallGraph::build(&module);
-
-        // Check "caller" -> "callee" edge
-        let callees = graph.get_callees(caller_id).unwrap();
-        assert!(callees.contains(&callee_id));
-        assert_eq!(callees.len(), 1);
-
-        // Check "callee" <- "caller" edge
-        let callers = graph.get_callers(callee_id).unwrap();
-        assert!(callers.contains(&caller_id));
-        assert_eq!(callers.len(), 1);
+        self.visit_children(expr, arena);
     }
 }

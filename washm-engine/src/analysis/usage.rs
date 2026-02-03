@@ -1,4 +1,5 @@
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::{
     DataId, ElementId, FuncId, GlobalId, GlobalKind, MemoryId, Module, TableId, TypeId,
 };
@@ -57,12 +58,10 @@ impl UsageTracker {
                         tracker.types.insert(type_idx);
                     }
                     if let Some(body_expr) = func.body() {
-                        if !body_expr.is_null() {
-                            let mut visitor = UsageVisitor {
-                                tracker: &mut tracker,
-                            };
-                            visitor.visit(body_expr);
-                        }
+                        let mut visitor = UsageVisitor {
+                            tracker: &mut tracker,
+                        };
+                        visitor.visit(body_expr, &module.expressions);
                     }
                 }
             }
@@ -73,7 +72,7 @@ impl UsageTracker {
                         let mut visitor = UsageVisitor {
                             tracker: &mut tracker,
                         };
-                        visitor.visit(*init);
+                        visitor.visit(*init, &module.expressions);
                     }
                 }
             }
@@ -115,9 +114,13 @@ struct UsageVisitor<'a> {
     tracker: &'a mut UsageTracker,
 }
 
-impl<'a, 'b> ReadOnlyVisitor<'b> for UsageVisitor<'a> {
-    fn visit_expression(&mut self, expr: ExprRef<'b>) {
-        match &expr.kind {
+impl<'a> ReadOnlyVisitor for UsageVisitor<'a> {
+    fn visit_expression(
+        &mut self,
+        expr: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
+        match &arena[expr].kind {
             ExpressionKind::Call { target, .. } | ExpressionKind::RefFunc { func: target } => {
                 self.tracker.mark_func(*target);
             }
@@ -180,6 +183,5 @@ impl<'a, 'b> ReadOnlyVisitor<'b> for UsageVisitor<'a> {
             }
             _ => {}
         }
-        self.visit_children(expr);
     }
 }

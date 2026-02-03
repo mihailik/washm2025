@@ -1,4 +1,5 @@
-use crate::ir::expression::ExprRef;
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionMarker};
 use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
@@ -10,40 +11,43 @@ impl Pass for DAE {
         "dae"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for (_, func) in &mut module.functions {
+    fn run(&mut self, module: &mut Module) {
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        for (_, func) in functions.iter_mut() {
             if let Some(body) = func.body_mut() {
                 let mut eliminator = DeadArgumentEliminator;
-                eliminator.visit(body);
+                eliminator.visit(body, arena);
             }
         }
     }
 }
 
 struct DeadArgumentEliminator;
-impl<'a> Visitor<'a> for DeadArgumentEliminator {
-    fn visit_expression(&mut self, _expr: &mut ExprRef<'a>) {}
+impl Visitor for DeadArgumentEliminator {
+    fn visit_expression(
+        &mut self,
+        _expr: &mut ExpressionId,
+        _arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::expression::Expression;
+    use crate::ir::expression::IrBuilder;
     use crate::ir::module::Function;
-    use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
+    use crate::ir::{Literal, Module, Type};
 
     #[test]
     fn test_dae() {
-        let bump = Bump::new();
-        let val = Expression::const_expr(&bump, Literal::I32(1), Type::I32);
-        let func = Function::new("test".to_string(), Type::NONE, Type::I32, vec![], Some(val));
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let val = builder.const_(Literal::I32(1));
+        let func = Function::new("test".to_string(), Type::NONE, Type::I32, vec![], val);
         module.add_function(func);
         let mut pass = DAE;
         pass.run(&mut module);
-        assert!(module.functions[module.functions.iter().next().unwrap().0]
-            .body()
-            .is_some());
+        assert!(module.functions.iter().next().is_some());
     }
 }

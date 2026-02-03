@@ -1,4 +1,5 @@
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::{FunctionKind, GlobalKind, Module};
 use crate::ir::visitor::ReadOnlyVisitor;
 use std::collections::HashMap;
@@ -39,7 +40,7 @@ impl ModuleStats {
                         module,
                         current_function: Some(func.name.clone()),
                     };
-                    visitor.visit_expression(*body);
+                    visitor.visit(*body, &module.expressions);
                 }
             }
 
@@ -53,9 +54,6 @@ impl ModuleStats {
             stats.increment_type(table.limits.element_type);
         }
 
-        // Count references in memories
-        // (Memory doesn't have a type that we count usually, just limits)
-
         // Count references in globals
         for (_, global) in &module.globals {
             stats.increment_type(global.type_);
@@ -65,7 +63,7 @@ impl ModuleStats {
                     module,
                     current_function: None,
                 };
-                visitor.visit_expression(*init);
+                visitor.visit(*init, &module.expressions);
             }
         }
 
@@ -118,14 +116,19 @@ impl ModuleStats {
     }
 }
 
-struct StatsVisitor<'a, 'b> {
+struct StatsVisitor<'a> {
     stats: &'a mut ModuleStats,
-    module: &'a Module<'b>,
+    module: &'a Module,
     current_function: Option<String>,
 }
 
-impl<'a, 'b, 'c> ReadOnlyVisitor<'c> for StatsVisitor<'a, 'b> {
-    fn visit_expression(&mut self, expr: ExprRef<'c>) {
+impl<'a> ReadOnlyVisitor for StatsVisitor<'a> {
+    fn visit_expression(
+        &mut self,
+        expr_id: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
+        let expr = &arena[expr_id];
         self.stats.increment_type(expr.type_);
         match &expr.kind {
             ExpressionKind::Call { target, .. } | ExpressionKind::RefFunc { func: target } => {
@@ -164,6 +167,6 @@ impl<'a, 'b, 'c> ReadOnlyVisitor<'c> for StatsVisitor<'a, 'b> {
             }
             _ => {}
         }
-        self.visit_children(expr);
+        self.visit_children(expr_id, arena);
     }
 }

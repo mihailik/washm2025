@@ -222,17 +222,16 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let allocator = bumpalo::Bump::new();
     let data = read_input(&input_path)?;
 
     let mut module = if data.starts_with(b"\0asm") {
-        let mut reader = BinaryReader::new(&allocator, data);
+        let mut reader = BinaryReader::new();
         reader
-            .parse_module()
+            .parse_module(&data)
             .map_err(|e| anyhow!("Binary parse error: {:?}", e))?
     } else {
         let text = std::str::from_utf8(&data).context("WAT input is not valid UTF-8")?;
-        Module::read_wat(&allocator, text).map_err(|e| anyhow!("WAT parse error: {}", e))?
+        Module::read_wat(text).map_err(|e| anyhow!("WAT parse error: {}", e))?
     };
 
     // Apply features from flags

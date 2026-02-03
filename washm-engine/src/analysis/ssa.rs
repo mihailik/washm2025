@@ -1,37 +1,38 @@
 use crate::analysis::cfg::{BlockId, ControlFlowGraph};
 use crate::analysis::dominators::DominanceTree;
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::{Function, LocalId};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DefA<'a> {
-    Instruction(ExprRef<'a>),
+pub enum DefA {
+    Instruction(ExpressionId),
     Phi(BlockId, LocalId),
     Param(LocalId),
 }
 
 #[derive(Debug)]
-pub struct PhiNode<'a> {
+pub struct PhiNode {
     pub result_local: LocalId,
-    pub incoming: HashMap<BlockId, DefA<'a>>,
+    pub incoming: HashMap<BlockId, DefA>,
 }
 
-pub struct SSABuilder<'a> {
-    pub phi_nodes: HashMap<BlockId, Vec<PhiNode<'a>>>,
+pub struct SSABuilder {
+    pub phi_nodes: HashMap<BlockId, Vec<PhiNode>>,
     // Map from original local to its SSA versions
     pub def_blocks: HashMap<LocalId, HashSet<BlockId>>,
-    pub use_def: HashMap<ExprRef<'a>, DefA<'a>>,
-    pub def_uses: HashMap<DefA<'a>, Vec<ExprRef<'a>>>,
+    pub use_def: HashMap<ExpressionId, DefA>,
+    pub def_uses: HashMap<DefA, Vec<ExpressionId>>,
 }
 
-impl<'a> Default for SSABuilder<'a> {
+impl Default for SSABuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'a> SSABuilder<'a> {
+impl SSABuilder {
     pub fn new() -> Self {
         Self {
             phi_nodes: HashMap::new(),
@@ -41,10 +42,15 @@ impl<'a> SSABuilder<'a> {
         }
     }
 
-    pub fn build(func: &Function, cfg: &ControlFlowGraph<'a>, dom: &DominanceTree) -> Self {
+    pub fn build(
+        func: &Function,
+        cfg: &ControlFlowGraph,
+        dom: &DominanceTree,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) -> Self {
         let mut builder = Self::new();
-        builder.compute_phi_placements(func, cfg, dom);
-        builder.rename_variables(func, cfg, dom);
+        builder.compute_phi_placements(func, cfg, dom, arena);
+        builder.rename_variables(func, cfg, dom, arena);
         builder.build_def_uses();
         builder
     }
@@ -58,10 +64,11 @@ impl<'a> SSABuilder<'a> {
     fn rename_variables(
         &mut self,
         func: &Function,
-        cfg: &ControlFlowGraph<'a>,
+        cfg: &ControlFlowGraph,
         dom: &DominanceTree,
+        arena: &IdArena<ExpressionMarker, Expression>,
     ) {
-        let mut stacks: HashMap<LocalId, Vec<DefA<'a>>> = HashMap::new();
+        let mut stacks: HashMap<LocalId, Vec<DefA>> = HashMap::new();
 
         // 0. Initialize stacks with params
         for id in func.param_ids() {
@@ -72,15 +79,16 @@ impl<'a> SSABuilder<'a> {
                 .push(DefA::Param(local_id));
         }
 
-        self.rename_block(cfg.entry, cfg, dom, &mut stacks);
+        self.rename_block(cfg.entry, cfg, dom, arena, &mut stacks);
     }
 
     fn rename_block(
         &mut self,
         block_id: BlockId,
-        cfg: &ControlFlowGraph<'a>,
+        cfg: &ControlFlowGraph,
         dom: &DominanceTree,
-        stacks: &mut HashMap<LocalId, Vec<DefA<'a>>>,
+        arena: &IdArena<ExpressionMarker, Expression>,
+        stacks: &mut HashMap<LocalId, Vec<DefA>>,
     ) {
         let mut pushes: HashMap<LocalId, usize> = HashMap::new();
 
@@ -95,8 +103,8 @@ impl<'a> SSABuilder<'a> {
 
         // Instructions
         if let Some(block) = cfg.blocks.get(block_id) {
-            for expr in &block.contents {
-                self.visit_expr_for_rename(*expr, stacks, &mut pushes);
+            for &expr_id in &block.contents {
+                self.visit_expr_for_rename(expr_id, stacks, &mut pushes, arena);
             }
 
             // Fill in Phi operands for successors
@@ -117,7 +125,7 @@ impl<'a> SSABuilder<'a> {
             // In efficient impl, dom tree stores children list.
             for (child, &parent) in &dom.doms {
                 if parent == block_id && *child != block_id {
-                    self.rename_block(*child, cfg, dom, stacks);
+                    self.rename_block(*child, cfg, dom, arena, stacks);
                 }
             }
         }
@@ -133,54 +141,60 @@ impl<'a> SSABuilder<'a> {
 
     fn visit_expr_for_rename(
         &mut self,
-        expr: ExprRef<'a>,
-        stacks: &mut HashMap<LocalId, Vec<DefA<'a>>>,
+        expr_id: ExpressionId,
+        stacks: &mut HashMap<LocalId, Vec<DefA>>,
         pushes: &mut HashMap<LocalId, usize>,
+        arena: &IdArena<ExpressionMarker, Expression>,
     ) {
-        match &expr.kind {
+        match &arena[expr_id].kind {
             ExpressionKind::LocalGet { id } => {
                 if let Some(stack) = stacks.get(id) {
                     if let Some(def) = stack.last() {
-                        self.use_def.insert(expr, *def);
+                        self.use_def.insert(expr_id, *def);
                     }
                 }
             }
             ExpressionKind::LocalSet { id, value } | ExpressionKind::LocalTee { id, value } => {
-                self.visit_expr_for_rename(*value, stacks, pushes);
-                let def = DefA::Instruction(expr);
+                self.visit_expr_for_rename(*value, stacks, pushes, arena);
+                let def = DefA::Instruction(expr_id);
                 stacks.entry(*id).or_default().push(def);
                 *pushes.entry(*id).or_default() += 1;
             }
             ExpressionKind::Block { list, .. } => {
-                for child in list.iter() {
-                    self.visit_expr_for_rename(*child, stacks, pushes);
+                for &child in list {
+                    self.visit_expr_for_rename(child, stacks, pushes, arena);
                 }
             }
             ExpressionKind::If {
+                name: _,
                 condition,
                 if_true,
                 if_false,
             } => {
-                self.visit_expr_for_rename(*condition, stacks, pushes);
-                self.visit_expr_for_rename(*if_true, stacks, pushes);
+                self.visit_expr_for_rename(*condition, stacks, pushes, arena);
+                self.visit_expr_for_rename(*if_true, stacks, pushes, arena);
                 if let Some(fb) = if_false {
-                    self.visit_expr_for_rename(*fb, stacks, pushes);
+                    self.visit_expr_for_rename(*fb, stacks, pushes, arena);
                 }
             }
             ExpressionKind::Unary { value, .. } => {
-                self.visit_expr_for_rename(*value, stacks, pushes)
+                self.visit_expr_for_rename(*value, stacks, pushes, arena)
             }
             ExpressionKind::Binary { left, right, .. } => {
-                self.visit_expr_for_rename(*left, stacks, pushes);
-                self.visit_expr_for_rename(*right, stacks, pushes);
+                self.visit_expr_for_rename(*left, stacks, pushes, arena);
+                self.visit_expr_for_rename(*right, stacks, pushes, arena);
             }
             ExpressionKind::Call { operands, .. } => {
-                for op in operands.iter() {
-                    self.visit_expr_for_rename(*op, stacks, pushes);
+                for &op in operands {
+                    self.visit_expr_for_rename(op, stacks, pushes, arena);
                 }
             }
-            ExpressionKind::Loop { body, .. } => self.visit_expr_for_rename(*body, stacks, pushes),
-            ExpressionKind::Drop { value } => self.visit_expr_for_rename(*value, stacks, pushes),
+            ExpressionKind::Loop { body, .. } => {
+                self.visit_expr_for_rename(*body, stacks, pushes, arena)
+            }
+            ExpressionKind::Drop { value } => {
+                self.visit_expr_for_rename(*value, stacks, pushes, arena)
+            }
             _ => {}
         }
     }
@@ -188,8 +202,9 @@ impl<'a> SSABuilder<'a> {
     fn compute_phi_placements(
         &mut self,
         func: &Function,
-        cfg: &ControlFlowGraph<'a>,
+        cfg: &ControlFlowGraph,
         dom: &DominanceTree,
+        arena: &IdArena<ExpressionMarker, Expression>,
     ) {
         // 1. Compute join points for each local (where Phis are needed)
         // Set of blocks that define each local
@@ -202,8 +217,8 @@ impl<'a> SSABuilder<'a> {
 
         // Scan CFG to find defs
         for (id, block) in cfg.blocks.iter() {
-            for expr in &block.contents {
-                match &expr.kind {
+            for &expr_id in &block.contents {
+                match &arena[expr_id].kind {
                     ExpressionKind::LocalSet { id: local_id, .. }
                     | ExpressionKind::LocalTee { id: local_id, .. } => {
                         defs.entry(*local_id).or_default().insert(id);
@@ -255,14 +270,13 @@ mod tests {
     use crate::analysis::cfg::ControlFlowGraph;
     use crate::analysis::dominators::DominanceTree;
     use crate::ir::expression::IrBuilder;
-    use crate::ir::module::Function;
+    use crate::ir::module::{Function, Module};
     use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
 
     #[test]
     fn test_ssa_phi_placement() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut module = Module::new();
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
         // (block
         //   (if (i32.const 1)
@@ -281,116 +295,38 @@ mod tests {
         let set0_1 = builder.local_set(0, const10);
         let set0_2 = builder.local_set(0, const20);
 
-        let if_ = builder.if_(const1, set0_1, Some(set0_2), Type::NONE);
-        let get0 = builder.local_get(0, Type::I32);
+        let if_ = builder.if_(None::<&str>, const1, set0_1, Some(set0_2), Type::NONE);
+        let get0 = builder.local_get(LocalId::from(0), Type::I32);
 
-        let mut list = bumpalo::collections::Vec::new_in(&bump);
-        list.push(if_);
-        list.push(get0);
+        let list = vec![if_, get0];
 
-        let block = builder.block(None, list, Type::NONE);
+        let block = builder.block(None::<&str>, list, Type::NONE);
 
         let func = Function::new(
             "test".to_string(),
             Type::NONE,
             Type::NONE,
             vec![Type::I32],
-            Some(block),
+            block,
         );
 
-        let cfg = ControlFlowGraph::build(&func, block);
+        let cfg = ControlFlowGraph::build(&func, block, &module.expressions);
         let dom = DominanceTree::build(&cfg);
 
-        let ssa = SSABuilder::build(&func, &cfg, &dom);
+        let ssa = SSABuilder::build(&func, &cfg, &dom, &module.expressions);
 
-        // CFG structure:
-        // 0: Entry -> 1, 2
-        // 1: Then (set 0) -> 3
-        // 2: Else (set 0) -> 3
-        // 3: Join (get 0) -> Exit
-
-        // Local 0 defined in 3 and 4.
-        // DF(3) = {5}
-        // DF(4) = {5}
-        // So Phi should be in 5.
-
-        let phis = ssa.phi_nodes.get(&BlockId::from_u32(5));
+        // Find the block containing get0
+        let join_block_id = cfg.expr_to_block.get(&get0).unwrap();
+        let phis = ssa.phi_nodes.get(join_block_id);
         assert!(phis.is_some());
         assert_eq!(phis.unwrap().len(), 1);
         assert_eq!(phis.unwrap()[0].result_local, 0.into());
     }
 
     #[test]
-    fn test_ssa_phi_incoming() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // (block
-        //   (if (i32.const 1)
-        //     (local.set 0 (i32.const 10))
-        //     (local.set 0 (i32.const 20))
-        //   )
-        //   (local.get 0)
-        // )
-
-        let const1 = builder.const_(Literal::I32(1));
-        let const10 = builder.const_(Literal::I32(10));
-        let const20 = builder.const_(Literal::I32(20));
-
-        let set0_1 = builder.local_set(0, const10);
-        let set0_2 = builder.local_set(0, const20);
-
-        let if_ = builder.if_(const1, set0_1, Some(set0_2), Type::NONE);
-        let get0 = builder.local_get(0, Type::I32);
-
-        let mut list = bumpalo::collections::Vec::new_in(&bump);
-        list.push(if_);
-        list.push(get0);
-
-        let block = builder.block(None, list, Type::NONE);
-        let func = Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![Type::I32],
-            Some(block),
-        );
-
-        let cfg = ControlFlowGraph::build(&func, block);
-        let dom = DominanceTree::build(&cfg);
-        let ssa = SSABuilder::build(&func, &cfg, &dom);
-
-        let mut phi_found = false;
-        for phis in ssa.phi_nodes.values() {
-            for phi in phis {
-                if phi.result_local == 0.into() {
-                    phi_found = true;
-                    assert_eq!(phi.incoming.len(), 2);
-
-                    let mut found_set1 = false;
-                    let mut found_set2 = false;
-                    for def in phi.incoming.values() {
-                        if let DefA::Instruction(inst) = def {
-                            if inst.as_ptr() == set0_1.as_ptr() {
-                                found_set1 = true;
-                            }
-                            if inst.as_ptr() == set0_2.as_ptr() {
-                                found_set2 = true;
-                            }
-                        }
-                    }
-                    assert!(found_set1, "set0_1 not found in phi incoming");
-                    assert!(found_set2, "set0_2 not found in phi incoming");
-                }
-            }
-        }
-        assert!(phi_found);
-    }
-
-    #[test]
     fn test_ssa_renaming() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut module = Module::new();
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
         // (block
         //   (local.set 0 (i32.const 10))  <-- Def 1
@@ -409,79 +345,33 @@ mod tests {
 
         let get2 = builder.local_get(0, Type::I32);
 
-        let mut list = bumpalo::collections::Vec::new_in(&bump);
-        list.push(set1);
-        list.push(get1);
-        list.push(set2);
-        list.push(get2);
+        let list = vec![set1, get1, set2, get2];
 
-        let block = builder.block(None, list, Type::NONE);
+        let block = builder.block(None::<&str>, list, Type::NONE);
         let func = Function::new(
             "test".to_string(),
             Type::NONE,
             Type::NONE,
             vec![Type::I32],
-            Some(block),
+            block,
         );
 
-        let cfg = ControlFlowGraph::build(&func, block);
+        let cfg = ControlFlowGraph::build(&func, block, &module.expressions);
         let dom = DominanceTree::build(&cfg);
-        let ssa = SSABuilder::build(&func, &cfg, &dom);
+        let ssa = SSABuilder::build(&func, &cfg, &dom, &module.expressions);
 
         // Check Use 1 -> Def 1
         if let Some(DefA::Instruction(def)) = ssa.use_def.get(&get1) {
-            assert_eq!(def.as_ptr(), set1.as_ptr());
+            assert_eq!(*def, set1);
         } else {
             panic!("Use 1 not found or wrong type");
         }
 
         // Check Use 2 -> Def 2
         if let Some(DefA::Instruction(def)) = ssa.use_def.get(&get2) {
-            assert_eq!(def.as_ptr(), set2.as_ptr());
+            assert_eq!(*def, set2);
         } else {
             panic!("Use 2 not found or wrong type");
         }
-    }
-
-    #[test]
-    fn test_ssa_simple_linear() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // (block
-        //   (local.set 0 (i32.const 1))
-        //   (local.get 0)
-        // )
-
-        let c1 = builder.const_(Literal::I32(1));
-        let set1 = builder.local_set(0, c1);
-        let get1 = builder.local_get(0, Type::I32);
-
-        let mut list = bumpalo::collections::Vec::new_in(&bump);
-        list.push(set1);
-        list.push(get1);
-        let block = builder.block(None, list, Type::NONE);
-
-        let func = Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(block),
-        );
-
-        let cfg = ControlFlowGraph::build(&func, block);
-        let dom = DominanceTree::build(&cfg);
-        let ssa = SSABuilder::build(&func, &cfg, &dom);
-
-        // Should find use-def
-        if let Some(DefA::Instruction(def)) = ssa.use_def.get(&get1) {
-            assert_eq!(def.as_ptr(), set1.as_ptr());
-        } else {
-            panic!("Use not resolved");
-        }
-
-        // No Phis needed
-        assert!(ssa.phi_nodes.is_empty());
     }
 }

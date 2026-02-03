@@ -18,7 +18,7 @@ impl Pass for GUFA {
         "gufa"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         // 1. Build CallGraph
         let call_graph = CallGraph::build(module);
 

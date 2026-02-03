@@ -1,28 +1,20 @@
 use crate::analysis::effects::{Effect, EffectAnalyzer};
-use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::Module;
+use crate::ir::Type;
+use crate::passes::re_finalize::ReFinalize;
 use crate::passes::Pass;
-use bumpalo::collections::Vec as BumpVec;
 use std::collections::HashMap;
 
 /// SimplifyLocals pass - implements local-related optimizations
-///
-/// This pass performs "sinking" optimizations for local.set operations:
-/// - Pushes local.set operations closer to their local.get usage
-/// - Removes local.set operations if no gets remain
-/// - Creates local.tee when a local has multiple uses
-/// - Merges local.sets into block/if return values
-///
-/// Options:
-/// - allow_tee: Allow creating local.tee for multiple uses
-/// - allow_structure: Create block/if return values by merging internal sets
-/// - allow_nesting: Allow sinking that creates nested expressions
 pub struct SimplifyLocals {
     allow_tee: bool,
     allow_structure: bool,
     allow_nesting: bool,
     another_cycle: bool,
-    path: std::collections::HashSet<usize>,
+    refinalize: bool,
+    path: std::collections::HashSet<ExpressionId>,
 }
 
 impl SimplifyLocals {
@@ -33,6 +25,7 @@ impl SimplifyLocals {
             allow_structure: true,
             allow_nesting: true,
             another_cycle: false,
+            refinalize: false,
             path: std::collections::HashSet::new(),
         }
     }
@@ -44,6 +37,7 @@ impl SimplifyLocals {
             allow_structure,
             allow_nesting,
             another_cycle: false,
+            refinalize: false,
             path: std::collections::HashSet::new(),
         }
     }
@@ -55,6 +49,7 @@ impl SimplifyLocals {
             allow_structure: false,
             allow_nesting: false,
             another_cycle: false,
+            refinalize: false,
             path: std::collections::HashSet::new(),
         }
     }
@@ -68,27 +63,27 @@ impl Default for SimplifyLocals {
 
 /// Information about a sinkable local.set
 #[derive(Clone, PartialEq)]
-struct SinkableInfo<'a> {
+struct SinkableInfo {
     /// Effect analysis of the set operation
     effects: Effect,
-    /// The local.set expression itself
-    set: ExprRef<'a>,
-    /// Pointer to the Expression at the original location (for Nop-ing)
-    ptr: *mut Expression<'a>,
+    /// The local.set expression ID
+    set_id: ExpressionId,
+    /// The ID of the Expression at the original location (for Nop-ing)
+    original_id: ExpressionId,
 }
 
 /// Information about an exit from a block
-struct BlockBreak<'a> {
-    /// The break expression (br, br_if)
-    br: *mut Expression<'a>,
+struct BlockBreak {
+    /// The break expression ID (br, br_if)
+    br_id: ExpressionId,
     /// Sinkables at the point of the break
-    sinkables: HashMap<crate::ir::LocalId, SinkableInfo<'a>>,
+    sinkables: HashMap<crate::ir::LocalId, SinkableInfo>,
 }
 
 /// Context for a single function optimization
-struct FunctionContext<'a> {
+struct FunctionContext {
     /// Map from local index to sinkable info
-    sinkables: HashMap<crate::ir::LocalId, SinkableInfo<'a>>,
+    sinkables: HashMap<crate::ir::LocalId, SinkableInfo>,
     /// Count of local.get operations per local
     get_counts: HashMap<crate::ir::LocalId, usize>,
     /// Whether this is the first optimization cycle
@@ -98,16 +93,16 @@ struct FunctionContext<'a> {
     _allow_structure: bool,
     _allow_nesting: bool,
     /// Sinkable traces that exit blocks
-    block_breaks: HashMap<String, Vec<BlockBreak<'a>>>,
+    block_breaks: HashMap<String, Vec<BlockBreak>>,
     /// Blocks that cannot produce return values
     unoptimizable_blocks: std::collections::HashSet<String>,
     /// Stack of sinkables for if-else branches
-    if_stack: Vec<HashMap<crate::ir::LocalId, SinkableInfo<'a>>>,
+    if_stack: Vec<HashMap<crate::ir::LocalId, SinkableInfo>>,
     /// Whether we need a refinalize
-    refinalize: bool,
+    another_cycle: bool,
 }
 
-impl<'a> FunctionContext<'a> {
+impl FunctionContext {
     fn new(allow_tee: bool, allow_structure: bool, allow_nesting: bool) -> Self {
         Self {
             sinkables: HashMap::new(),
@@ -119,26 +114,26 @@ impl<'a> FunctionContext<'a> {
             block_breaks: HashMap::new(),
             unoptimizable_blocks: std::collections::HashSet::new(),
             if_stack: Vec::new(),
-            refinalize: false,
+            another_cycle: false,
         }
     }
 
     /// Check if a local.set can be sunk
-    fn can_sink(&mut self, set: &Expression) -> bool {
-        if let ExpressionKind::LocalSet { id, .. } = &set.kind {
-            // If in first cycle or not allowing tees, cannot sink if >1 use
-            // (would require creating a tee)
+    fn can_sink(
+        &mut self,
+        expr: &Expression,
+        _arena: &IdArena<ExpressionMarker, Expression>,
+    ) -> bool {
+        if let ExpressionKind::LocalSet { id, .. } = &expr.kind {
             let use_count = self.get_counts.get(id).copied().unwrap_or(0);
             if use_count > 1 {
                 if !self.allow_tee {
                     return false;
                 }
                 if self.first_cycle {
-                    // Deferred to next cycle when we can create a tee
                     return false;
                 }
             }
-
             true
         } else {
             false
@@ -147,10 +142,8 @@ impl<'a> FunctionContext<'a> {
 
     /// Check if effects invalidate any sinkables
     fn check_invalidations(&mut self, effects: Effect) {
-        self.sinkables.retain(|_, info| {
-            // If the new effects invalidate this sinkable, remove it
-            !effects.interferes_with(info.effects)
-        });
+        self.sinkables
+            .retain(|_, info| !effects.interferes_with(info.effects));
     }
 }
 
@@ -159,250 +152,228 @@ impl Pass for SimplifyLocals {
         "SimplifyLocals"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
-        let mut first_cycle = true;
-        // Run multiple cycles until no more changes
-        let allocator = module.allocator();
-        loop {
-            self.another_cycle = false;
-            self.path.clear();
+    fn run(&mut self, module: &mut Module) {
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        for (_, func) in functions {
+            if let Some(body) = func.body_mut() {
+                let mut ctx =
+                    FunctionContext::new(self.allow_tee, self.allow_structure, self.allow_nesting);
 
-            for (_, func) in &mut module.functions {
-                if let Some(body) = func.body_mut() {
-                    let mut ctx = FunctionContext::new(
-                        self.allow_tee,
-                        self.allow_structure,
-                        self.allow_nesting,
-                    );
-                    ctx.first_cycle = first_cycle;
-
-                    // First pass: count local.get operations
+                // Multiple cycles until convergence
+                loop {
+                    self.another_cycle = false;
+                    self.refinalize = false;
+                    ctx.another_cycle = false;
+                    ctx.sinkables.clear();
                     ctx.get_counts.clear();
-                    count_gets(body, &mut ctx.get_counts);
+                    ctx.block_breaks.clear();
+                    ctx.unoptimizable_blocks.clear();
+                    ctx.if_stack.clear();
 
-                    // Second pass: optimize
-                    self.optimize_function(body, &mut ctx, allocator, 0);
+                    count_gets(*body, arena, &mut ctx.get_counts);
 
-                    if ctx.refinalize {
-                        body.finalize();
+                    self.optimize_function(body, &mut ctx, arena, 0);
+
+                    if self.refinalize {
+                        ReFinalize::run(body, arena);
                     }
-                }
-            }
 
-            first_cycle = false;
-            if !self.another_cycle {
-                break;
+                    if !self.another_cycle && !ctx.another_cycle {
+                        break;
+                    }
+                    ctx.first_cycle = false;
+                }
             }
         }
     }
 }
 
 impl SimplifyLocals {
-    fn optimize_function<'a>(
+    fn optimize_function(
         &mut self,
-        expr: &mut ExprRef<'a>,
-        ctx: &mut FunctionContext<'a>,
-        allocator: &'a bumpalo::Bump,
+        expr_id: &mut ExpressionId,
+        ctx: &mut FunctionContext,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
         depth: usize,
     ) {
-        let addr = expr.as_ptr() as usize;
-        if !self.path.insert(addr) {
-            panic!("Cycle detected at address: 0x{:x}", addr);
+        if !self.path.insert(*expr_id) {
+            return;
         }
         if depth > 1000 {
-            panic!("Recursion depth exceeded!");
+            self.path.remove(expr_id);
+            return;
         }
 
-        self.optimize_function_internal(expr, ctx, allocator, depth);
+        self.optimize_function_internal(expr_id, ctx, arena, depth);
 
-        self.path.remove(&addr);
+        self.path.remove(expr_id);
     }
 
-    fn optimize_function_internal<'a>(
+    fn optimize_function_internal(
         &mut self,
-        expr: &mut ExprRef<'a>,
-        ctx: &mut FunctionContext<'a>,
-        allocator: &'a bumpalo::Bump,
+        expr_id: &mut ExpressionId,
+        ctx: &mut FunctionContext,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
         depth: usize,
     ) {
-        // Handle LocalGet
-        let get_id = if let ExpressionKind::LocalGet { id } = &expr.kind {
-            Some(*id)
-        } else {
-            None
-        };
-        if let Some(id) = get_id {
-            // Sinking logic
-            if let Some(info) = ctx.sinkables.remove(&id) {
-                unsafe {
-                    let set_kind = &mut (*info.set.as_ptr()).kind;
+        let kind = arena[*expr_id].kind.clone();
+        match kind {
+            ExpressionKind::LocalGet { id } => {
+                if let Some(info) = ctx.sinkables.remove(&id) {
+                    let set_kind = arena[info.set_id].kind.clone();
                     if let ExpressionKind::LocalSet { value, .. } = set_kind {
+                        let value_type = arena[value].type_;
+                        let expr_type = arena[*expr_id].type_;
                         if ctx.first_cycle || ctx.get_counts.get(&id).copied().unwrap_or(0) == 1 {
-                            // Single use: Replace Get with Value
-                            if value.type_ != expr.type_ {
-                                ctx.refinalize = true;
+                            if value_type != expr_type {
+                                self.refinalize = true;
                             }
-                            *expr = *value;
+                            *expr_id = value;
                         } else {
-                            // Multiple uses: Replace Get with LocalTee
-                            expr.kind = ExpressionKind::LocalTee { id, value: *value };
+                            arena[*expr_id].kind = ExpressionKind::LocalTee { id, value };
                         }
 
-                        // Nop out the Set at its original location
-                        let old_set_ref = &mut *info.ptr;
-                        old_set_ref.kind = ExpressionKind::Nop;
-                        old_set_ref.type_ = crate::ir::Type::NONE;
-
+                        arena[info.original_id].kind = ExpressionKind::Nop;
+                        arena[info.original_id].type_ = Type::NONE;
                         self.another_cycle = true;
-                    } else {
-                        unreachable!("Sinkable set must be a LocalSet");
+                    }
+                    let effects = EffectAnalyzer::analyze(*expr_id, arena);
+                    ctx.check_invalidations(effects);
+                } else {
+                    let effects = EffectAnalyzer::analyze(*expr_id, arena);
+                    ctx.check_invalidations(effects);
+                }
+            }
+            ExpressionKind::LocalSet { id, mut value } => {
+                self.optimize_function(&mut value, ctx, arena, depth + 1);
+                if let ExpressionKind::LocalSet { value: old_val, .. } = &mut arena[*expr_id].kind {
+                    *old_val = value;
+                }
+                let effects = EffectAnalyzer::analyze(*expr_id, arena);
+                ctx.check_invalidations(effects);
+
+                if ctx.can_sink(&arena[*expr_id], arena) {
+                    ctx.sinkables.insert(
+                        id,
+                        SinkableInfo {
+                            set_id: *expr_id,
+                            original_id: *expr_id,
+                            effects,
+                        },
+                    );
+                } else if ctx.first_cycle && ctx.allow_tee {
+                    let use_count = ctx.get_counts.get(&id).copied().unwrap_or(0);
+                    if use_count > 1 {
+                        self.another_cycle = true;
                     }
                 }
             }
-            let effects = EffectAnalyzer::analyze(*expr);
-            ctx.check_invalidations(effects);
-            return;
-        }
-
-        // Handle LocalSet
-        let set_id = if let ExpressionKind::LocalSet { id, .. } = &expr.kind {
-            Some(*id)
-        } else {
-            None
-        };
-
-        if let Some(id) = set_id {
-            {
-                if let ExpressionKind::LocalSet { value, .. } = &mut expr.kind {
-                    self.optimize_function(value, ctx, allocator, depth + 1);
+            ExpressionKind::LocalTee { id: _, mut value } => {
+                self.optimize_function(&mut value, ctx, arena, depth + 1);
+                if let ExpressionKind::LocalTee { value: old_val, .. } = &mut arena[*expr_id].kind {
+                    *old_val = value;
                 }
+                let effects = EffectAnalyzer::analyze(*expr_id, arena);
+                ctx.check_invalidations(effects);
             }
-
-            let effects = EffectAnalyzer::analyze(*expr);
-            ctx.check_invalidations(effects);
-
-            if ctx.can_sink(&*expr) {
-                ctx.sinkables.insert(
-                    id,
-                    SinkableInfo {
-                        set: *expr,
-                        ptr: expr.as_ptr(),
-                        effects,
-                    },
-                );
-            } else if ctx.first_cycle && ctx.allow_tee {
-                let use_count = ctx.get_counts.get(&id).copied().unwrap_or(0);
-                if use_count > 1 {
-                    self.another_cycle = true;
+            ExpressionKind::Drop { mut value } => {
+                self.optimize_function(&mut value, ctx, arena, depth + 1);
+                if let ExpressionKind::Drop { value: old_val } = &mut arena[*expr_id].kind {
+                    *old_val = value;
                 }
+                self.visit_drop_post(expr_id, ctx, arena);
+                let effects = EffectAnalyzer::analyze(*expr_id, arena);
+                ctx.check_invalidations(effects);
             }
-            return;
-        }
-        let tee_ids = if let ExpressionKind::LocalTee { id, .. } = &expr.kind {
-            Some(*id)
-        } else {
-            None
-        };
-        if tee_ids.is_some() {
-            if let ExpressionKind::LocalTee { value, .. } = &mut expr.kind {
-                self.optimize_function(value, ctx, allocator, depth + 1);
-            }
-            let effects = EffectAnalyzer::analyze(*expr);
-            ctx.check_invalidations(effects);
-            return;
-        }
-
-        // Handle Drop
-        if let ExpressionKind::Drop { value } = &mut expr.kind {
-            self.optimize_function(value, ctx, allocator, depth + 1);
-            self.visit_drop_post(expr, ctx);
-
-            let effects = EffectAnalyzer::analyze(*expr);
-            ctx.check_invalidations(effects);
-            return;
-        }
-
-        // Handle Control Flow and Others
-        match &mut expr.kind {
-            ExpressionKind::Block { list, .. } => {
+            ExpressionKind::Block { mut list, .. } => {
                 for child in list.iter_mut() {
-                    self.optimize_function(child, ctx, allocator, depth + 1);
+                    self.optimize_function(child, ctx, arena, depth + 1);
                 }
-                self.visit_block_post(expr, ctx, allocator);
+                if let ExpressionKind::Block { list: old_list, .. } = &mut arena[*expr_id].kind {
+                    *old_list = list;
+                }
+                self.visit_block_post(expr_id, ctx, arena);
             }
             ExpressionKind::If {
-                condition,
-                if_true,
-                if_false,
+                name: _,
+                mut condition,
+                mut if_true,
+                mut if_false,
             } => {
-                self.optimize_function(condition, ctx, allocator, depth + 1);
+                self.optimize_function(&mut condition, ctx, arena, depth + 1);
 
                 let snapshot = ctx.sinkables.clone();
-                self.optimize_function(if_true, ctx, allocator, depth + 1);
+                self.optimize_function(&mut if_true, ctx, arena, depth + 1);
 
-                if let Some(false_branch) = if_false {
-                    // Save true branch sinkables
+                if let Some(mut fb) = if_false {
                     let true_sinkables = std::mem::replace(&mut ctx.sinkables, snapshot);
                     ctx.if_stack.push(true_sinkables);
-
-                    self.optimize_function(false_branch, ctx, allocator, depth + 1);
-
-                    // Now ctx.sinkables has false branch sinkables, and if_stack has true branch
+                    self.optimize_function(&mut fb, ctx, arena, depth + 1);
+                    if_false = Some(fb);
                 } else {
                     let true_sinkables = std::mem::replace(&mut ctx.sinkables, snapshot);
                     ctx.if_stack.push(true_sinkables);
-                    // ctx.sinkables is now back to 'snapshot' (empty or earlier sinkables)
                 }
 
-                self.visit_if_post(expr, ctx, allocator);
+                if let ExpressionKind::If {
+                    name: _,
+                    condition: oc,
+                    if_true: ot,
+                    if_false: of,
+                } = &mut arena[*expr_id].kind
+                {
+                    *oc = condition;
+                    *ot = if_true;
+                    *of = if_false;
+                }
+                self.visit_if_post(expr_id, ctx, arena);
             }
-            ExpressionKind::Loop { body, .. } => {
+            ExpressionKind::Loop { mut body, .. } => {
                 let snapshot = ctx.sinkables.clone();
                 ctx.sinkables.clear();
-                self.optimize_function(body, ctx, allocator, depth + 1);
-                self.visit_loop_post(expr, ctx, allocator);
+                self.optimize_function(&mut body, ctx, arena, depth + 1);
+                if let ExpressionKind::Loop { body: ob, .. } = &mut arena[*expr_id].kind {
+                    *ob = body;
+                }
+                self.visit_loop_post(expr_id, ctx, arena);
                 ctx.sinkables = snapshot;
             }
-            ExpressionKind::LocalGet { .. }
-            | ExpressionKind::LocalSet { .. }
-            | ExpressionKind::LocalTee { .. }
-            | ExpressionKind::Drop { .. } => {
-                unreachable!("Handled above")
-            }
-            ExpressionKind::Break { name, value, .. } => {
-                let target = *name;
+            ExpressionKind::Break {
+                ref name, value, ..
+            } => {
                 if value.is_some() {
-                    ctx.unoptimizable_blocks.insert(target.to_string());
+                    ctx.unoptimizable_blocks.insert(name.clone());
                 } else {
                     ctx.block_breaks
-                        .entry(target.to_string())
+                        .entry(name.clone())
                         .or_default()
                         .push(BlockBreak {
-                            br: expr.as_ptr(),
+                            br_id: *expr_id,
                             sinkables: ctx.sinkables.clone(),
                         });
                 }
                 ctx.sinkables.clear();
             }
             _ => {
-                visit_children(expr, |child| {
-                    self.optimize_function(child, ctx, allocator, depth + 1)
+                let mut kind_mut = arena[*expr_id].kind.clone();
+                kind_mut.for_each_child_mut(|child| {
+                    self.optimize_function(child, ctx, arena, depth + 1);
                 });
-                expr.finalize();
-                let effects = EffectAnalyzer::analyze(*expr);
+                arena[*expr_id].kind = kind_mut;
+                let effects = EffectAnalyzer::analyze(*expr_id, arena);
                 ctx.check_invalidations(effects);
             }
         }
     }
 
-    fn visit_block_post<'a>(
+    fn visit_block_post(
         &mut self,
-        expr: &mut ExprRef<'a>,
-        ctx: &mut FunctionContext<'a>,
-        allocator: &'a bumpalo::Bump,
+        expr_id: &mut ExpressionId,
+        ctx: &mut FunctionContext,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
     ) {
-        let (name, has_breaks) = if let ExpressionKind::Block { name, .. } = &expr.kind {
-            let n = name.map(|s| s.to_string());
+        let (name, hb) = if let ExpressionKind::Block { name, .. } = &arena[*expr_id].kind {
+            let n = name.clone();
             let hb = n
                 .as_ref()
                 .map(|s| ctx.block_breaks.contains_key(s))
@@ -413,7 +384,7 @@ impl SimplifyLocals {
         };
 
         if self.allow_structure {
-            self.optimize_block_return(expr, ctx, allocator);
+            self.optimize_block_return(*expr_id, ctx, arena);
         }
 
         if let Some(n) = name {
@@ -421,79 +392,81 @@ impl SimplifyLocals {
                 ctx.sinkables.clear();
                 ctx.unoptimizable_blocks.remove(&n);
             }
-            if has_breaks {
+            if hb {
                 ctx.sinkables.clear();
                 ctx.block_breaks.remove(&n);
             }
         }
-        expr.finalize();
+
+        ReFinalize::run(expr_id, arena);
     }
 
-    fn optimize_block_return<'a>(
+    fn optimize_block_return(
         &mut self,
-        expr: &mut ExprRef<'a>,
-        ctx: &mut FunctionContext<'a>,
-        allocator: &'a bumpalo::Bump,
+        expr_id: ExpressionId,
+        ctx: &mut FunctionContext,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
     ) {
-        let (name, list) = match &mut expr.kind {
-            ExpressionKind::Block { name, list } => (name, list),
+        let (name, list_len) = match &arena[expr_id].kind {
+            ExpressionKind::Block { name, list } => (name.clone(), list.len()),
             _ => return,
         };
 
-        if let Some(n) = name {
-            if ctx.unoptimizable_blocks.contains(*n) {
+        if let Some(ref n) = name {
+            if ctx.unoptimizable_blocks.contains(n) {
                 return;
             }
         }
 
-        let breaks = if let Some(n) = name {
-            ctx.block_breaks.get(*n)
+        let breaks = if let Some(ref n) = name {
+            ctx.block_breaks.get(n)
         } else {
             None
         };
 
-        // If no breaks, we can still try to optimize the end of the block
-        if breaks.is_none() || breaks.unwrap().is_empty() {
+        if breaks.is_none() || breaks.as_ref().unwrap().is_empty() {
             let mut result = None;
-            if let ExpressionKind::Block { list, .. } = &mut expr.kind {
-                if let Some(last) = list.last_mut() {
-                    if let ExpressionKind::LocalSet { id, .. } = &last.kind {
-                        result = Some((*id, *last));
+            if let ExpressionKind::Block { list, .. } = &arena[expr_id].kind {
+                if let Some(&last_id) = list.last() {
+                    if let ExpressionKind::LocalSet { id, .. } = &arena[last_id].kind {
+                        result = Some((*id, last_id));
                     }
                 }
             }
 
-            if let Some((id, last_set)) = result {
-                let value = if let ExpressionKind::LocalSet { value, .. } = &last_set.kind {
-                    *value
-                } else {
-                    unreachable!()
-                };
+            if let Some((id, last_set_id)) = result {
+                let val_id =
+                    if let ExpressionKind::LocalSet { value, .. } = &arena[last_set_id].kind {
+                        *value
+                    } else {
+                        unreachable!()
+                    };
 
-                let new_block_type = value.type_;
-                if let ExpressionKind::Block { list, .. } = &mut expr.kind {
-                    *list.last_mut().unwrap() = value;
+                if let ExpressionKind::Block { list, .. } = &mut arena[expr_id].kind {
+                    if let Some(last) = list.last_mut() {
+                        *last = val_id;
+                    }
                 }
 
-                let old_block_kind = std::mem::replace(&mut expr.kind, ExpressionKind::Nop);
-                unsafe {
-                    let ptr = last_set.as_ptr();
-                    (*ptr).kind = old_block_kind;
-                    (*ptr).type_ = new_block_type;
-                }
+                let old_kind = std::mem::replace(&mut arena[expr_id].kind, ExpressionKind::Nop);
+                let old_type = arena[expr_id].type_;
 
-                expr.kind = ExpressionKind::LocalSet {
+                arena[last_set_id].kind = old_kind;
+                arena[last_set_id].type_ = old_type;
+
+                arena[expr_id].kind = ExpressionKind::LocalSet {
                     id,
-                    value: last_set,
+                    value: last_set_id,
                 };
+                arena[expr_id].type_ = Type::NONE;
+
+                self.refinalize = true;
                 self.another_cycle = true;
             }
             return;
         }
 
         let breaks = breaks.unwrap();
-
-        // Find a local set that is present in all breaks and the current sinkables (if any)
         let mut shared_id = None;
         for &id in ctx.sinkables.keys() {
             let mut in_all = true;
@@ -514,281 +487,132 @@ impl SimplifyLocals {
             None => return,
         };
 
-        // Verify if any br_if condition invalidates the move
         for brk in breaks {
-            unsafe {
-                if let ExpressionKind::Break {
-                    condition: Some(cond),
-                    ..
-                } = &(*brk.br).kind
-                {
-                    let set_info = brk.sinkables.get(&shared_id).unwrap();
-                    let cond_effects = EffectAnalyzer::analyze(*cond);
-                    if cond_effects.interferes_with(set_info.effects) {
-                        return;
-                    }
+            if let ExpressionKind::Break {
+                condition: Some(cond),
+                ..
+            } = &arena[brk.br_id].kind
+            {
+                let set_info = brk.sinkables.get(&shared_id).unwrap();
+                let cond_effects = EffectAnalyzer::analyze(*cond, arena);
+                if cond_effects.interferes_with(set_info.effects) {
+                    return;
                 }
             }
         }
 
-        // Optimization possible!
-        if list.is_empty() {
+        if list_len == 0 {
             return;
         }
 
-        // 1. End of block
         let set_info = ctx.sinkables.remove(&shared_id).unwrap();
-        let block_val = if let ExpressionKind::LocalSet { value, .. } = &set_info.set.kind {
+        let block_val = if let ExpressionKind::LocalSet { value, .. } = &arena[set_info.set_id].kind
+        {
             *value
         } else {
             unreachable!()
         };
 
-        list.push(block_val);
-        unsafe {
-            let set_ref = &mut *set_info.ptr;
-            set_ref.kind = ExpressionKind::Nop;
-            set_ref.type_ = crate::ir::Type::NONE;
+        if let ExpressionKind::Block { list, .. } = &mut arena[expr_id].kind {
+            list.push(block_val);
         }
+        arena[set_info.set_id].kind = ExpressionKind::Nop;
+        arena[set_info.set_id].type_ = Type::NONE;
 
-        // 2. Each break
         for brk in breaks {
-            unsafe {
-                let info = brk.sinkables.get(&shared_id).unwrap();
-                let set = info.set;
-                if let ExpressionKind::Break {
-                    condition, value, ..
-                } = &mut (*brk.br).kind
-                {
-                    if let ExpressionKind::LocalSet { value: val, .. } = &set.kind {
-                        if condition.is_some() {
-                            *value = Some(set);
-                            // Convert Set to Tee
-                            let set_raw_ptr = set.as_ptr();
-                            (*set_raw_ptr).kind = ExpressionKind::LocalTee {
-                                id: shared_id,
-                                value: *val,
-                            };
-                            let info_ptr_ref = &mut *info.ptr;
-                            info_ptr_ref.kind = ExpressionKind::Nop;
-                            info_ptr_ref.type_ = crate::ir::Type::NONE;
-                        } else {
-                            *value = Some(*val);
-                            let info_ptr_ref = &mut *info.ptr;
-                            info_ptr_ref.kind = ExpressionKind::Nop;
-                            info_ptr_ref.type_ = crate::ir::Type::NONE;
-                        }
-                    }
+            let info = brk.sinkables.get(&shared_id).unwrap();
+            let sid = info.set_id;
+            let vid = if let ExpressionKind::LocalSet { value, .. } = &arena[sid].kind {
+                *value
+            } else {
+                unreachable!()
+            };
+
+            if let ExpressionKind::Break {
+                value, condition, ..
+            } = &mut arena[brk.br_id].kind
+            {
+                if condition.is_some() {
+                    *value = Some(sid);
+                    arena[sid].kind = ExpressionKind::LocalTee {
+                        id: shared_id,
+                        value: vid,
+                    };
+                } else {
+                    *value = Some(vid);
+                    arena[sid].kind = ExpressionKind::Nop;
+                    arena[sid].type_ = Type::NONE;
                 }
             }
         }
 
-        expr.finalize();
+        let old_kind = std::mem::replace(&mut arena[expr_id].kind, ExpressionKind::Nop);
+        let old_type = arena[expr_id].type_;
+        let nid = Expression::alloc(arena, old_kind, old_type);
 
-        // Correctly wrap the block in a LocalSet by moving its kind to a new expression
-        let old_kind = std::mem::replace(&mut expr.kind, ExpressionKind::Nop);
-        let old_type = expr.type_;
-        let new_block_expr = Expression::new(allocator, old_kind, old_type);
-
-        expr.kind = ExpressionKind::LocalSet {
+        arena[expr_id].kind = ExpressionKind::LocalSet {
             id: shared_id,
-            value: new_block_expr,
+            value: nid,
         };
+        arena[expr_id].type_ = Type::NONE;
+
         ctx.sinkables.clear();
         self.another_cycle = true;
+        self.refinalize = true;
     }
 
-    fn visit_if_post<'a>(
+    fn visit_if_post(
         &mut self,
-        expr: &mut ExprRef<'a>,
-        ctx: &mut FunctionContext<'a>,
-        allocator: &'a bumpalo::Bump,
+        expr_id: &mut ExpressionId,
+        ctx: &mut FunctionContext,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
     ) {
-        if !self.allow_structure {
-            return;
-        }
-
-        let is_if_else = if let ExpressionKind::If { if_false, .. } = &expr.kind {
-            if_false.is_some()
-        } else {
-            false
+        let true_sinkables = match ctx.if_stack.pop() {
+            Some(s) => s,
+            None => {
+                ctx.sinkables.clear();
+                return;
+            }
         };
 
-        if is_if_else {
-            let true_sinkables = ctx.if_stack.pop().unwrap();
-            self.optimize_if_else_return(expr, ctx, allocator, true_sinkables);
-        } else {
-            let true_sinkables = ctx.if_stack.pop().unwrap();
-            self.optimize_if_return(expr, ctx, allocator, true_sinkables);
+        let mut common = HashMap::new();
+        for (id, info) in &true_sinkables {
+            if let Some(false_info) = ctx.sinkables.get(id) {
+                if info.effects == false_info.effects {
+                    common.insert(*id, info.clone());
+                }
+            }
         }
-        expr.finalize();
+
+        ctx.sinkables = common;
+
+        if self.allow_structure {
+            self.optimize_if_return(expr_id, ctx, arena, true_sinkables);
+        }
     }
 
-    fn optimize_if_else_return<'a>(
+    fn optimize_if_return(
         &mut self,
-        expr: &mut ExprRef<'a>,
-        ctx: &mut FunctionContext<'a>,
-        allocator: &'a bumpalo::Bump,
-        mut if_true_sinkables: HashMap<crate::ir::LocalId, SinkableInfo<'a>>,
+        expr_id: &mut ExpressionId,
+        ctx: &mut FunctionContext,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+        mut if_true_sinkables: HashMap<crate::ir::LocalId, SinkableInfo>,
     ) {
-        if expr.type_ != crate::ir::Type::NONE {
+        if arena[*expr_id].type_ != Type::NONE {
             return;
         }
 
-        let (mut if_true, if_false) = if let ExpressionKind::If {
-            if_true, if_false, ..
-        } = &mut expr.kind
-        {
-            (*if_true, if_false.as_mut().unwrap())
-        } else {
-            return;
-        };
-        let mut if_false = *if_false;
-
-        let mut good_id = None;
-        if if_true.type_ == crate::ir::Type::UNREACHABLE {
-            if !ctx.sinkables.is_empty() {
-                good_id = Some(*ctx.sinkables.keys().next().unwrap());
-            }
-        } else if if_false.type_ == crate::ir::Type::UNREACHABLE {
-            if !if_true_sinkables.is_empty() {
-                good_id = Some(*if_true_sinkables.keys().next().unwrap());
-            }
-        } else {
-            // Shared ID
-            for &id in if_true_sinkables.keys() {
-                if ctx.sinkables.contains_key(&id) {
-                    good_id = Some(id);
-                    break;
-                }
-            }
-        }
-
-        let good_id = match good_id {
-            Some(i) => i,
-            None => return,
-        };
-
-        let mut optimized = false;
-        let true_type = if_true.type_;
-        if true_type != crate::ir::Type::UNREACHABLE {
-            let info = if_true_sinkables.remove(&good_id).unwrap();
-
-            let mut is_whole_branch = false;
-            if let ExpressionKind::LocalSet { id, value } = &mut if_true.kind {
-                if *id == good_id {
-                    let mut old_value = *value;
-                    if_true.kind = std::mem::replace(&mut old_value.kind, ExpressionKind::Nop);
-                    if_true.type_ = old_value.type_;
-                    optimized = true;
-                    is_whole_branch = true;
-                }
-            }
-
-            if !is_whole_branch {
-                // Ensure it's a block to append to it
-                if !matches!(if_true.kind, ExpressionKind::Block { .. }) {
-                    let mut list = BumpVec::new_in(allocator);
-                    let old_true = std::mem::replace(&mut if_true.kind, ExpressionKind::Nop);
-                    let old_type = if_true.type_;
-                    let inner = Expression::new(allocator, old_true, old_type);
-                    list.push(inner);
-                    if_true.kind = ExpressionKind::Block { name: None, list };
-                }
-
-                if let ExpressionKind::LocalSet { value, .. } = &info.set.kind {
-                    let value = *value;
-                    if let ExpressionKind::Block { list, .. } = &mut if_true.kind {
-                        list.push(value);
-                        unsafe {
-                            let info_ptr_ref = &mut *info.ptr;
-                            info_ptr_ref.kind = ExpressionKind::Nop;
-                            info_ptr_ref.type_ = crate::ir::Type::NONE;
-                        }
-                        if_true.finalize();
-                        optimized = true;
-                    }
-                }
-            }
-        }
-
-        let false_type = if_false.type_;
-        if false_type != crate::ir::Type::UNREACHABLE {
-            let info = ctx.sinkables.remove(&good_id).unwrap();
-
-            let mut is_whole_branch = false;
-            if let ExpressionKind::LocalSet { id, value } = &mut if_false.kind {
-                if *id == good_id {
-                    let mut old_value = *value;
-                    if_false.kind = std::mem::replace(&mut old_value.kind, ExpressionKind::Nop);
-                    if_false.type_ = old_value.type_;
-                    optimized = true;
-                    is_whole_branch = true;
-                }
-            }
-
-            if !is_whole_branch {
-                // Ensure it's a block to append to it
-                if !matches!(if_false.kind, ExpressionKind::Block { .. }) {
-                    let mut list = BumpVec::new_in(allocator);
-                    let old_false = std::mem::replace(&mut if_false.kind, ExpressionKind::Nop);
-                    let old_type = if_false.type_;
-                    let inner = Expression::new(allocator, old_false, old_type);
-                    list.push(inner);
-                    if_false.kind = ExpressionKind::Block { name: None, list };
-                }
-
-                if let ExpressionKind::LocalSet { value, .. } = &info.set.kind {
-                    let value = *value;
-                    if let ExpressionKind::Block { list, .. } = &mut if_false.kind {
-                        list.push(value);
-                        unsafe {
-                            let info_ptr_ref = &mut *info.ptr;
-                            info_ptr_ref.kind = ExpressionKind::Nop;
-                            info_ptr_ref.type_ = crate::ir::Type::NONE;
-                        }
-                        if_false.finalize();
-                        optimized = true;
-                    }
-                }
-            }
-        }
-
-        if !optimized {
-            return;
-        }
-
-        expr.finalize(); // Update If type before wrapping
-        let old_kind = std::mem::replace(&mut expr.kind, ExpressionKind::Nop);
-        let old_type = expr.type_;
-        let new_if = Expression::new(allocator, old_kind, old_type);
-
-        expr.kind = ExpressionKind::LocalSet {
-            id: good_id,
-            value: new_if,
-        };
-        expr.finalize();
-        ctx.sinkables.clear();
-        self.another_cycle = true;
-    }
-
-    fn optimize_if_return<'a>(
-        &mut self,
-        expr: &mut ExprRef<'a>,
-        _ctx: &mut FunctionContext<'a>,
-        allocator: &'a bumpalo::Bump,
-        mut if_true_sinkables: HashMap<crate::ir::LocalId, SinkableInfo<'a>>,
-    ) {
-        if expr.type_ != crate::ir::Type::NONE {
-            return;
-        }
-
-        let if_true = match &mut expr.kind {
-            ExpressionKind::If { if_true, .. } => if_true,
+        let (if_true_id, _if_false_opt) = match &arena[*expr_id].kind {
+            ExpressionKind::If {
+                name: _,
+                if_true,
+                if_false,
+                ..
+            } => (*if_true, *if_false),
             _ => return,
         };
 
-        if if_true.type_ != crate::ir::Type::NONE {
+        if arena[if_true_id].type_ != Type::NONE {
             return;
         }
 
@@ -796,83 +620,85 @@ impl SimplifyLocals {
             return;
         }
 
-        // Speculative: add local.get to else branch to enable sinking
         let good_id = *if_true_sinkables.keys().next().unwrap();
         let info = if_true_sinkables.remove(&good_id).unwrap();
 
-        if let ExpressionKind::LocalSet { value, .. } = &info.set.kind {
-            let value = *value;
-            let mut is_whole_branch = false;
-            if let ExpressionKind::LocalSet { id, value: val } = &mut if_true.kind {
+        if let ExpressionKind::LocalSet { value, .. } = &arena[info.set_id].kind {
+            let vid = *value;
+            let mut is_whole = false;
+
+            let mut true_id = if_true_id;
+            if let ExpressionKind::LocalSet { id, value: val } = &mut arena[true_id].kind {
                 if *id == good_id {
-                    let mut old_val = *val;
-                    if_true.kind = std::mem::replace(&mut old_val.kind, ExpressionKind::Nop);
-                    if_true.type_ = old_val.type_;
-                    is_whole_branch = true;
+                    let ov = *val;
+                    arena[true_id].kind =
+                        std::mem::replace(&mut arena[ov].kind, ExpressionKind::Nop);
+                    arena[true_id].type_ = arena[ov].type_;
+                    is_whole = true;
                 }
             }
 
-            if !is_whole_branch {
-                if !matches!(if_true.kind, ExpressionKind::Block { .. }) {
-                    let mut list = BumpVec::new_in(allocator);
-                    let old_true = std::mem::replace(&mut if_true.kind, ExpressionKind::Nop);
-                    let old_type = if_true.type_;
-                    let inner = Expression::new(allocator, old_true, old_type);
-                    list.push(inner);
-                    if_true.kind = ExpressionKind::Block { name: None, list };
+            if !is_whole {
+                if !matches!(arena[true_id].kind, ExpressionKind::Block { .. }) {
+                    let ok = std::mem::replace(&mut arena[true_id].kind, ExpressionKind::Nop);
+                    let ot = arena[true_id].type_;
+                    let iid = Expression::alloc(arena, ok, ot);
+                    arena[true_id].kind = ExpressionKind::Block {
+                        name: None,
+                        list: vec![iid],
+                    };
                 }
 
-                if let ExpressionKind::Block { list, .. } = &mut if_true.kind {
-                    list.push(value);
-                    unsafe {
-                        let info_ptr_ref = &mut *info.ptr;
-                        info_ptr_ref.kind = ExpressionKind::Nop;
-                        info_ptr_ref.type_ = crate::ir::Type::NONE;
-                    }
-                    if_true.finalize();
+                if let ExpressionKind::Block { list, .. } = &mut arena[true_id].kind {
+                    list.push(vid);
+                    arena[info.original_id].kind = ExpressionKind::Nop;
+                    arena[info.original_id].type_ = Type::NONE;
+                    ReFinalize::run(&mut true_id, arena);
                 }
             }
-            // Speculative: Add the missing else with a local.get
-            let local_type = if_true.type_; // Use the type of the value being sunk
-            let get = Expression::local_get(allocator, good_id, local_type);
 
-            if let ExpressionKind::If { if_false, .. } = &mut expr.kind {
-                *if_false = Some(get);
+            let ltype = arena[true_id].type_;
+            let gid = Expression::alloc(arena, ExpressionKind::LocalGet { id: good_id }, ltype);
+
+            if let ExpressionKind::If { if_false, .. } = &mut arena[*expr_id].kind {
+                if if_false.is_none() {
+                    *if_false = Some(gid);
+                }
             }
 
-            unsafe {
-                let info_ptr_ref = &mut *info.ptr;
-                info_ptr_ref.kind = ExpressionKind::Nop;
-                info_ptr_ref.type_ = crate::ir::Type::NONE;
-            }
+            arena[info.original_id].kind = ExpressionKind::Nop;
+            arena[info.original_id].type_ = Type::NONE;
 
-            expr.finalize(); // Update If type before wrapping
-            let old_kind = std::mem::replace(&mut expr.kind, ExpressionKind::Nop);
-            let old_type = expr.type_;
-            let new_if = Expression::new(allocator, old_kind, old_type);
+            ReFinalize::run(expr_id, arena);
 
-            expr.kind = ExpressionKind::LocalSet {
+            let ok = std::mem::replace(&mut arena[*expr_id].kind, ExpressionKind::Nop);
+            let ot = arena[*expr_id].type_;
+            let nid = Expression::alloc(arena, ok, ot);
+
+            arena[*expr_id].kind = ExpressionKind::LocalSet {
                 id: good_id,
-                value: new_if,
+                value: nid,
             };
-            expr.finalize();
+            arena[*expr_id].type_ = Type::NONE;
+
+            ctx.sinkables.clear();
             self.another_cycle = true;
         }
     }
 
-    fn visit_loop_post<'a>(
+    fn visit_loop_post(
         &mut self,
-        expr: &mut ExprRef<'a>,
-        ctx: &mut FunctionContext<'a>,
-        allocator: &'a bumpalo::Bump,
+        expr_id: &mut ExpressionId,
+        ctx: &mut FunctionContext,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
     ) {
         if !self.allow_structure {
-            expr.finalize();
+            ReFinalize::run(expr_id, arena);
             return;
         }
 
-        if expr.type_ != crate::ir::Type::NONE {
-            expr.finalize();
+        if arena[*expr_id].type_ != Type::NONE {
+            ReFinalize::run(expr_id, arena);
             return;
         }
 
@@ -881,625 +707,87 @@ impl SimplifyLocals {
         }
 
         let good_id = *ctx.sinkables.keys().next().unwrap();
-        let set_info = ctx.sinkables.remove(&good_id).unwrap();
+        let info = ctx.sinkables.remove(&good_id).unwrap();
 
-        if let ExpressionKind::Loop { body, .. } = &mut expr.kind {
-            let mut optimized = false;
+        let body_id = match &arena[*expr_id].kind {
+            ExpressionKind::Loop { body, .. } => *body,
+            _ => return,
+        };
 
-            if let ExpressionKind::LocalSet { id, value } = &mut body.kind {
-                if *id == good_id {
-                    let mut old_value = *value;
-                    body.kind = std::mem::replace(&mut old_value.kind, ExpressionKind::Nop);
-                    body.type_ = old_value.type_;
-                    optimized = true;
-                }
-            } else if let ExpressionKind::Block { list, .. } = &mut body.kind {
-                if let ExpressionKind::LocalSet { value, .. } = &set_info.set.kind {
-                    let value = *value;
-                    list.push(value);
-                    unsafe {
-                        let set_info_ptr_ref = &mut *set_info.ptr;
-                        set_info_ptr_ref.kind = ExpressionKind::Nop;
-                        set_info_ptr_ref.type_ = crate::ir::Type::NONE;
-                    }
-                    body.finalize();
+        let mut optimized = false;
+        if let ExpressionKind::LocalSet { id, value } = &mut arena[body_id].kind {
+            if *id == good_id {
+                let ov = *value;
+                arena[body_id].kind = std::mem::replace(&mut arena[ov].kind, ExpressionKind::Nop);
+                arena[body_id].type_ = arena[ov].type_;
+                optimized = true;
+            }
+        } else if let ExpressionKind::Block { .. } = &arena[body_id].kind {
+            let vid = if let ExpressionKind::LocalSet { value, .. } = &arena[info.set_id].kind {
+                Some(*value)
+            } else {
+                None
+            };
+
+            if let Some(vid) = vid {
+                let mut mut_body_id = body_id;
+                if let ExpressionKind::Block { list, .. } = &mut arena[mut_body_id].kind {
+                    list.push(vid);
+                    arena[info.original_id].kind = ExpressionKind::Nop;
+                    arena[info.original_id].type_ = Type::NONE;
+                    ReFinalize::run(&mut mut_body_id, arena);
                     optimized = true;
                 }
             }
+        }
 
-            if optimized {
-                expr.finalize(); // Update Loop type before wrapping
-                let old_kind = std::mem::replace(&mut expr.kind, ExpressionKind::Nop);
-                let old_type = expr.type_;
-                let new_loop = Expression::new(allocator, old_kind, old_type);
+        if optimized {
+            ReFinalize::run(expr_id, arena);
+            let ok = std::mem::replace(&mut arena[*expr_id].kind, ExpressionKind::Nop);
+            let ot = arena[*expr_id].type_;
+            let nid = Expression::alloc(arena, ok, ot);
 
-                expr.kind = ExpressionKind::LocalSet {
-                    id: good_id,
-                    value: new_loop,
-                };
-                expr.finalize();
-                self.another_cycle = true;
-            }
+            arena[*expr_id].kind = ExpressionKind::LocalSet {
+                id: good_id,
+                value: nid,
+            };
+            arena[*expr_id].type_ = Type::NONE;
+            self.another_cycle = true;
         }
     }
 
-    fn visit_drop_post<'a>(&mut self, expr: &mut ExprRef<'a>, _ctx: &mut FunctionContext<'a>) {
-        // Collapse drop-tee into set (drop (local.tee) -> local.set)
-        if let ExpressionKind::Drop { value } = &mut expr.kind {
-            if let ExpressionKind::LocalTee { id, value: tee_val } = &value.kind {
+    fn visit_drop_post(
+        &mut self,
+        expr_id: &mut ExpressionId,
+        _ctx: &mut FunctionContext,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        if let ExpressionKind::Drop { value } = &mut arena[*expr_id].kind {
+            let vid = *value;
+            if let ExpressionKind::LocalTee { id, value: tee_val } = &arena[vid].kind {
                 let id = *id;
-                let tee_val = *tee_val;
-                expr.kind = ExpressionKind::LocalSet { id, value: tee_val };
+                let tv = *tee_val;
+                arena[*expr_id].kind = ExpressionKind::LocalSet { id, value: tv };
+                arena[*expr_id].type_ = Type::NONE;
                 self.another_cycle = true;
             }
         }
     }
 }
 
-/// Count local.get operations in an expression tree
-fn count_gets(expr: &Expression, counts: &mut HashMap<crate::ir::LocalId, usize>) {
-    match &expr.kind {
+fn count_gets(
+    id: ExpressionId,
+    arena: &IdArena<ExpressionMarker, Expression>,
+    counts: &mut HashMap<crate::ir::LocalId, usize>,
+) {
+    let kind = &arena[id].kind;
+    match kind {
         ExpressionKind::LocalGet { id } => {
             *counts.entry(*id).or_insert(0) += 1;
         }
         _ => {
-            visit_children_ref(expr, |child| count_gets(child, counts));
+            kind.for_each_child(|child| count_gets(child, arena, counts));
         }
-    }
-}
-
-/// Visit children of an expression (mutable)
-fn visit_children<'a, F>(expr: &mut ExprRef<'a>, mut f: F)
-where
-    F: FnMut(&mut ExprRef<'a>),
-{
-    match &mut expr.kind {
-        ExpressionKind::Block { list, .. } => {
-            for child in list.iter_mut() {
-                f(child);
-            }
-        }
-        ExpressionKind::If {
-            condition,
-            if_true,
-            if_false,
-        } => {
-            f(condition);
-            f(if_true);
-            if let Some(else_expr) = if_false {
-                f(else_expr);
-            }
-        }
-        ExpressionKind::Loop { body, .. } => {
-            f(body);
-        }
-        ExpressionKind::Unary { value, .. } => {
-            f(value);
-        }
-        ExpressionKind::Binary { left, right, .. } => {
-            f(left);
-            f(right);
-        }
-        ExpressionKind::Call { operands, .. } | ExpressionKind::CallIndirect { operands, .. } => {
-            for operand in operands.iter_mut() {
-                f(operand);
-            }
-            if let ExpressionKind::CallIndirect { target, .. } = &mut expr.kind {
-                f(target);
-            }
-        }
-        ExpressionKind::LocalSet { value, .. } | ExpressionKind::LocalTee { value, .. } => {
-            f(value);
-        }
-        ExpressionKind::GlobalSet { value, .. } => {
-            f(value);
-        }
-        ExpressionKind::Drop { value } => {
-            f(value);
-        }
-        ExpressionKind::Break {
-            condition, value, ..
-        } => {
-            if let Some(cond) = condition {
-                f(cond);
-            }
-            if let Some(val) = value {
-                f(val);
-            }
-        }
-        ExpressionKind::Return { value } => {
-            if let Some(val) = value {
-                f(val);
-            }
-        }
-        ExpressionKind::Store { ptr, value, .. } => {
-            f(ptr);
-            f(value);
-        }
-        ExpressionKind::Load { ptr, .. } => {
-            f(ptr);
-        }
-        ExpressionKind::AtomicRMW { ptr, value, .. } => {
-            f(ptr);
-            f(value);
-        }
-        ExpressionKind::AtomicCmpxchg {
-            ptr,
-            expected,
-            replacement,
-            ..
-        } => {
-            f(ptr);
-            f(expected);
-            f(replacement);
-        }
-        ExpressionKind::AtomicWait {
-            ptr,
-            expected,
-            timeout,
-            ..
-        } => {
-            f(ptr);
-            f(expected);
-            f(timeout);
-        }
-        ExpressionKind::AtomicNotify { ptr, count, .. } => {
-            f(ptr);
-            f(count);
-        }
-        ExpressionKind::Switch {
-            condition, value, ..
-        } => {
-            f(condition);
-            if let Some(val) = value {
-                f(val);
-            }
-        }
-        ExpressionKind::Select {
-            condition,
-            if_true,
-            if_false,
-        } => {
-            f(condition);
-            f(if_true);
-            f(if_false);
-        }
-        ExpressionKind::MemoryGrow { delta, .. } => {
-            f(delta);
-        }
-        ExpressionKind::RefIsNull { value } => {
-            f(value);
-        }
-        ExpressionKind::RefAs { value, .. } => {
-            f(value);
-        }
-        ExpressionKind::RefEq { left, right } => {
-            f(left);
-            f(right);
-        }
-        ExpressionKind::TupleMake { operands } => {
-            for operand in operands.iter_mut() {
-                f(operand);
-            }
-        }
-        ExpressionKind::TupleExtract { tuple, .. } => {
-            f(tuple);
-        }
-        ExpressionKind::SIMDExtract { vec, .. } => f(vec),
-        ExpressionKind::SIMDReplace { vec, value, .. } => {
-            f(vec);
-            f(value);
-        }
-        ExpressionKind::SIMDShuffle { left, right, .. } => {
-            f(left);
-            f(right);
-        }
-        ExpressionKind::SIMDTernary { a, b, c, .. } => {
-            f(a);
-            f(b);
-            f(c);
-        }
-        ExpressionKind::SIMDShift { vec, shift, .. } => {
-            f(vec);
-            f(shift);
-        }
-        ExpressionKind::SIMDLoad { ptr, .. } => f(ptr),
-        ExpressionKind::SIMDLoadStoreLane { ptr, vec, .. } => {
-            f(ptr);
-            f(vec);
-        }
-        ExpressionKind::MemoryInit {
-            dest, offset, size, ..
-        } => {
-            f(dest);
-            f(offset);
-            f(size);
-        }
-        ExpressionKind::MemoryCopy {
-            dest, src, size, ..
-        } => {
-            f(dest);
-            f(src);
-            f(size);
-        }
-        ExpressionKind::MemoryFill {
-            dest, value, size, ..
-        } => {
-            f(dest);
-            f(value);
-            f(size);
-        }
-        ExpressionKind::TableGet { index, .. } => f(index),
-        ExpressionKind::TableSet { index, value, .. } => {
-            f(index);
-            f(value);
-        }
-        ExpressionKind::TableGrow { delta, value, .. } => {
-            f(delta);
-            f(value);
-        }
-        ExpressionKind::TableFill {
-            dest, value, size, ..
-        } => {
-            f(dest);
-            f(value);
-            f(size);
-        }
-        ExpressionKind::TableCopy {
-            dest, src, size, ..
-        } => {
-            f(dest);
-            f(src);
-            f(size);
-        }
-        ExpressionKind::TableInit {
-            dest, offset, size, ..
-        } => {
-            f(dest);
-            f(offset);
-            f(size);
-        }
-        ExpressionKind::StructNew { operands, .. } => {
-            for operand in operands.iter_mut() {
-                f(operand);
-            }
-        }
-        ExpressionKind::StructGet { ptr, .. } => f(ptr),
-        ExpressionKind::StructSet { ptr, value, .. } => {
-            f(ptr);
-            f(value);
-        }
-        ExpressionKind::ArrayNew { size, init, .. } => {
-            f(size);
-            if let Some(i) = init {
-                f(i);
-            }
-        }
-        ExpressionKind::ArrayGet { ptr, index, .. } => {
-            f(ptr);
-            f(index);
-        }
-        ExpressionKind::ArraySet {
-            ptr, index, value, ..
-        } => {
-            f(ptr);
-            f(index);
-            f(value);
-        }
-        ExpressionKind::ArrayLen { ptr } => f(ptr),
-        ExpressionKind::Try {
-            body, catch_bodies, ..
-        } => {
-            f(body);
-            for cb in catch_bodies.iter_mut() {
-                f(cb);
-            }
-        }
-        ExpressionKind::Throw { operands, .. } => {
-            for op in operands.iter_mut() {
-                f(op);
-            }
-        }
-        ExpressionKind::I31New { value } => {
-            f(value);
-        }
-        ExpressionKind::I31Get { i31, .. } => {
-            f(i31);
-        }
-        ExpressionKind::Nop
-        | ExpressionKind::Unreachable
-        | ExpressionKind::Const(_)
-        | ExpressionKind::LocalGet { .. }
-        | ExpressionKind::GlobalGet { .. }
-        | ExpressionKind::MemorySize { .. }
-        | ExpressionKind::TableSize { .. }
-        | ExpressionKind::AtomicFence
-        | ExpressionKind::RefNull { .. }
-        | ExpressionKind::RefFunc { .. }
-        | ExpressionKind::DataDrop { .. }
-        | ExpressionKind::ElemDrop { .. }
-        | ExpressionKind::Rethrow { .. }
-        | ExpressionKind::Pop { .. }
-        | ExpressionKind::RefTest { .. }
-        | ExpressionKind::RefCast { .. }
-        | ExpressionKind::BrOn { .. } => {}
-    }
-}
-
-/// Visit children of an expression (immutable)
-fn visit_children_ref<F>(expr: &Expression, mut f: F)
-where
-    F: FnMut(&Expression),
-{
-    match &expr.kind {
-        ExpressionKind::Block { list, .. } => {
-            for child in list.iter() {
-                f(child);
-            }
-        }
-        ExpressionKind::If {
-            condition,
-            if_true,
-            if_false,
-        } => {
-            f(condition);
-            f(if_true);
-            if let Some(else_expr) = if_false {
-                f(else_expr);
-            }
-        }
-        ExpressionKind::Loop { body, .. } => {
-            f(body);
-        }
-        ExpressionKind::Binary { left, right, .. } => {
-            f(left);
-            f(right);
-        }
-        ExpressionKind::Unary { value, .. } => {
-            f(value);
-        }
-        ExpressionKind::LocalSet { value, .. } | ExpressionKind::LocalTee { value, .. } => {
-            f(value);
-        }
-        ExpressionKind::GlobalSet { value, .. } => {
-            f(value);
-        }
-        ExpressionKind::Drop { value } => {
-            f(value);
-        }
-        ExpressionKind::Break {
-            condition, value, ..
-        } => {
-            if let Some(cond) = condition {
-                f(cond);
-            }
-            if let Some(val) = value {
-                f(val);
-            }
-        }
-        ExpressionKind::Return { value: Some(v) } => {
-            f(v);
-        }
-        ExpressionKind::Return { value: None } => {}
-        ExpressionKind::Load { ptr, .. } => {
-            f(ptr);
-        }
-        ExpressionKind::Store { ptr, value, .. } => {
-            f(ptr);
-            f(value);
-        }
-        ExpressionKind::Call { operands, .. } | ExpressionKind::CallIndirect { operands, .. } => {
-            for operand in operands.iter() {
-                f(operand);
-            }
-            if let ExpressionKind::CallIndirect { target, .. } = &expr.kind {
-                f(target);
-            }
-        }
-        ExpressionKind::Switch {
-            condition, value, ..
-        } => {
-            f(condition);
-            if let Some(v) = value {
-                f(v);
-            }
-        }
-        ExpressionKind::Select {
-            condition,
-            if_true,
-            if_false,
-        } => {
-            f(condition);
-            f(if_true);
-            f(if_false);
-        }
-        ExpressionKind::MemoryGrow { delta, .. } => {
-            f(delta);
-        }
-        ExpressionKind::AtomicRMW { ptr, value, .. } => {
-            f(ptr);
-            f(value);
-        }
-        ExpressionKind::AtomicCmpxchg {
-            ptr,
-            expected,
-            replacement,
-            ..
-        } => {
-            f(ptr);
-            f(expected);
-            f(replacement);
-        }
-        ExpressionKind::AtomicWait {
-            ptr,
-            expected,
-            timeout,
-            ..
-        } => {
-            f(ptr);
-            f(expected);
-            f(timeout);
-        }
-        ExpressionKind::AtomicNotify { ptr, count, .. } => {
-            f(ptr);
-            f(count);
-        }
-        ExpressionKind::RefIsNull { value } => {
-            f(value);
-        }
-        ExpressionKind::RefAs { value, .. } => {
-            f(value);
-        }
-        ExpressionKind::RefEq { left, right } => {
-            f(left);
-            f(right);
-        }
-        ExpressionKind::TupleMake { operands } => {
-            for operand in operands.iter() {
-                f(operand);
-            }
-        }
-        ExpressionKind::TupleExtract { tuple, .. } => {
-            f(tuple);
-        }
-        ExpressionKind::SIMDExtract { vec, .. } => f(vec),
-        ExpressionKind::SIMDReplace { vec, value, .. } => {
-            f(vec);
-            f(value);
-        }
-        ExpressionKind::SIMDShuffle { left, right, .. } => {
-            f(left);
-            f(right);
-        }
-        ExpressionKind::SIMDTernary { a, b, c, .. } => {
-            f(a);
-            f(b);
-            f(c);
-        }
-        ExpressionKind::SIMDShift { vec, shift, .. } => {
-            f(vec);
-            f(shift);
-        }
-        ExpressionKind::SIMDLoad { ptr, .. } => f(ptr),
-        ExpressionKind::SIMDLoadStoreLane { ptr, vec, .. } => {
-            f(ptr);
-            f(vec);
-        }
-        ExpressionKind::MemoryInit {
-            dest, offset, size, ..
-        } => {
-            f(dest);
-            f(offset);
-            f(size);
-        }
-        ExpressionKind::MemoryCopy {
-            dest, src, size, ..
-        } => {
-            f(dest);
-            f(src);
-            f(size);
-        }
-        ExpressionKind::MemoryFill {
-            dest, value, size, ..
-        } => {
-            f(dest);
-            f(value);
-            f(size);
-        }
-        ExpressionKind::TableGet { index, .. } => f(index),
-        ExpressionKind::TableSet { index, value, .. } => {
-            f(index);
-            f(value);
-        }
-        ExpressionKind::TableGrow { delta, value, .. } => {
-            f(delta);
-            f(value);
-        }
-        ExpressionKind::TableFill {
-            dest, value, size, ..
-        } => {
-            f(dest);
-            f(value);
-            f(size);
-        }
-        ExpressionKind::TableCopy {
-            dest, src, size, ..
-        } => {
-            f(dest);
-            f(src);
-            f(size);
-        }
-        ExpressionKind::TableInit {
-            dest, offset, size, ..
-        } => {
-            f(dest);
-            f(offset);
-            f(size);
-        }
-        ExpressionKind::StructNew { operands, .. } => {
-            for operand in operands.iter() {
-                f(operand);
-            }
-        }
-        ExpressionKind::StructGet { ptr, .. } => f(ptr),
-        ExpressionKind::StructSet { ptr, value, .. } => {
-            f(ptr);
-            f(value);
-        }
-        ExpressionKind::ArrayNew { size, init, .. } => {
-            f(size);
-            if let Some(i) = init {
-                f(i);
-            }
-        }
-        ExpressionKind::ArrayGet { ptr, index, .. } => {
-            f(ptr);
-            f(index);
-        }
-        ExpressionKind::ArraySet {
-            ptr, index, value, ..
-        } => {
-            f(ptr);
-            f(index);
-            f(value);
-        }
-        ExpressionKind::ArrayLen { ptr } => f(ptr),
-        ExpressionKind::Try {
-            body, catch_bodies, ..
-        } => {
-            f(body);
-            for cb in catch_bodies.iter() {
-                f(cb);
-            }
-        }
-        ExpressionKind::Throw { operands, .. } => {
-            for op in operands.iter() {
-                f(op);
-            }
-        }
-        ExpressionKind::I31New { value } => {
-            f(value);
-        }
-        ExpressionKind::I31Get { i31, .. } => {
-            f(i31);
-        }
-        ExpressionKind::Nop
-        | ExpressionKind::Unreachable
-        | ExpressionKind::Const(_)
-        | ExpressionKind::LocalGet { .. }
-        | ExpressionKind::GlobalGet { .. }
-        | ExpressionKind::MemorySize { .. }
-        | ExpressionKind::TableSize { .. }
-        | ExpressionKind::AtomicFence
-        | ExpressionKind::RefNull { .. }
-        | ExpressionKind::RefFunc { .. }
-        | ExpressionKind::DataDrop { .. }
-        | ExpressionKind::ElemDrop { .. }
-        | ExpressionKind::Pop { .. }
-        | ExpressionKind::Rethrow { .. }
-        | ExpressionKind::RefTest { .. }
-        | ExpressionKind::RefCast { .. }
-        | ExpressionKind::BrOn { .. } => {}
     }
 }
 
@@ -1507,25 +795,13 @@ where
 mod tests {
     use super::*;
     use crate::ir::expression::IrBuilder;
-    use crate::ir::{Literal, LocalId, Type};
-    use bumpalo::collections::Vec as BumpVec;
-    use bumpalo::Bump;
+    use crate::ir::module::{Function, Module};
+    use crate::ir::Literal;
+    use crate::ir::LocalId;
+    use crate::ir::Type;
 
     #[test]
-    fn test_simplify_locals_basic() {
-        // Test that SimplifyLocals can be created and run
-        let mut pass = SimplifyLocals::new();
-        assert_eq!(pass.name(), "SimplifyLocals");
-
-        // Create empty module
-        let bump = Bump::new();
-        let mut module = Module::new(&bump);
-        pass.run(&mut module);
-    }
-
-    #[test]
-    fn test_simplify_locals_with_options() {
-        // Test different option combinations
+    fn test_simplify_locals_options() {
         let pass1 = SimplifyLocals::with_options(true, true, true);
         assert!(pass1.allow_tee && pass1.allow_structure && pass1.allow_nesting);
 
@@ -1534,204 +810,187 @@ mod tests {
     }
 
     #[test]
-    fn test_function_context() {
-        // Test FunctionContext creation
-        let ctx = FunctionContext::new(true, true, true);
-        assert!(ctx.allow_tee);
-        assert!(ctx._allow_structure);
-        assert!(ctx._allow_nesting);
-        assert!(ctx.first_cycle);
-    }
-
-    #[test]
     fn test_sink_to_tee() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
-        // (block
-        //   (local.set 0 (const 42))
-        //   (drop (local.get 0))
-        //   (drop (local.get 0))
-        // )
-        let mut list = BumpVec::new_in(&bump);
-        list.push(builder.local_set(0, builder.const_(Literal::I32(42))));
-        list.push(builder.drop(builder.local_get(0, Type::I32)));
-        list.push(builder.drop(builder.local_get(0, Type::I32)));
+        let mut list = Vec::new();
+        let c42 = builder.const_(Literal::I32(42));
+        list.push(builder.local_set(LocalId::from(0), c42));
+        let lget1 = builder.local_get(LocalId::from(0), Type::I32);
+        list.push(builder.drop(lget1));
+        let lget2 = builder.local_get(LocalId::from(0), Type::I32);
+        list.push(builder.drop(lget2));
 
-        let block = builder.block(None, list, Type::NONE);
-
-        let test_id = module.add_function(crate::ir::module::Function::new(
+        let block = builder.block("", list, Type::NONE);
+        let test_id = module.add_function(Function::new(
             "test".to_string(),
             Type::NONE,
             Type::NONE,
             vec![Type::I32],
-            Some(block),
+            block,
         ));
 
         let mut pass = SimplifyLocals::new();
         pass.run(&mut module);
 
-        let body = module.functions[test_id]
-            .body()
-            .expect("Function should have a body");
-        if let ExpressionKind::Block { list, .. } = &body.kind {
+        let body_id = module.functions.get(test_id).unwrap().body().unwrap();
+        if let ExpressionKind::Block { list, .. } = &module.expressions[body_id].kind {
             assert_eq!(list.len(), 3);
-            // After all cycles:
-            // 1. (nop) - the original set was sunk
-            assert!(matches!(list[0].kind, ExpressionKind::Nop));
-            // 2. (nop) - the sunk set (from tee) was sunk again
-            assert!(matches!(list[1].kind, ExpressionKind::Nop));
-            // 3. (drop (const 42)) - final destination
-            if let ExpressionKind::Drop { value } = &list[2].kind {
+            assert!(matches!(
+                module.expressions[list[0]].kind,
+                ExpressionKind::Nop
+            ));
+            assert!(matches!(
+                module.expressions[list[1]].kind,
+                ExpressionKind::Nop
+            ));
+            if let ExpressionKind::Drop { value } = &module.expressions[list[2]].kind {
                 assert!(matches!(
-                    value.kind,
+                    module.expressions[*value].kind,
                     ExpressionKind::Const(Literal::I32(42))
                 ));
             } else {
-                panic!("Expected Drop(Const), got {:?}", list[2].kind);
+                panic!();
             }
         } else {
-            panic!("Expected Block, got {:?}", body.kind);
+            panic!();
         }
     }
 
     #[test]
     fn test_structure_opt() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
-        // (if (local.get 1) (local.set 0 (const 1)) (local.set 0 (const 2)))
-        // -> (local.set 0 (if (local.get 1) (const 1) (const 2)))
+        let condition = builder.local_get(LocalId::from(1), Type::I32);
+        let mut true_list = Vec::new();
+        let c1 = builder.const_(Literal::I32(1));
+        true_list.push(builder.local_set(LocalId::from(0), c1));
+        let if_true = builder.block("", true_list, Type::NONE);
 
-        let condition = builder.local_get(1, Type::I32);
-        let mut true_list = BumpVec::new_in(&bump);
-        true_list.push(builder.local_set(0, builder.const_(Literal::I32(1))));
-        let if_true = builder.block(None, true_list, Type::NONE);
+        let mut false_list = Vec::new();
+        let c2 = builder.const_(Literal::I32(2));
+        false_list.push(builder.local_set(LocalId::from(0), c2));
+        let if_false = Some(builder.block("", false_list, Type::NONE));
 
-        let mut false_list = BumpVec::new_in(&bump);
-        false_list.push(builder.local_set(0, builder.const_(Literal::I32(2))));
-        let if_false = Some(builder.block(None, false_list, Type::NONE));
-
-        let if_expr = builder.if_(condition, if_true, if_false, Type::NONE);
-
-        let test_id = module.add_function(crate::ir::module::Function::new(
+        let if_expr = builder.if_(None::<&str>, condition, if_true, if_false, Type::NONE);
+        let test_id = module.add_function(Function::new(
             "test".to_string(),
             Type::NONE,
             Type::NONE,
             vec![Type::I32, Type::I32],
-            Some(if_expr),
+            if_expr,
         ));
 
         let mut pass = SimplifyLocals::new();
         pass.run(&mut module);
 
-        let body = module.functions[test_id]
-            .body()
-            .expect("Function should have a body");
-        if let ExpressionKind::LocalSet { id, value } = &body.kind {
+        let body_id = module.functions.get(test_id).unwrap().body().unwrap();
+        if let ExpressionKind::LocalSet { id, value } = &module.expressions[body_id].kind {
             assert_eq!(id.index() as usize, 0);
-            assert!(matches!(value.kind, ExpressionKind::If { .. }));
+            assert!(matches!(
+                module.expressions[*value].kind,
+                ExpressionKind::If { .. }
+            ));
         } else {
-            panic!("Expected LocalSet, got {:?}", body.kind);
+            panic!();
         }
     }
 
     #[test]
     fn test_block_return_opt() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
-        let mut list = BumpVec::new_in(&bump);
-        list.push(builder.local_set(LocalId::from(0), builder.const_(Literal::I32(1))));
-        let block = builder.block(Some("label"), list, Type::NONE);
-
-        let test_id = module.add_function(crate::ir::module::Function::new(
+        let mut list = Vec::new();
+        let c1 = builder.const_(Literal::I32(1));
+        list.push(builder.local_set(LocalId::from(0), c1));
+        let block = builder.block(Some("label".to_string()), list, Type::NONE);
+        let test_id = module.add_function(Function::new(
             "test".to_string(),
             Type::NONE,
             Type::NONE,
             vec![Type::I32],
-            Some(block),
+            block,
         ));
 
         let mut pass = SimplifyLocals::new();
         pass.run(&mut module);
 
-        let body = module.functions[test_id].body().unwrap();
-        if let ExpressionKind::LocalSet { id, value: _ } = &body.kind {
+        let body_id = module.functions.get(test_id).unwrap().body().unwrap();
+        if let ExpressionKind::LocalSet { id, .. } = &module.expressions[body_id].kind {
             assert_eq!(id.index() as usize, 0);
         } else {
-            panic!("Expected LocalSet, got {:?}", body.kind);
+            panic!();
         }
     }
 
     #[test]
     fn test_if_return_opt() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
         let condition = builder.local_get(LocalId::from(1), Type::I32);
-        let mut true_list = BumpVec::new_in(&bump);
-        true_list.push(builder.local_set(LocalId::from(0), builder.const_(Literal::I32(1))));
-        let if_true = builder.block(None, true_list, Type::NONE);
-
-        let if_expr = builder.if_(condition, if_true, None, Type::NONE);
-
-        let test_id = module.add_function(crate::ir::module::Function::new(
+        let mut true_list = Vec::new();
+        let c1 = builder.const_(Literal::I32(1));
+        true_list.push(builder.local_set(LocalId::from(0), c1));
+        let if_true = builder.block("", true_list, Type::NONE);
+        let if_expr = builder.if_(None::<&str>, condition, if_true, None, Type::NONE);
+        let test_id = module.add_function(Function::new(
             "test".to_string(),
             Type::NONE,
             Type::NONE,
             vec![Type::I32, Type::I32],
-            Some(if_expr),
+            if_expr,
         ));
 
         let mut pass = SimplifyLocals::new();
         pass.run(&mut module);
 
-        let body = module.functions[test_id].body().unwrap();
-        if let ExpressionKind::LocalSet { id, value } = &body.kind {
+        let body_id = module.functions.get(test_id).unwrap().body().unwrap();
+        if let ExpressionKind::LocalSet { id, value } = &module.expressions[body_id].kind {
             assert_eq!(id.index() as usize, 0);
-            if let ExpressionKind::If { if_false, .. } = &value.kind {
+            if let ExpressionKind::If { if_false, .. } = &module.expressions[*value].kind {
                 assert!(if_false.is_some());
             } else {
-                panic!("Expected If in LocalSet");
+                panic!();
             }
         } else {
-            panic!("Expected LocalSet, got {:?}", body.kind);
+            panic!();
         }
     }
 
     #[test]
     fn test_loop_return_opt() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
-        let mut list = BumpVec::new_in(&bump);
-        list.push(builder.local_set(LocalId::from(0), builder.const_(Literal::I32(1))));
-        let block = builder.block(None, list, Type::NONE);
-        let loop_expr = builder.loop_(Some("label"), block, Type::NONE);
-
-        let test_id = module.add_function(crate::ir::module::Function::new(
+        let mut list = Vec::new();
+        let c1 = builder.const_(Literal::I32(1));
+        list.push(builder.local_set(LocalId::from(0), c1));
+        let block = builder.block("", list, Type::NONE);
+        let loop_expr = builder.loop_(Some("label".to_string()), block, Type::NONE);
+        let test_id = module.add_function(Function::new(
             "test".to_string(),
             Type::NONE,
             Type::NONE,
             vec![Type::I32],
-            Some(loop_expr),
+            loop_expr,
         ));
 
         let mut pass = SimplifyLocals::new();
         pass.run(&mut module);
 
-        let body = module.functions[test_id].body().unwrap();
-        if let ExpressionKind::LocalSet { id, value } = &body.kind {
+        let body_id = module.functions.get(test_id).unwrap().body().unwrap();
+        if let ExpressionKind::LocalSet { id, value } = &module.expressions[body_id].kind {
             assert_eq!(id.index() as usize, 0);
-            assert!(matches!(value.kind, ExpressionKind::Loop { .. }));
+            assert!(matches!(
+                module.expressions[*value].kind,
+                ExpressionKind::Loop { .. }
+            ));
         } else {
-            panic!("Expected LocalSet, got {:?}", body.kind);
+            panic!();
         }
     }
 }

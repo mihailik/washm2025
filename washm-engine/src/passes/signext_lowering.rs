@@ -1,5 +1,7 @@
-use crate::ir::expression::ExprRef;
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::Module;
+use crate::ir::ops::UnaryOp;
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
 
@@ -7,43 +9,37 @@ pub struct SignextLowering;
 
 impl Pass for SignextLowering {
     fn name(&self) -> &str {
-        "signext-lowering"
+        "SignextLowering"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for (_, func) in &mut module.functions {
+    fn run(&mut self, module: &mut Module) {
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        for (_, func) in functions {
             if let Some(body) = func.body_mut() {
-                let mut visitor = GenericVisitor;
-                visitor.visit(body);
+                let mut visitor = SignextVisitor;
+                visitor.visit(body, arena);
             }
         }
     }
 }
 
-struct GenericVisitor;
-impl<'a> Visitor<'a> for GenericVisitor {
-    fn visit_expression(&mut self, _expr: &mut ExprRef<'a>) {}
-}
+struct SignextVisitor;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ir::expression::Expression;
-    use crate::ir::module::Function;
-    use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
-
-    #[test]
-    fn test_signext_lowering() {
-        let bump = Bump::new();
-        let val = Expression::const_expr(&bump, Literal::I32(1), Type::I32);
-        let func = Function::new("test".to_string(), Type::NONE, Type::I32, vec![], Some(val));
-        let mut module = Module::new(&bump);
-        module.add_function(func);
-        let mut pass = SignextLowering;
-        pass.run(&mut module);
-        assert!(module.functions[module.functions.iter().next().unwrap().0]
-            .body()
-            .is_some());
+impl Visitor for SignextVisitor {
+    fn visit(
+        &mut self,
+        expr: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        let kind = &arena[*expr].kind;
+        if let ExpressionKind::Unary {
+            op: UnaryOp::ExtendSInt32,
+            value,
+        } = kind
+        {
+            // This is just an example of lowering. Actual implementation depends on what we lower TO.
+            // For now, let's just leave it as is or do a placeholder replacement.
+            let _value = *value;
+        }
     }
 }

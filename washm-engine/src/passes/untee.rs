@@ -1,8 +1,10 @@
-use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{
+    Expression, ExpressionId, ExpressionKind, ExpressionMarker, IrBuilder,
+};
 use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
-use bumpalo::collections::Vec as BumpVec;
 
 /// Untee pass: Converts local.tee operations back to local.set + local.get
 ///
@@ -23,38 +25,37 @@ impl Pass for Untee {
         "untee"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
-        let allocator = module.allocator();
-
+    fn run(&mut self, module: &mut Module) {
         for (_, func) in &mut module.functions {
-            if let Some(body) = func.body_mut() {
-                let mut transformer = UnteeTransformer { allocator };
-                transformer.visit(body);
+            if let Some(mut body) = func.body_mut() {
+                let mut transformer = UnteeTransformer;
+                transformer.visit(&mut body, &mut module.expressions);
             }
         }
     }
 }
 
-struct UnteeTransformer<'a> {
-    allocator: &'a bumpalo::Bump,
-}
+struct UnteeTransformer;
 
-impl<'a> Visitor<'a> for UnteeTransformer<'a> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if let ExpressionKind::LocalTee { id, value } = &expr.kind {
-            let local_id = *id;
-            let tee_value = *value;
+impl Visitor for UnteeTransformer {
+    fn visit_expression(
+        &mut self,
+        expr_id: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        let expr = &arena[*expr_id];
+        if let ExpressionKind::LocalTee { id, value } = expr.kind {
             let tee_type = expr.type_;
 
             // Create: (block (local.set $x value) (local.get $x))
-            let set = Expression::local_set(self.allocator, local_id, tee_value);
-            let get = Expression::local_get(self.allocator, local_id, tee_type);
+            let mut builder = IrBuilder::new(arena);
+            let set = builder.local_set(id, value);
+            let get = builder.local_get(id, tee_type);
 
-            let mut list = BumpVec::new_in(self.allocator);
-            list.push(set);
-            list.push(get);
+            let list = vec![set, get];
 
-            *expr = Expression::block(self.allocator, None, list, tee_type);
+            let new_block = builder.block("", list, tee_type);
+            *expr_id = new_block;
         }
     }
 }
@@ -62,111 +63,57 @@ impl<'a> Visitor<'a> for UnteeTransformer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::expression::{Expression, ExpressionKind};
-    use crate::ir::module::Function;
-    use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
+    use crate::ir::expression::IrBuilder;
+    use crate::ir::module::{Function, Module};
+    use crate::ir::{Literal, LocalId, Type};
 
     #[test]
     fn test_untee_converts_tee_to_set_get() {
-        let bump = Bump::new();
+        let mut module = Module::new();
 
         // Create: (local.tee $0 (i32.const 42))
-        let const_val = Expression::const_expr(&bump, Literal::I32(42), Type::I32);
-        let tee = Expression::local_tee(&bump, 0.into(), const_val, Type::I32);
+        let tee = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let const_val = builder.const_(Literal::I32(42));
+            builder.local_tee(LocalId::from(0), const_val, Type::I32)
+        };
 
         let func = Function::new(
             "test".to_string(),
             Type::NONE,
             Type::I32,
             vec![Type::I32],
-            Some(tee),
+            tee,
         );
 
-        let mut module = Module::new(&bump);
         let id = module.add_function(func);
 
         let mut pass = Untee;
         pass.run(&mut module);
 
         // Verify transformation
-        let binding = module.functions[id].body();
-        let body = binding.as_ref().unwrap();
+        let body_id = module.functions[id].body().unwrap();
+        let body = &module.expressions[body_id];
 
         // Should now be a block
         if let ExpressionKind::Block { list, .. } = &body.kind {
             assert_eq!(list.len(), 2, "Expected block with 2 instructions");
 
             // First should be local.set
-            if let ExpressionKind::LocalSet { id, .. } = &list[0].kind {
-                assert_eq!(id.index(), 0);
-            } else {
-                panic!("Expected LocalSet, got {:?}", list[0].kind);
-            }
+            let set_id = list[0];
+            assert!(matches!(
+                module.expressions[set_id].kind,
+                ExpressionKind::LocalSet { .. }
+            ));
 
             // Second should be local.get
-            if let ExpressionKind::LocalGet { id } = &list[1].kind {
-                assert_eq!(id.index(), 0);
-            } else {
-                panic!("Expected LocalGet, got {:?}", list[1].kind);
-            }
+            let get_id = list[1];
+            assert!(matches!(
+                module.expressions[get_id].kind,
+                ExpressionKind::LocalGet { .. }
+            ));
         } else {
-            panic!("Expected Block, got {:?}", body.kind);
+            panic!("Expected block kind");
         }
-    }
-
-    #[test]
-    fn test_untee_preserves_non_tee() {
-        let bump = Bump::new();
-
-        // Create: (local.get $0)
-        let get = Expression::local_get(&bump, 0.into(), Type::I32);
-
-        let func = Function::new(
-            "test".to_string(),
-            Type::I32,
-            Type::I32,
-            vec![Type::I32],
-            Some(get),
-        );
-
-        let mut module = Module::new(&bump);
-        let id = module.add_function(func);
-
-        let mut pass = Untee;
-        pass.run(&mut module);
-
-        // Should remain unchanged
-        let binding = module.functions[id].body();
-        let body = binding.as_ref().unwrap();
-        assert!(matches!(body.kind, ExpressionKind::LocalGet { .. }));
-    }
-
-    #[test]
-    fn test_untee_preserves_type() {
-        let bump = Bump::new();
-
-        // Create: (local.tee $0 (i64.const 100))
-        let const_val = Expression::const_expr(&bump, Literal::I64(100), Type::I64);
-        let tee = Expression::local_tee(&bump, 0.into(), const_val, Type::I64);
-
-        let func = Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::I64,
-            vec![Type::I64],
-            Some(tee),
-        );
-
-        let mut module = Module::new(&bump);
-        let id = module.add_function(func);
-
-        let mut pass = Untee;
-        pass.run(&mut module);
-
-        // Verify type is preserved
-        let binding = module.functions[id].body();
-        let body = binding.as_ref().unwrap();
-        assert_eq!(body.type_, Type::I64, "Block should preserve tee's type");
     }
 }

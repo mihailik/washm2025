@@ -1,6 +1,8 @@
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::{ExportKind, Module};
 use crate::ir::visitor::ReadOnlyVisitor;
+use crate::ir::FuncId;
 use crate::passes::Pass;
 use std::collections::HashSet;
 
@@ -12,15 +14,19 @@ impl Pass for PrintCallGraph {
         "PrintCallGraph"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         println!("Call Graph:");
         for (_, func) in &module.functions {
             let mut collector = CallCollector::default();
             if let Some(body) = func.body() {
-                collector.visit(body);
+                collector.visit(body, &module.expressions);
             }
 
-            let mut targets: Vec<_> = collector.targets.into_iter().collect();
+            let mut targets: Vec<_> = collector
+                .targets
+                .into_iter()
+                .map(|id| module.functions[id].name.clone())
+                .collect();
             targets.sort();
 
             print!("  {} ->", func.name);
@@ -38,13 +44,17 @@ impl Pass for PrintCallGraph {
 
 #[derive(Default)]
 struct CallCollector {
-    targets: HashSet<String>,
+    targets: HashSet<FuncId>,
 }
 
-impl<'a> ReadOnlyVisitor<'a> for CallCollector {
-    fn visit_expression(&mut self, expr: ExprRef<'a>) {
-        if let ExpressionKind::Call { target, .. } = &expr.kind {
-            self.targets.insert(target.to_string());
+impl ReadOnlyVisitor for CallCollector {
+    fn visit_expression(
+        &mut self,
+        expr_id: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
+        if let ExpressionKind::Call { target, .. } = &arena[expr_id].kind {
+            self.targets.insert(*target);
         }
     }
 }
@@ -57,7 +67,7 @@ impl Pass for PrintFunctionMap {
         "PrintFunctionMap"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         println!("Function Map:");
         for (id, func) in &module.functions {
             let mut exports = Vec::new();
@@ -93,7 +103,7 @@ impl Pass for PrintMinified {
         "PrintMinified"
     }
 
-    fn run<'a>(&mut self, _module: &mut Module<'a>) {
+    fn run(&mut self, _module: &mut Module) {
         // This would use a dedicated printer. For now, we reuse the existing printer
         // but with a flag if it supported it.
         println!("Minified Output: [not implemented]");

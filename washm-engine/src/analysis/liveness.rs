@@ -1,29 +1,26 @@
 use crate::analysis::cfg::{BlockId, ControlFlowGraph};
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::{Function, LocalId};
 use crate::ir::visitor::ReadOnlyVisitor;
 use std::collections::{HashMap, HashSet};
 
-pub struct Liveness<'a> {
-    pub cfg: ControlFlowGraph<'a>,
+pub struct Liveness {
+    pub cfg: ControlFlowGraph,
     // BasicBlock ID -> Set of Live Locals at Entry
     pub live_in: HashMap<BlockId, HashSet<LocalId>>,
     // BasicBlock ID -> Set of Live Locals at Exit
     pub live_out: HashMap<BlockId, HashSet<LocalId>>,
 }
 
-impl<'a> Liveness<'a> {
-    pub fn new(func: &Function<'a>) -> Self {
+impl Liveness {
+    pub fn new(func: &Function, arena: &IdArena<ExpressionMarker, Expression>) -> Self {
         if func.body().is_none() {
-            // We need a dummy CFG or optional
-            // For simplicity, panic or handle. Empty func has no body.
-            // But we can't create CFG without entry expr.
-            // let's return empty if no body
             panic!("Liveness requires function body");
         }
 
         let body = func.body().unwrap();
-        let cfg = ControlFlowGraph::build(func, body);
+        let cfg = ControlFlowGraph::build(func, body, arena);
 
         // 2. Compute Gen definitions
         let mut gen: HashMap<BlockId, HashSet<LocalId>> = HashMap::new();
@@ -34,14 +31,12 @@ impl<'a> Liveness<'a> {
             let mut k = HashSet::new();
 
             // Scan block contents (expressions)
-            // Note: CFG contents are typically just top-level expressions in the block.
-            // We need to deep visit them.
-            for &expr in &block.contents {
+            for &expr_id in &block.contents {
                 let mut scanner = LivenessScanner {
                     gen: &mut g,
                     kill: &mut k,
                 };
-                scanner.visit(expr);
+                scanner.visit(expr_id, arena);
             }
 
             gen.insert(id, g);
@@ -106,26 +101,28 @@ struct LivenessScanner<'a> {
     kill: &'a mut HashSet<LocalId>,
 }
 
-impl<'a> ReadOnlyVisitor<'a> for LivenessScanner<'a> {
-    fn visit_expression(&mut self, expr: ExprRef<'a>) {
-        match &expr.kind {
+impl<'a> ReadOnlyVisitor for LivenessScanner<'a> {
+    fn visit_expression(
+        &mut self,
+        expr_id: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
+        match &arena[expr_id].kind {
             ExpressionKind::LocalGet { id } => {
                 if !self.kill.contains(id) {
                     self.gen.insert(*id);
                 }
             }
             ExpressionKind::LocalSet { id, value } => {
-                self.visit(*value); // Visit value first (it is read)
+                self.visit(*value, arena); // Visit value first (it is read)
                 self.kill.insert(*id);
             }
             ExpressionKind::LocalTee { id, value } => {
-                self.visit(*value);
+                self.visit(*value, arena);
                 self.kill.insert(*id);
-                // Generally Tee is "Set local, then result is value".
-                // So it kills.
             }
             _ => {
-                self.visit_children(expr);
+                self.visit_children(expr_id, arena);
             }
         }
     }

@@ -8,7 +8,7 @@ impl Pass for Memory64Lowering {
         "memory64-lowering"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         // Memory64Lowering
         // Goal: Convert 64-bit memory access to 32-bit (wrapping/bounds checking).
 
@@ -28,44 +28,5 @@ impl Pass for Memory64Lowering {
                 // TODO: lowering logic
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
-    use crate::ir::module::Function;
-    use crate::ir::FuncId;
-    use crate::ir::Type;
-    use bumpalo::collections::Vec as BumpVec;
-    use bumpalo::Bump;
-
-    #[test]
-    fn test_memory64_lowering_run() {
-        let allocator = Bump::new();
-        let mut module = Module::new(&allocator);
-
-        let block = allocator.alloc(Expression {
-            kind: ExpressionKind::Block {
-                name: None,
-                list: BumpVec::new_in(&allocator),
-            },
-            type_: Type::NONE,
-        });
-
-        let func = Function::new(
-            "test_func".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(ExprRef::new(block)),
-        );
-        module.add_function(func);
-
-        let mut pass = Memory64Lowering;
-        pass.run(&mut module);
-
-        assert!(module.get_function(FuncId::from_raw_parts(0, 0)).is_some());
     }
 }

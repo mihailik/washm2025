@@ -234,38 +234,28 @@ impl PostDominanceTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collections::id_arena::IdArena;
     use crate::ir::expression::IrBuilder;
     use crate::ir::module::Function;
     use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
 
     #[test]
     fn test_dominance_diamond() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
 
-        // Diamond shape CFG (like if-then-else)
-        // 0 -> 1, 2
-        // 1 -> 3
-        // 2 -> 3
+        let (block, func) = {
+            let mut builder = IrBuilder::new(&mut arena);
+            let const1 = builder.const_(Literal::I32(1));
+            let nop1 = builder.nop();
+            let nop2 = builder.nop();
+            let if_ = builder.if_(None::<String>, const1, nop1, Some(nop2), Type::NONE);
+            let list = vec![if_];
+            let block = builder.block(None::<String>, list, Type::NONE);
+            let func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], block);
+            (block, func)
+        };
 
-        let const1 = builder.const_(Literal::I32(1));
-        let nop1 = builder.nop();
-        let nop2 = builder.nop();
-        let if_ = builder.if_(const1, nop1, Some(nop2), Type::NONE);
-
-        let mut list = bumpalo::collections::Vec::new_in(&bump);
-        list.push(if_);
-        let block = builder.block(None, list, Type::NONE);
-        let func = Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(block),
-        );
-
-        let cfg = ControlFlowGraph::build(&func, block);
+        let cfg = ControlFlowGraph::build(&func, block, &arena);
         let dom = DominanceTree::build(&cfg);
 
         // Blocks:
@@ -307,34 +297,22 @@ mod tests {
 
     #[test]
     fn test_dominance_nested() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
 
-        // Nested IFs
-        // (if (c1)
-        //   (if (c2)
-        //     (nop)
-        //     (nop)
-        //   )
-        //   (nop)
-        // )
+        let (outer_if, func) = {
+            let mut builder = IrBuilder::new(&mut arena);
+            let c1 = builder.const_(Literal::I32(1));
+            let c2 = builder.const_(Literal::I32(2));
+            let nop = builder.nop();
 
-        let c1 = builder.const_(Literal::I32(1));
-        let c2 = builder.const_(Literal::I32(2));
-        let nop = builder.nop();
+            let inner_if = builder.if_(None::<String>, c2, nop, Some(nop), Type::NONE);
+            let outer_if = builder.if_(None::<String>, c1, inner_if, Some(nop), Type::NONE);
 
-        let inner_if = builder.if_(c2, nop, Some(nop), Type::NONE);
-        let outer_if = builder.if_(c1, inner_if, Some(nop), Type::NONE);
+            let func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], outer_if);
+            (outer_if, func)
+        };
 
-        let func = Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(outer_if),
-        );
-
-        let cfg = ControlFlowGraph::build(&func, outer_if);
+        let cfg = ControlFlowGraph::build(&func, outer_if, &arena);
         let dom = DominanceTree::build(&cfg);
 
         // Expected block IDs based on traversal order:

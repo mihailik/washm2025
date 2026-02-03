@@ -1,7 +1,8 @@
 use crate::analysis::effects::EffectAnalyzer;
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::{Function, LocalId};
-use crate::ir::visitor::Visitor;
+use crate::ir::visitor::ReadOnlyVisitor;
 use std::collections::HashMap;
 
 /// Represents def-use chains for locals within a function
@@ -9,20 +10,20 @@ use std::collections::HashMap;
 /// Tracks where locals are defined (set/tee/param) and used (get),
 /// enabling safe sinking and other local optimizations.
 #[derive(Debug)]
-pub struct LocalGraph<'a> {
+pub struct LocalGraph {
     /// Maps local ID to all definitions (local.set, local.tee, param)
-    definitions: HashMap<LocalId, Vec<ExprRef<'a>>>,
+    definitions: HashMap<LocalId, Vec<ExpressionId>>,
 
     /// Maps local ID to all uses (local.get)
-    uses: HashMap<LocalId, Vec<ExprRef<'a>>>,
+    uses: HashMap<LocalId, Vec<ExpressionId>>,
 
     /// Number of local variables in function
     num_locals: usize,
 }
 
-impl<'a> LocalGraph<'a> {
+impl LocalGraph {
     /// Build local graph for a function
-    pub fn build(func: &'a Function<'a>) -> Self {
+    pub fn build(func: &Function, arena: &IdArena<ExpressionMarker, Expression>) -> Self {
         let num_locals = if func.is_import() {
             func.num_params()
         } else {
@@ -42,31 +43,39 @@ impl<'a> LocalGraph<'a> {
 
         // Walk expression tree and record def/use
         if let Some(body) = func.body() {
-            graph.collect_def_use(body);
+            graph.collect_def_use(body, arena);
         }
 
         graph
     }
 
     /// Collect definitions and uses by walking expression tree
-    fn collect_def_use(&mut self, mut expr: ExprRef<'a>) {
-        struct DefUseCollector<'a, 'b> {
-            graph: &'b mut LocalGraph<'a>,
+    fn collect_def_use(
+        &mut self,
+        body: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
+        struct DefUseCollector<'a> {
+            graph: &'a mut LocalGraph,
         }
 
-        impl<'a, 'b> Visitor<'a> for DefUseCollector<'a, 'b> {
-            fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-                match &expr.kind {
+        impl<'a> ReadOnlyVisitor for DefUseCollector<'a> {
+            fn visit_expression(
+                &mut self,
+                expr: ExpressionId,
+                arena: &IdArena<ExpressionMarker, Expression>,
+            ) {
+                match &arena[expr].kind {
                     ExpressionKind::LocalGet { id } => {
-                        self.graph.uses.entry(*id).or_default().push(*expr);
+                        self.graph.uses.entry(*id).or_default().push(expr);
                     }
                     ExpressionKind::LocalSet { id, .. } => {
-                        self.graph.definitions.entry(*id).or_default().push(*expr);
+                        self.graph.definitions.entry(*id).or_default().push(expr);
                     }
                     ExpressionKind::LocalTee { id, .. } => {
                         // Tee both defines and uses
-                        self.graph.definitions.entry(*id).or_default().push(*expr);
-                        self.graph.uses.entry(*id).or_default().push(*expr);
+                        self.graph.definitions.entry(*id).or_default().push(expr);
+                        self.graph.uses.entry(*id).or_default().push(expr);
                     }
                     _ => {}
                 }
@@ -74,11 +83,11 @@ impl<'a> LocalGraph<'a> {
         }
 
         let mut collector = DefUseCollector { graph: self };
-        collector.visit(&mut expr);
+        collector.visit(body, arena);
     }
 
     /// Get all definitions of a local
-    pub fn definitions(&self, local: LocalId) -> &[ExprRef<'a>] {
+    pub fn definitions(&self, local: LocalId) -> &[ExpressionId] {
         self.definitions
             .get(&local)
             .map(|v| v.as_slice())
@@ -86,7 +95,7 @@ impl<'a> LocalGraph<'a> {
     }
 
     /// Get all uses of a local
-    pub fn uses(&self, local: LocalId) -> &[ExprRef<'a>] {
+    pub fn uses(&self, local: LocalId) -> &[ExpressionId] {
         self.uses.get(&local).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
@@ -121,7 +130,7 @@ impl<'a> LocalGraph<'a> {
     }
 
     /// Get single definition if exists
-    pub fn single_def(&self, local: LocalId) -> Option<ExprRef<'a>> {
+    pub fn single_def(&self, local: LocalId) -> Option<ExpressionId> {
         if self.has_single_def(local) {
             self.definitions
                 .get(&local)
@@ -132,7 +141,7 @@ impl<'a> LocalGraph<'a> {
     }
 
     /// Get single use if exists
-    pub fn single_use(&self, local: LocalId) -> Option<ExprRef<'a>> {
+    pub fn single_use(&self, local: LocalId) -> Option<ExpressionId> {
         if self.has_single_use(local) {
             self.uses.get(&local).and_then(|v| v.first().copied())
         } else {
@@ -146,20 +155,25 @@ impl<'a> LocalGraph<'a> {
     /// - No interfering effects between set and target
     /// - No other definitions of same local between set and target
     /// - All uses of the local happen after target (or are dominated by target)
-    pub fn can_sink(&self, set: ExprRef<'a>, _target: ExprRef<'a>) -> bool {
+    pub fn can_sink(
+        &self,
+        set: ExpressionId,
+        _target: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) -> bool {
         // Extract local ID from set
-        let _local_id = match &set.kind {
+        let _local_id = match &arena[set].kind {
             ExpressionKind::LocalSet { id, .. } => *id,
             _ => return false,
         };
 
         // Check for interfering effects
-        let set_value = match &set.kind {
+        let set_value = match &arena[set].kind {
             ExpressionKind::LocalSet { value, .. } => *value,
             _ => return false,
         };
 
-        let set_effects = EffectAnalyzer::analyze(set_value);
+        let set_effects = EffectAnalyzer::analyze(set_value, arena);
 
         // If set value has side effects, sinking is risky
         if set_effects.has_side_effects() {
@@ -175,7 +189,7 @@ impl<'a> LocalGraph<'a> {
     }
 
     /// Find all uses of a local within a subtree
-    pub fn find_uses_in(&self, local: LocalId, root: ExprRef<'a>) -> Vec<ExprRef<'a>> {
+    pub fn find_uses_in(&self, local: LocalId, root: ExpressionId) -> Vec<ExpressionId> {
         let mut result = Vec::new();
         let uses = self.uses(local);
 
@@ -191,7 +205,7 @@ impl<'a> LocalGraph<'a> {
     }
 
     /// Check if expr is a descendant of ancestor
-    fn is_descendant(&self, expr: ExprRef<'a>, ancestor: ExprRef<'a>) -> bool {
+    fn is_descendant(&self, expr: ExpressionId, ancestor: ExpressionId) -> bool {
         if expr == ancestor {
             return true;
         }

@@ -1,4 +1,3 @@
-use bumpalo::Bump;
 use std::fs;
 use std::path::PathBuf;
 use washm::ir::module::Module;
@@ -10,8 +9,6 @@ use wast::Wast;
 
 #[test]
 fn test_asyncify_binaryen_sleep_parity() {
-    let allocator = Bump::new();
-
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("..");
     path.push("external");
@@ -29,17 +26,59 @@ fn test_asyncify_binaryen_sleep_parity() {
     let wat_content = fs::read_to_string(&path).expect("Failed to read .wat file");
     let wasm_binary = wat::parse_str(&wat_content).expect("Failed to parse WAT");
 
-    let mut reader = BinaryReader::new(&allocator, wasm_binary);
+    let mut reader = BinaryReader::new();
     let mut module = reader
-        .parse_module()
+        .parse_module(&wasm_binary)
         .expect("Failed to parse module into IR");
 
     let mut config = AsyncifyConfig::default();
     config.imports.push("env.sleep".to_string());
     config.imports.push("env.tunnel".to_string());
 
+    // Print IR BEFORE asyncify
+    {
+        let factorial_loop_id = module
+            .exports
+            .iter()
+            .find(|e| {
+                e.name == "factorial-loop"
+                    && matches!(e.kind, washm::ir::module::ExportKind::Function(_))
+            })
+            .map(|e| match e.kind {
+                washm::ir::module::ExportKind::Function(id) => id,
+                _ => unreachable!(),
+            })
+            .expect("factorial-loop export missing");
+
+        let func = &module.functions[factorial_loop_id];
+        let body = func.body().expect("factorial-loop missing body");
+        eprintln!("IR BEFORE ASYNCIFY (factorial-loop):");
+        washm::passes::asyncify::dump_ir(&module.expressions, body, 0);
+    }
+
     let mut asyncify = Asyncify::new(config);
     asyncify.run(&mut module);
+
+    // Print IR AFTER asyncify
+    {
+        let factorial_loop_id = module
+            .exports
+            .iter()
+            .find(|e| {
+                e.name == "factorial-loop"
+                    && matches!(e.kind, washm::ir::module::ExportKind::Function(_))
+            })
+            .map(|e| match e.kind {
+                washm::ir::module::ExportKind::Function(id) => id,
+                _ => unreachable!(),
+            })
+            .expect("factorial-loop export missing");
+
+        let func = &module.functions[factorial_loop_id];
+        let body = func.body().expect("factorial-loop missing body");
+        eprintln!("IR AFTER ASYNCIFY (factorial-loop):");
+        washm::passes::asyncify::dump_ir(&module.expressions, body, 0);
+    }
 
     verify_asyncify_module(&module);
 
@@ -62,16 +101,21 @@ fn test_asyncify_binaryen_sleep_parity() {
 
     let body = func.body().expect("factorial-loop missing body");
     // Verify it contains a loop that is instrumented
-    use washm::ir::expression::ExpressionKind;
+    use washm::collections::id_arena::IdArena;
+    use washm::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
     use washm::ir::visitor::ReadOnlyVisitor;
 
     struct LoopChecker {
         found: bool,
     }
-    impl<'a> ReadOnlyVisitor<'a> for LoopChecker {
-        fn visit_expression(&mut self, expr: washm::ir::expression::ExprRef<'a>) {
-            if let ExpressionKind::Loop { body, .. } = &expr.kind {
-                if let ExpressionKind::If { .. } = &body.kind {
+    impl ReadOnlyVisitor for LoopChecker {
+        fn visit_expression(
+            &mut self,
+            expr_id: ExpressionId,
+            arena: &IdArena<ExpressionMarker, Expression>,
+        ) {
+            if let ExpressionKind::Loop { body, .. } = &arena[expr_id].kind {
+                if let ExpressionKind::If { .. } = &arena[*body].kind {
                     self.found = true;
                 }
             }
@@ -79,7 +123,7 @@ fn test_asyncify_binaryen_sleep_parity() {
     }
 
     let mut checker = LoopChecker { found: false };
-    checker.visit(body);
+    checker.visit(body, &module.expressions);
     assert!(
         checker.found,
         "Loop in factorial-loop should be instrumented with range check"
@@ -88,8 +132,6 @@ fn test_asyncify_binaryen_sleep_parity() {
 
 #[test]
 fn test_asyncify_binaryen_suite_parity() {
-    let allocator = Bump::new();
-
     let base_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("external")
@@ -135,9 +177,9 @@ fn test_asyncify_binaryen_suite_parity() {
         for directive in wast.directives {
             if let wast::WastDirective::Module(mut module) = directive {
                 let wasm_binary = module.encode().expect("Failed to encode module");
-                let mut reader = BinaryReader::new(&allocator, wasm_binary);
+                let mut reader = BinaryReader::new();
                 let mut ir_module = reader
-                    .parse_module()
+                    .parse_module(&wasm_binary)
                     .expect("Failed to parse module into IR");
 
                 let mut config = AsyncifyConfig::default();
@@ -181,30 +223,28 @@ fn test_asyncify_binaryen_suite_parity() {
 }
 
 #[allow(dead_code)]
-fn verify_liveness1(func: &washm::ir::module::Function) {
+fn verify_liveness1(module: &Module, func: &washm::ir::module::Function) {
     use washm::ir::expression::ExpressionKind;
     use washm::ir::Literal;
 
     let body = func.body().expect("liveness1 missing body");
-    if let ExpressionKind::Block { list, .. } = &body.kind {
-        // First element is the Rewinding check
-        let rewind_if = list[0];
-        if let ExpressionKind::If { if_true, .. } = &rewind_if.kind {
+    if let ExpressionKind::Block { list, .. } = &module.expressions[body].kind {
+        let first_expr_id = list[0];
+        if let ExpressionKind::If { if_true, .. } = &module.expressions[first_expr_id].kind {
             if let ExpressionKind::Block {
                 list: rewind_list, ..
-            } = &if_true.kind
+            } = &module.expressions[*if_true].kind
             {
-                // Should find a subtraction of 8 (for 2 locals) and 4 (for index)
-                // Or a combined subtraction.
-                // My implementation does them separately currently.
-
                 let mut found_8 = false;
                 let mut found_4 = false;
 
-                for expr in rewind_list {
-                    if let ExpressionKind::Store { value, .. } = &expr.kind {
-                        if let ExpressionKind::Binary { right, .. } = &value.kind {
-                            if let ExpressionKind::Const(Literal::I32(val)) = &right.kind {
+                for &expr_id in rewind_list {
+                    let expr = &module.expressions[expr_id];
+                    if let ExpressionKind::LocalSet { value, .. } = &expr.kind {
+                        let value_expr = &module.expressions[*value];
+                        if let ExpressionKind::Binary { right, .. } = &value_expr.kind {
+                            let right_expr = &module.expressions[*right];
+                            if let ExpressionKind::Const(Literal::I32(val)) = &right_expr.kind {
                                 if *val == 8 {
                                     found_8 = true;
                                 }
@@ -214,12 +254,16 @@ fn verify_liveness1(func: &washm::ir::module::Function) {
                             }
                         }
                     }
-                    // Also check sub-blocks
                     if let ExpressionKind::Block { list: sub, .. } = &expr.kind {
-                        for sub_expr in sub {
-                            if let ExpressionKind::Store { value, .. } = &sub_expr.kind {
-                                if let ExpressionKind::Binary { right, .. } = &value.kind {
-                                    if let ExpressionKind::Const(Literal::I32(val)) = &right.kind {
+                        for &sub_expr_id in sub {
+                            let sub_expr = &module.expressions[sub_expr_id];
+                            if let ExpressionKind::LocalSet { value, .. } = &sub_expr.kind {
+                                let value_expr = &module.expressions[*value];
+                                if let ExpressionKind::Binary { right, .. } = &value_expr.kind {
+                                    let right_expr = &module.expressions[*right];
+                                    if let ExpressionKind::Const(Literal::I32(val)) =
+                                        &right_expr.kind
+                                    {
                                         if *val == 8 {
                                             found_8 = true;
                                         }

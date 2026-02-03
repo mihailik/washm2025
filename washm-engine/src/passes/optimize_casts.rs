@@ -1,5 +1,6 @@
 use crate::analysis::patterns::{MatchEnv, Pattern, PatternMatcher};
-use crate::ir::expression::ExprRef;
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::Module;
 use crate::ir::ops::UnaryOp;
 use crate::ir::visitor::Visitor;
@@ -82,30 +83,35 @@ impl Pass for OptimizeCasts {
         "optimize-casts"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
         let mut visitor = OptimizeCastsVisitor {
             matcher: &self.matcher,
-            allocator: module.allocator,
         };
 
-        for (_, func) in &mut module.functions {
-            if let Some(body) = func.body_mut() {
-                visitor.visit(body);
+        for (_, func) in functions {
+            if let Some(mut body) = func.body_mut() {
+                visitor.visit(&mut body, arena);
             }
         }
     }
 }
 
-struct OptimizeCastsVisitor<'a, 'b> {
-    matcher: &'b PatternMatcher,
-    allocator: &'a bumpalo::Bump,
+struct OptimizeCastsVisitor<'a> {
+    matcher: &'a PatternMatcher,
 }
 
-impl<'a, 'b> Visitor<'a> for OptimizeCastsVisitor<'a, 'b> {
-    fn visit(&mut self, expr: &mut ExprRef<'a>) {
-        self.visit_children(expr);
-        if let Some(new_expr) = self.matcher.simplify(*expr, self.allocator) {
-            *expr = new_expr;
+impl<'a> Visitor for OptimizeCastsVisitor<'a> {
+    fn visit_expression(
+        &mut self,
+        expr_id: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        self.visit_children(expr_id, arena);
+
+        if let Some(new_expr) = self.matcher.simplify(*expr_id, arena) {
+            let new_node = std::mem::replace(&mut arena[new_expr].kind, ExpressionKind::Nop);
+            arena[*expr_id].kind = new_node;
         }
     }
 }
@@ -115,57 +121,54 @@ mod tests {
     use super::*;
     use crate::ir::expression::{ExpressionKind, IrBuilder};
     use crate::ir::{LocalId, Type};
-    use bumpalo::Bump;
 
     #[test]
     fn test_optimize_wrap_extend_s() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         // wrap(extend_s(local.get 0)) -> local.get 0
-        let x = builder.local_get(0, Type::I32);
+        let x = builder.local_get(LocalId::from(0), Type::I32);
         let extend = builder.unary(UnaryOp::ExtendSInt32, x, Type::I64);
         let wrap = builder.unary(UnaryOp::WrapInt64, extend, Type::I32);
 
         let pass = OptimizeCasts::new();
         let mut visitor = OptimizeCastsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
-        let mut expr_ref = wrap;
-        visitor.visit(&mut expr_ref);
+        let mut expr_id = wrap;
+        visitor.visit(&mut expr_id, &mut arena);
 
-        if let ExpressionKind::LocalGet { id, .. } = &expr_ref.kind {
+        if let ExpressionKind::LocalGet { id, .. } = &arena[expr_id].kind {
             assert_eq!(id.index(), 0);
         } else {
-            panic!("Expected LocalGet");
+            panic!("Expected LocalGet, got {:?}", arena[expr_id].kind);
         }
     }
 
     #[test]
     fn test_optimize_demote_promote() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         // demote(promote(local.get 0)) -> local.get 0
         let x = builder.local_get(LocalId::from(0), Type::F32);
         let promote = builder.unary(UnaryOp::PromoteFloat32, x, Type::F64);
         let demote = builder.unary(UnaryOp::DemoteFloat64, promote, Type::F32);
 
-        let mut expr_ref = demote;
+        let mut expr_id = demote;
         let pass = OptimizeCasts::new();
         let mut visitor = OptimizeCastsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_id, &mut arena);
 
-        if let ExpressionKind::LocalGet { id, .. } = &expr_ref.kind {
+        if let ExpressionKind::LocalGet { id, .. } = &arena[expr_id].kind {
             assert_eq!(id.index(), 0);
         } else {
-            panic!("Expected LocalGet");
+            panic!("Expected LocalGet, got {:?}", arena[expr_id].kind);
         }
     }
 }

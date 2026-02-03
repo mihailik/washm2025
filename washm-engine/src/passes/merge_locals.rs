@@ -1,5 +1,6 @@
 use crate::analysis::stats::ModuleStats;
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
@@ -14,7 +15,7 @@ impl Pass for MergeLocals {
         "merge-locals"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         let stats = ModuleStats::collect(module);
 
         for (_, func) in &mut module.functions {
@@ -39,7 +40,7 @@ impl Pass for MergeLocals {
             // Remove unused locals (caution: removing while iterating not allowed, done via filtered vec if it was a vec)
             // With IdArena, we can remove them.
             for local_id in unused {
-                func.locals_mut().remove_id(local_id.cast());
+                func.locals_mut().dealloc(local_id.cast());
             }
         }
     }
@@ -50,9 +51,14 @@ struct LocalRemapper<'a> {
     remap: &'a HashMap<crate::ir::LocalId, crate::ir::LocalId>,
 }
 
-impl<'a, 'b> Visitor<'b> for LocalRemapper<'a> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'b>) {
-        match &mut expr.kind {
+impl<'a> Visitor for LocalRemapper<'a> {
+    fn visit_expression(
+        &mut self,
+        expr_id: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        let kind = &mut arena[*expr_id].kind;
+        match kind {
             ExpressionKind::LocalGet { id }
             | ExpressionKind::LocalSet { id, .. }
             | ExpressionKind::LocalTee { id, .. } => {
@@ -62,29 +68,27 @@ impl<'a, 'b> Visitor<'b> for LocalRemapper<'a> {
             }
             _ => {}
         }
-        self.visit_children(expr);
+        self.visit_children(expr_id, arena);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::expression::Expression;
+    use crate::ir::expression::IrBuilder;
     use crate::ir::module::Function;
     use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
 
     #[test]
     fn test_merge_locals() {
-        let bump = Bump::new();
-        let val = Expression::const_expr(&bump, Literal::I32(1), Type::I32);
-        let func = Function::new("test".to_string(), Type::NONE, Type::I32, vec![], Some(val));
-        let mut module = Module::new(&bump);
-        module.add_function(func);
+        let mut module = Module::new();
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        let mut builder = IrBuilder::new(arena);
+        let val = builder.const_(Literal::I32(1));
+        let func = Function::new("test".to_string(), Type::NONE, Type::I32, vec![], val);
+        let id = functions.alloc(func);
         let mut pass = MergeLocals;
         pass.run(&mut module);
-        assert!(module.functions[module.functions.iter().next().unwrap().0]
-            .body()
-            .is_some());
+        assert!(module.functions[id].body().is_some());
     }
 }

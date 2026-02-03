@@ -1,4 +1,5 @@
-use crate::ir::expression::ExprRef;
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionMarker};
 use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
@@ -7,38 +8,44 @@ pub struct SsaNomerge;
 
 impl Pass for SsaNomerge {
     fn name(&self) -> &str {
-        "SsaNomergeDASHED"
+        "SsaNomerge"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         for (_, func) in &mut module.functions {
-            if let Some(body) = func.body_mut() {
+            if let Some(mut body) = func.body_mut() {
                 let mut visitor = GenericVisitor;
-                visitor.visit(body);
+                visitor.visit(&mut body, &mut module.expressions);
             }
         }
     }
 }
 
 struct GenericVisitor;
-impl<'a> Visitor<'a> for GenericVisitor {
-    fn visit_expression(&mut self, _expr: &mut ExprRef<'a>) {}
+impl Visitor for GenericVisitor {
+    fn visit_expression(
+        &mut self,
+        _expr: &mut ExpressionId,
+        _arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::expression::Expression;
-    use crate::ir::module::Function;
+    use crate::ir::expression::{Expression, ExpressionKind};
+    use crate::ir::module::{Function, Module};
     use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
 
     #[test]
     fn test_ssa_nomerge() {
-        let bump = Bump::new();
-        let val = Expression::const_expr(&bump, Literal::I32(1), Type::I32);
-        let func = Function::new("test".to_string(), Type::NONE, Type::I32, vec![], Some(val));
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
+        let val = module.expressions.alloc(Expression::new(
+            ExpressionKind::Const(Literal::I32(1)),
+            Type::I32,
+        ));
+        let func = Function::new("test".to_string(), Type::NONE, Type::I32, vec![], val);
         module.add_function(func);
         let mut pass = SsaNomerge;
         pass.run(&mut module);

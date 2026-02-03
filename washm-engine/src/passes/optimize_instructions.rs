@@ -1,5 +1,7 @@
 use crate::analysis::patterns::{MatchEnv, Pattern, PatternMatcher, PatternOp, PatternUnaryOp};
-use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
+use crate::ir::expression::{
+    Expression, ExpressionId, ExpressionKind, ExpressionMarker, IrBuilder,
+};
 use crate::ir::module::Module;
 use crate::ir::ops::{BinaryOp, UnaryOp};
 use crate::ir::visitor::Visitor;
@@ -44,7 +46,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int32, *x, Type::I32))
             },
         );
@@ -56,7 +58,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS16Int32, *x, Type::I32))
             },
         );
@@ -68,7 +70,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int64, *x, Type::I64))
             },
         );
@@ -80,7 +82,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS16Int64, *x, Type::I64))
             },
         );
@@ -92,7 +94,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS32Int64, *x, Type::I64))
             },
         );
@@ -107,7 +109,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int32, *x, Type::I32))
             },
         );
@@ -120,7 +122,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int32, *x, Type::I32))
             },
         );
@@ -133,7 +135,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS16Int64, *x, Type::I64))
             },
         );
@@ -146,7 +148,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int64, *x, Type::I64))
             },
         );
@@ -159,7 +161,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int64, *x, Type::I64))
             },
         );
@@ -172,7 +174,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int64, *x, Type::I64))
             },
         );
@@ -192,7 +194,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int32, *x, Type::I32))
             },
         );
@@ -210,7 +212,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS16Int32, *x, Type::I32))
             },
         );
@@ -228,7 +230,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int64, *x, Type::I64))
             },
         );
@@ -246,7 +248,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS16Int64, *x, Type::I64))
             },
         );
@@ -264,7 +266,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS32Int64, *x, Type::I64))
             },
         );
@@ -329,7 +331,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::AbsFloat32, *x, Type::F32))
             },
         );
@@ -342,7 +344,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::AbsFloat64, *x, Type::F64))
             },
         );
@@ -359,7 +361,7 @@ impl OptimizeInstructions {
             |env, bump| {
                 let x = env.get("x")?;
                 let y = env.get("y")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.binary(BinaryOp::MulFloat32, *x, *y, Type::F32))
             },
         );
@@ -374,7 +376,7 @@ impl OptimizeInstructions {
             |env, bump| {
                 let x = env.get("x")?;
                 let y = env.get("y")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.binary(BinaryOp::MulFloat64, *x, *y, Type::F64))
             },
         );
@@ -391,7 +393,7 @@ impl OptimizeInstructions {
             |env, bump| {
                 let x = env.get("x")?;
                 let y = env.get("y")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.binary(BinaryOp::DivFloat32, *x, *y, Type::F32))
             },
         );
@@ -406,7 +408,7 @@ impl OptimizeInstructions {
             |env, bump| {
                 let x = env.get("x")?;
                 let y = env.get("y")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.binary(BinaryOp::DivFloat64, *x, *y, Type::F64))
             },
         );
@@ -468,16 +470,12 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::ShlInt32, Pattern::Var("x"), Pattern::AnyConst),
             |env, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("right")?.get_i32();
+                let c = env.get_const("right", bump)?.get_i32();
                 let shift = (c as u32 % 32) as i32;
                 if c as u32 >= 32 {
-                    let builder = IrBuilder::new(bump);
-                    return Some(builder.binary(
-                        BinaryOp::ShlInt32,
-                        *x,
-                        builder.const_(Literal::I32(shift)),
-                        Type::I32,
-                    ));
+                    let mut builder = IrBuilder::new(bump);
+                    let c_val = builder.const_(Literal::I32(shift));
+                    return Some(builder.binary(BinaryOp::ShlInt32, *x, c_val, Type::I32));
                 }
                 None
             },
@@ -488,16 +486,12 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::ShrUInt32, Pattern::Var("x"), Pattern::AnyConst),
             |env, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("right")?.get_i32();
+                let c = env.get_const("right", bump)?.get_i32();
                 let shift = (c as u32 % 32) as i32;
                 if c as u32 >= 32 {
-                    let builder = IrBuilder::new(bump);
-                    return Some(builder.binary(
-                        BinaryOp::ShrUInt32,
-                        *x,
-                        builder.const_(Literal::I32(shift)),
-                        Type::I32,
-                    ));
+                    let mut builder = IrBuilder::new(bump);
+                    let c_val = builder.const_(Literal::I32(shift));
+                    return Some(builder.binary(BinaryOp::ShrUInt32, *x, c_val, Type::I32));
                 }
                 None
             },
@@ -508,16 +502,12 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::ShrSInt32, Pattern::Var("x"), Pattern::AnyConst),
             |env, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("right")?.get_i32();
+                let c = env.get_const("right", bump)?.get_i32();
                 let shift = (c as u32 % 32) as i32;
                 if c as u32 >= 32 {
-                    let builder = IrBuilder::new(bump);
-                    return Some(builder.binary(
-                        BinaryOp::ShrSInt32,
-                        *x,
-                        builder.const_(Literal::I32(shift)),
-                        Type::I32,
-                    ));
+                    let mut builder = IrBuilder::new(bump);
+                    let c_val = builder.const_(Literal::I32(shift));
+                    return Some(builder.binary(BinaryOp::ShrSInt32, *x, c_val, Type::I32));
                 }
                 None
             },
@@ -560,15 +550,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::ShlInt64, Pattern::Var("x"), Pattern::AnyConst),
             |env, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("right")?.get_i64();
+                let c = env.get_const("right", bump)?.get_i64();
                 if c as u64 >= 64 {
-                    let builder = IrBuilder::new(bump);
-                    return Some(builder.binary(
-                        BinaryOp::ShlInt64,
-                        *x,
-                        builder.const_(Literal::I64((c as u64 & 63) as i64)),
-                        Type::I64,
-                    ));
+                    let mut builder = IrBuilder::new(bump);
+                    let c_val = builder.const_(Literal::I64((c as u64 & 63) as i64));
+                    return Some(builder.binary(BinaryOp::ShlInt64, *x, c_val, Type::I64));
                 }
                 None
             },
@@ -579,15 +565,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::ShrUInt64, Pattern::Var("x"), Pattern::AnyConst),
             |env, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("right")?.get_i64();
+                let c = env.get_const("right", bump)?.get_i64();
                 if c as u64 >= 64 {
-                    let builder = IrBuilder::new(bump);
-                    return Some(builder.binary(
-                        BinaryOp::ShrUInt64,
-                        *x,
-                        builder.const_(Literal::I64((c as u64 & 63) as i64)),
-                        Type::I64,
-                    ));
+                    let mut builder = IrBuilder::new(bump);
+                    let c_val = builder.const_(Literal::I64((c as u64 & 63) as i64));
+                    return Some(builder.binary(BinaryOp::ShrUInt64, *x, c_val, Type::I64));
                 }
                 None
             },
@@ -598,15 +580,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::ShrSInt64, Pattern::Var("x"), Pattern::AnyConst),
             |env, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("right")?.get_i64();
+                let c = env.get_const("right", bump)?.get_i64();
                 if c as u64 >= 64 {
-                    let builder = IrBuilder::new(bump);
-                    return Some(builder.binary(
-                        BinaryOp::ShrSInt64,
-                        *x,
-                        builder.const_(Literal::I64((c as u64 & 63) as i64)),
-                        Type::I64,
-                    ));
+                    let mut builder = IrBuilder::new(bump);
+                    let c_val = builder.const_(Literal::I64((c as u64 & 63) as i64));
+                    return Some(builder.binary(BinaryOp::ShrSInt64, *x, c_val, Type::I64));
                 }
                 None
             },
@@ -626,7 +604,7 @@ impl OptimizeInstructions {
                 ),
             ),
             |_env, bump| {
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(0)))
             },
         );
@@ -643,7 +621,7 @@ impl OptimizeInstructions {
                 ),
             ),
             |_env, bump| {
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(-1)))
             },
         );
@@ -676,14 +654,10 @@ impl OptimizeInstructions {
             |env, bump| {
                 let x = env.get("x")?;
                 let y = env.get("y")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 let or = builder.binary(BinaryOp::OrInt32, *x, *y, Type::I32);
-                Some(builder.binary(
-                    BinaryOp::XorInt32,
-                    or,
-                    builder.const_(Literal::I32(-1)),
-                    Type::I32,
-                ))
+                let c_neg1 = builder.const_(Literal::I32(-1));
+                Some(builder.binary(BinaryOp::XorInt32, or, c_neg1, Type::I32))
             },
         );
 
@@ -705,14 +679,10 @@ impl OptimizeInstructions {
             |env, bump| {
                 let x = env.get("x")?;
                 let y = env.get("y")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 let and = builder.binary(BinaryOp::AndInt32, *x, *y, Type::I32);
-                Some(builder.binary(
-                    BinaryOp::XorInt32,
-                    and,
-                    builder.const_(Literal::I32(-1)),
-                    Type::I32,
-                ))
+                let c_neg1 = builder.const_(Literal::I32(-1));
+                Some(builder.binary(BinaryOp::XorInt32, and, c_neg1, Type::I32))
             },
         );
 
@@ -798,8 +768,8 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?.get_i32() as u32 & 31;
-                let m = env.get_const("right")?.get_i32();
+                let c = env.get_const("left", bump)?.get_i32() as u32 & 31;
+                let m = env.get_const("right", bump)?.get_i32();
 
                 if c > 0 {
                     let mask_shifted = m >> c;
@@ -807,17 +777,14 @@ impl OptimizeInstructions {
                     let low_bits_mask = (1i32 << c).wrapping_sub(1);
                     if (m & low_bits_mask) == 0 {
                         // (x << c) & m  =>  (x & (m >> c)) << c
-                        let builder = IrBuilder::new(bump);
-                        let inner_and = builder.binary(
-                            BinaryOp::AndInt32,
-                            *x,
-                            builder.const_(Literal::I32(mask_shifted)),
-                            Type::I32,
-                        );
+                        let mut builder = IrBuilder::new(bump);
+                        let c_mask = builder.const_(Literal::I32(mask_shifted));
+                        let inner_and = builder.binary(BinaryOp::AndInt32, *x, c_mask, Type::I32);
+                        let c_shift = builder.const_(Literal::I32(c as i32));
                         return Some(builder.binary(
                             BinaryOp::ShlInt32,
                             inner_and,
-                            builder.const_(Literal::I32(c as i32)),
+                            c_shift,
                             Type::I32,
                         ));
                     }
@@ -832,11 +799,11 @@ impl OptimizeInstructions {
         matcher.add_rule(
             Pattern::binary(PatternOp::AnyOp, Pattern::AnyConst, Pattern::AnyConst),
             |env, bump| {
-                let left = env.get_const("left")?;
-                let right = env.get_const("right")?;
+                let left = env.get_const("left", bump)?;
+                let right = env.get_const("right", bump)?;
                 let op = env.get_op()?;
 
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
 
                 // It is important to check for the operation because
                 // not all binary operations can be folded.
@@ -848,10 +815,10 @@ impl OptimizeInstructions {
         matcher.add_rule(
             Pattern::unary(PatternUnaryOp::AnyOp, Pattern::AnyConst),
             |env, bump| {
-                let value = env.get_const("value")?;
+                let value = env.get_const("value", bump)?;
                 let op = env.get_unary_op()?;
 
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
 
                 Self::eval_unary_op(op, value).map(|val| builder.const_(val))
             },
@@ -1204,7 +1171,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::EqZInt32, *x, Type::I32))
             },
         );
@@ -1218,7 +1185,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::EqZInt32, *x, Type::I32))
             },
         );
@@ -1232,7 +1199,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 let zero = builder.const_(Literal::I32(0));
                 Some(builder.binary(BinaryOp::NeInt32, *x, zero, Type::I32))
             },
@@ -1247,7 +1214,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::EqZInt32, *x, Type::I32))
             },
         );
@@ -1261,7 +1228,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::EqZInt32, *x, Type::I32))
             },
         );
@@ -1275,7 +1242,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 let zero = builder.const_(Literal::I32(0));
                 Some(builder.binary(BinaryOp::NeInt32, *x, zero, Type::I32))
             },
@@ -1290,7 +1257,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 let minus_one = builder.const_(Literal::I32(-1));
                 Some(builder.binary(BinaryOp::NeInt32, *x, minus_one, Type::I32))
             },
@@ -1305,7 +1272,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 let minus_one = builder.const_(Literal::I32(-1));
                 Some(builder.binary(BinaryOp::EqInt32, *x, minus_one, Type::I32))
             },
@@ -1322,7 +1289,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::EqZInt64, *x, Type::I32)) // Note: EqZ returns I32
             },
         );
@@ -1339,15 +1306,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::LtSInt32, Pattern::Var("x"), Pattern::AnyConst),
             |env, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("right")?.get_i32();
+                let c = env.get_const("right", bump)?.get_i32();
                 if c > i32::MIN {
-                    let builder = IrBuilder::new(bump);
-                    return Some(builder.binary(
-                        BinaryOp::LeSInt32,
-                        *x,
-                        builder.const_(Literal::I32(c - 1)),
-                        Type::I32,
-                    ));
+                    let mut builder = IrBuilder::new(bump);
+                    let c_val = builder.const_(Literal::I32(c - 1));
+                    return Some(builder.binary(BinaryOp::LeSInt32, *x, c_val, Type::I32));
                 }
                 None
             },
@@ -1357,15 +1320,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::GtSInt32, Pattern::Var("x"), Pattern::AnyConst),
             |env, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("right")?.get_i32();
+                let c = env.get_const("right", bump)?.get_i32();
                 if c < i32::MAX {
-                    let builder = IrBuilder::new(bump);
-                    return Some(builder.binary(
-                        BinaryOp::GeSInt32,
-                        *x,
-                        builder.const_(Literal::I32(c + 1)),
-                        Type::I32,
-                    ));
+                    let mut builder = IrBuilder::new(bump);
+                    let c_val = builder.const_(Literal::I32(c + 1));
+                    return Some(builder.binary(BinaryOp::GeSInt32, *x, c_val, Type::I32));
                 }
                 None
             },
@@ -1382,7 +1341,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let _x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(1)))
             },
         );
@@ -1396,7 +1355,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let _x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(0)))
             },
         );
@@ -1410,7 +1369,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let _x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(1)))
             },
         );
@@ -1424,7 +1383,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let _x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(0)))
             },
         );
@@ -1438,7 +1397,7 @@ impl OptimizeInstructions {
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
                 let y = env.get("y")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.binary(BinaryOp::EqInt32, *x, *y, Type::I32))
             },
         );
@@ -1456,14 +1415,10 @@ impl OptimizeInstructions {
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
                 let c_expr = env.get("c_expr")?;
-                if let ExpressionKind::Const(c_literal) = c_expr.kind {
-                    let builder = IrBuilder::new(bump);
-                    return Some(builder.binary(
-                        BinaryOp::EqInt32,
-                        *x,
-                        builder.const_(c_literal.neg()),
-                        Type::I32,
-                    ));
+                if let ExpressionKind::Const(c_literal) = bump[*c_expr].kind {
+                    let mut builder = IrBuilder::new(bump);
+                    let c_neg = builder.const_(c_literal.neg());
+                    return Some(builder.binary(BinaryOp::EqInt32, *x, c_neg, Type::I32));
                 }
                 None
             },
@@ -1604,7 +1559,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let _x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(0)))
             },
         );
@@ -1618,7 +1573,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let _x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(0)))
             },
         );
@@ -1634,7 +1589,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let _x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(0)))
             },
         );
@@ -1648,7 +1603,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let _x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(0)))
             },
         );
@@ -1667,7 +1622,7 @@ impl OptimizeInstructions {
         matcher.add_rule(
             Pattern::binary(BinaryOp::XorInt32, Pattern::Var("x"), Pattern::Var("x")),
             |_env: &MatchEnv, bump| {
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(0)))
             },
         );
@@ -1685,7 +1640,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::EqZInt32, *x, Type::I32))
             },
         );
@@ -1698,13 +1653,9 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(
-                    BinaryOp::NeInt32,
-                    *x,
-                    builder.const_(Literal::I32(0)),
-                    Type::I32,
-                ))
+                let mut builder = IrBuilder::new(bump);
+                let c_zero = builder.const_(Literal::I32(0));
+                Some(builder.binary(BinaryOp::NeInt32, *x, c_zero, Type::I32))
             },
         );
 
@@ -1715,10 +1666,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::AddInt32, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?; // AnyConst captures into "left"
+                let c = env.get_const("left", bump)?; // AnyConst captures into "left"
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::AddInt32, *x, builder.const_(c), Type::I32))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::AddInt32, *x, c_val, Type::I32))
             },
         );
 
@@ -1727,10 +1679,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::MulInt32, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?;
+                let c = env.get_const("left", bump)?;
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::MulInt32, *x, builder.const_(c), Type::I32))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::MulInt32, *x, c_val, Type::I32))
             },
         );
 
@@ -1739,10 +1692,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::AndInt32, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?;
+                let c = env.get_const("left", bump)?;
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::AndInt32, *x, builder.const_(c), Type::I32))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::AndInt32, *x, c_val, Type::I32))
             },
         );
 
@@ -1751,10 +1705,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::OrInt32, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?;
+                let c = env.get_const("left", bump)?;
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::OrInt32, *x, builder.const_(c), Type::I32))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::OrInt32, *x, c_val, Type::I32))
             },
         );
 
@@ -1763,10 +1718,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::XorInt32, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?;
+                let c = env.get_const("left", bump)?;
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::XorInt32, *x, builder.const_(c), Type::I32))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::XorInt32, *x, c_val, Type::I32))
             },
         );
 
@@ -1775,10 +1731,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::EqInt32, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?;
+                let c = env.get_const("left", bump)?;
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::EqInt32, *x, builder.const_(c), Type::I32))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::EqInt32, *x, c_val, Type::I32))
             },
         );
 
@@ -1787,10 +1744,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::NeInt32, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?;
+                let c = env.get_const("left", bump)?;
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::NeInt32, *x, builder.const_(c), Type::I32))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::NeInt32, *x, c_val, Type::I32))
             },
         );
 
@@ -1801,10 +1759,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::AddInt64, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?;
+                let c = env.get_const("left", bump)?;
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::AddInt64, *x, builder.const_(c), Type::I64))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::AddInt64, *x, c_val, Type::I64))
             },
         );
 
@@ -1815,10 +1774,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::MulInt64, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?;
+                let c = env.get_const("left", bump)?;
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::MulInt64, *x, builder.const_(c), Type::I64))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::MulInt64, *x, c_val, Type::I64))
             },
         );
 
@@ -1829,10 +1789,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::AndInt64, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?;
+                let c = env.get_const("left", bump)?;
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::AndInt64, *x, builder.const_(c), Type::I64))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::AndInt64, *x, c_val, Type::I64))
             },
         );
 
@@ -1843,10 +1804,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::OrInt64, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?;
+                let c = env.get_const("left", bump)?;
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::OrInt64, *x, builder.const_(c), Type::I64))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::OrInt64, *x, c_val, Type::I64))
             },
         );
 
@@ -1857,10 +1819,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::XorInt64, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?;
+                let c = env.get_const("left", bump)?;
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::XorInt64, *x, builder.const_(c), Type::I64))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::XorInt64, *x, c_val, Type::I64))
             },
         );
 
@@ -1871,10 +1834,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::EqInt64, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?;
+                let c = env.get_const("left", bump)?;
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::EqInt64, *x, builder.const_(c), Type::I64))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::EqInt64, *x, c_val, Type::I64))
             },
         );
 
@@ -1885,10 +1849,11 @@ impl OptimizeInstructions {
             Pattern::binary(BinaryOp::NeInt64, Pattern::AnyConst, Pattern::Var("x")),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c = env.get_const("left")?;
+                let c = env.get_const("left", bump)?;
 
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(BinaryOp::NeInt64, *x, builder.const_(c), Type::I64))
+                let mut builder = IrBuilder::new(bump);
+                let c_val = builder.const_(c);
+                Some(builder.binary(BinaryOp::NeInt64, *x, c_val, Type::I64))
             },
         );
 
@@ -1993,7 +1958,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let _x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::F32(0.0)))
             },
         );
@@ -2007,7 +1972,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let _x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::F32(0.0)))
             },
         );
@@ -2023,7 +1988,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let _x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::F64(0.0)))
             },
         );
@@ -2037,7 +2002,7 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let _x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::F64(0.0)))
             },
         );
@@ -2065,7 +2030,7 @@ impl OptimizeInstructions {
         matcher.add_rule(
             Pattern::binary(BinaryOp::SubInt32, Pattern::Var("x"), Pattern::Var("x")),
             |_env: &MatchEnv, bump| {
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(0)))
             },
         );
@@ -2080,7 +2045,7 @@ impl OptimizeInstructions {
         matcher.add_rule(
             Pattern::binary(BinaryOp::EqInt32, Pattern::Var("x"), Pattern::Var("x")),
             |_env: &MatchEnv, bump| {
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(1)))
             },
         );
@@ -2089,7 +2054,7 @@ impl OptimizeInstructions {
         matcher.add_rule(
             Pattern::binary(BinaryOp::NeInt32, Pattern::Var("x"), Pattern::Var("x")),
             |_env: &MatchEnv, bump| {
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(0)))
             },
         );
@@ -2105,15 +2070,11 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c1 = env.get_const("left")?.get_i32();
-                let c2 = env.get_const("right")?.get_i32();
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(
-                    BinaryOp::ShlInt32,
-                    *x,
-                    builder.const_(Literal::I32(c1.wrapping_add(c2))),
-                    Type::I32,
-                ))
+                let c1 = env.get_const("left", bump)?.get_i32();
+                let c2 = env.get_const("right", bump)?.get_i32();
+                let mut builder = IrBuilder::new(bump);
+                let c_sum = builder.const_(Literal::I32(c1.wrapping_add(c2)));
+                Some(builder.binary(BinaryOp::ShlInt32, *x, c_sum, Type::I32))
             },
         );
 
@@ -2157,7 +2118,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS32Int64, *x, Type::I64))
             },
         );
@@ -2170,7 +2131,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 let mask = builder.const_(Literal::I64(0xffffffff));
                 Some(builder.binary(BinaryOp::AndInt64, *x, mask, Type::I64))
             },
@@ -2225,7 +2186,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int32, *x, Type::I32))
             },
         );
@@ -2238,7 +2199,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int32, *x, Type::I32))
             },
         );
@@ -2253,7 +2214,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int32, *x, Type::I32))
             },
         );
@@ -2265,7 +2226,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS16Int32, *x, Type::I32))
             },
         );
@@ -2277,7 +2238,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int64, *x, Type::I64))
             },
         );
@@ -2289,7 +2250,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS16Int64, *x, Type::I64))
             },
         );
@@ -2301,7 +2262,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS32Int64, *x, Type::I64))
             },
         );
@@ -2321,7 +2282,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int32, *x, Type::I32))
             },
         );
@@ -2339,7 +2300,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS16Int32, *x, Type::I32))
             },
         );
@@ -2357,7 +2318,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int64, *x, Type::I64))
             },
         );
@@ -2375,7 +2336,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS16Int64, *x, Type::I64))
             },
         );
@@ -2393,7 +2354,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS32Int64, *x, Type::I64))
             },
         );
@@ -2408,7 +2369,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS16Int64, *x, Type::I64))
             },
         );
@@ -2421,7 +2382,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int64, *x, Type::I64))
             },
         );
@@ -2434,7 +2395,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int64, *x, Type::I64))
             },
         );
@@ -2447,7 +2408,7 @@ impl OptimizeInstructions {
             ),
             |env, bump| {
                 let x = env.get("x")?;
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.unary(UnaryOp::ExtendS8Int64, *x, Type::I64))
             },
         );
@@ -2463,15 +2424,11 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c1 = env.get_const("left")?.get_i32();
-                let c2 = env.get_const("right")?.get_i32();
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(
-                    BinaryOp::AddInt32,
-                    *x,
-                    builder.const_(Literal::I32(c1.wrapping_add(c2))),
-                    Type::I32,
-                ))
+                let c1 = env.get_const("left", bump)?.get_i32();
+                let c2 = env.get_const("right", bump)?.get_i32();
+                let mut builder = IrBuilder::new(bump);
+                let c_fold = builder.const_(Literal::I32(c1.wrapping_add(c2)));
+                Some(builder.binary(BinaryOp::AddInt32, *x, c_fold, Type::I32))
             },
         );
 
@@ -2484,15 +2441,11 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c1 = env.get_const("left")?.get_i32();
-                let c2 = env.get_const("right")?.get_i32();
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(
-                    BinaryOp::MulInt32,
-                    *x,
-                    builder.const_(Literal::I32(c1.wrapping_mul(c2))),
-                    Type::I32,
-                ))
+                let c1 = env.get_const("left", bump)?.get_i32();
+                let c2 = env.get_const("right", bump)?.get_i32();
+                let mut builder = IrBuilder::new(bump);
+                let c_fold = builder.const_(Literal::I32(c1.wrapping_mul(c2)));
+                Some(builder.binary(BinaryOp::MulInt32, *x, c_fold, Type::I32))
             },
         );
 
@@ -2505,15 +2458,11 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c1 = env.get_const("left")?.get_i32();
-                let c2 = env.get_const("right")?.get_i32();
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(
-                    BinaryOp::AndInt32,
-                    *x,
-                    builder.const_(Literal::I32(c1 & c2)),
-                    Type::I32,
-                ))
+                let c1 = env.get_const("left", bump)?.get_i32();
+                let c2 = env.get_const("right", bump)?.get_i32();
+                let mut builder = IrBuilder::new(bump);
+                let c_fold = builder.const_(Literal::I32(c1 & c2));
+                Some(builder.binary(BinaryOp::AndInt32, *x, c_fold, Type::I32))
             },
         );
 
@@ -2526,15 +2475,11 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c1 = env.get_const("left")?.get_i32();
-                let c2 = env.get_const("right")?.get_i32();
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(
-                    BinaryOp::OrInt32,
-                    *x,
-                    builder.const_(Literal::I32(c1 | c2)),
-                    Type::I32,
-                ))
+                let c1 = env.get_const("left", bump)?.get_i32();
+                let c2 = env.get_const("right", bump)?.get_i32();
+                let mut builder = IrBuilder::new(bump);
+                let c_fold = builder.const_(Literal::I32(c1 | c2));
+                Some(builder.binary(BinaryOp::OrInt32, *x, c_fold, Type::I32))
             },
         );
 
@@ -2547,15 +2492,11 @@ impl OptimizeInstructions {
             ),
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
-                let c1 = env.get_const("left")?.get_i32();
-                let c2 = env.get_const("right")?.get_i32();
-                let builder = IrBuilder::new(bump);
-                Some(builder.binary(
-                    BinaryOp::XorInt32,
-                    *x,
-                    builder.const_(Literal::I32(c1 ^ c2)),
-                    Type::I32,
-                ))
+                let c1 = env.get_const("left", bump)?.get_i32();
+                let c2 = env.get_const("right", bump)?.get_i32();
+                let mut builder = IrBuilder::new(bump);
+                let c_fold = builder.const_(Literal::I32(c1 ^ c2));
+                Some(builder.binary(BinaryOp::XorInt32, *x, c_fold, Type::I32))
             },
         );
 
@@ -2641,7 +2582,7 @@ impl OptimizeInstructions {
                 Pattern::Const(Literal::I32(1)),
             ),
             |_env, bump| {
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(0)))
             },
         );
@@ -2654,7 +2595,7 @@ impl OptimizeInstructions {
                 Pattern::Const(Literal::I32(1)),
             ),
             |_env, bump| {
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I32(0)))
             },
         );
@@ -2689,7 +2630,7 @@ impl OptimizeInstructions {
                 Pattern::Const(Literal::I64(1)),
             ),
             |_env, bump| {
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I64(0)))
             },
         );
@@ -2702,7 +2643,7 @@ impl OptimizeInstructions {
                 Pattern::Const(Literal::I64(1)),
             ),
             |_env, bump| {
-                let builder = IrBuilder::new(bump);
+                let mut builder = IrBuilder::new(bump);
                 Some(builder.const_(Literal::I64(0)))
             },
         );
@@ -2713,15 +2654,12 @@ impl OptimizeInstructions {
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
                 let c = env.get("c")?;
-                if let ExpressionKind::Const(Literal::I32(val)) = c.kind {
+                if let ExpressionKind::Const(Literal::I32(val)) = bump[*c].kind {
                     if val > 0 && (val & (val - 1)) == 0 {
                         let k = val.trailing_zeros();
-                        let builder = IrBuilder::new(bump);
+                        let mut builder = IrBuilder::new(bump);
                         let shift_amt = builder.const_(Literal::I32(k as i32));
-                        // Clone x because we can't move out of env (shared ref) and can't easily deep clone without more work.
-                        // But wait, Expression is in arena. We can just point to it?
-                        // IrBuilder takes ExprRef which is Copy.
-                        // But x is &ExprRef. *x is ExprRef.
+                        // x is already in arena. We can just point to it.
                         return Some(builder.binary(BinaryOp::ShlInt32, *x, shift_amt, Type::I32));
                     }
                 }
@@ -2735,10 +2673,10 @@ impl OptimizeInstructions {
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
                 let c = env.get("c")?;
-                if let ExpressionKind::Const(Literal::I32(val)) = c.kind {
+                if let ExpressionKind::Const(Literal::I32(val)) = bump[*c].kind {
                     if val > 0 && (val & (val - 1)) == 0 {
                         let k = val.trailing_zeros();
-                        let builder = IrBuilder::new(bump);
+                        let mut builder = IrBuilder::new(bump);
                         let shift_amt = builder.const_(Literal::I32(k as i32));
                         return Some(builder.binary(BinaryOp::ShrUInt32, *x, shift_amt, Type::I32));
                     }
@@ -2753,10 +2691,10 @@ impl OptimizeInstructions {
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
                 let c = env.get("c")?;
-                if let ExpressionKind::Const(Literal::I32(val)) = c.kind {
+                if let ExpressionKind::Const(Literal::I32(val)) = bump[*c].kind {
                     if val > 0 && (val & (val - 1)) == 0 {
                         let mask = val - 1;
-                        let builder = IrBuilder::new(bump);
+                        let mut builder = IrBuilder::new(bump);
                         let mask_const = builder.const_(Literal::I32(mask));
                         return Some(builder.binary(BinaryOp::AndInt32, *x, mask_const, Type::I32));
                     }
@@ -2773,10 +2711,10 @@ impl OptimizeInstructions {
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
                 let c = env.get("c")?;
-                if let ExpressionKind::Const(Literal::I64(val)) = c.kind {
+                if let ExpressionKind::Const(Literal::I64(val)) = bump[*c].kind {
                     if val > 0 && (val & (val - 1)) == 0 {
                         let k = val.trailing_zeros();
-                        let builder = IrBuilder::new(bump);
+                        let mut builder = IrBuilder::new(bump);
                         let shift_amt = builder.const_(Literal::I64(k as i64));
                         return Some(builder.binary(BinaryOp::ShlInt64, *x, shift_amt, Type::I64));
                     }
@@ -2791,10 +2729,10 @@ impl OptimizeInstructions {
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
                 let c = env.get("c")?;
-                if let ExpressionKind::Const(Literal::I64(val)) = c.kind {
+                if let ExpressionKind::Const(Literal::I64(val)) = bump[*c].kind {
                     if val > 0 && (val & (val - 1)) == 0 {
                         let k = val.trailing_zeros();
-                        let builder = IrBuilder::new(bump);
+                        let mut builder = IrBuilder::new(bump);
                         let shift_amt = builder.const_(Literal::I64(k as i64));
                         return Some(builder.binary(BinaryOp::ShrUInt64, *x, shift_amt, Type::I64));
                     }
@@ -2809,10 +2747,10 @@ impl OptimizeInstructions {
             |env: &MatchEnv, bump| {
                 let x = env.get("x")?;
                 let c = env.get("c")?;
-                if let ExpressionKind::Const(Literal::I64(val)) = c.kind {
+                if let ExpressionKind::Const(Literal::I64(val)) = bump[*c].kind {
                     if val > 0 && (val & (val - 1)) == 0 {
                         let mask = val - 1;
-                        let builder = IrBuilder::new(bump);
+                        let mut builder = IrBuilder::new(bump);
                         let mask_const = builder.const_(Literal::I64(mask));
                         return Some(builder.binary(BinaryOp::AndInt64, *x, mask_const, Type::I64));
                     }
@@ -2828,41 +2766,40 @@ impl Pass for OptimizeInstructions {
         "optimize-instructions"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &self.matcher,
-            allocator: module.allocator,
         };
 
-        for (_, func) in &mut module.functions {
+        for (_, func) in functions {
             if let Some(body) = func.body_mut() {
-                visitor.visit(body);
+                visitor.visit(body, arena);
             }
         }
     }
 }
 
-struct OptimizeInstructionsVisitor<'a, 'b> {
+struct OptimizeInstructionsVisitor<'b> {
     matcher: &'b PatternMatcher,
-    allocator: &'a bumpalo::Bump,
 }
 
-impl<'a, 'b> Visitor<'a> for OptimizeInstructionsVisitor<'a, 'b> {
-    fn visit(&mut self, expr: &mut ExprRef<'a>) {
+impl<'b> Visitor for OptimizeInstructionsVisitor<'b> {
+    fn visit(
+        &mut self,
+        expr: &mut ExpressionId,
+        arena: &mut crate::collections::id_arena::IdArena<ExpressionMarker, Expression>,
+    ) {
         // Bottom-up traversal: simplify children first
-        self.visit_children(expr);
+        self.visit_children(expr, arena);
 
         // Try to simplify current expression repeatedly until no more simplifications are found
         let mut iterations = 0;
         const MAX_ITERATIONS: usize = 10;
 
         while iterations < MAX_ITERATIONS {
-            // println!("Simplifying: {:?}", expr.kind);
-            if let Some(new_expr) = self.matcher.simplify(*expr, self.allocator) {
-                // println!("  -> Simplified to: {:?}", new_expr.kind);
+            if let Some(new_expr) = self.matcher.simplify(*expr, arena) {
                 *expr = new_expr;
-                expr.finalize(); // Recompute type
-
                 iterations += 1;
             } else {
                 break;
@@ -2874,233 +2811,239 @@ impl<'a, 'b> Visitor<'a> for OptimizeInstructionsVisitor<'a, 'b> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collections::id_arena::IdArena;
     use crate::ir::expression::{ExpressionKind, IrBuilder};
     use crate::ir::{Literal, LocalId, Type};
-    use bumpalo::Bump;
 
     #[test]
     fn test_optimize_add_zero() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // (local.get 0) + 0
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let zero = builder.const_(Literal::I32(0));
-        let add = builder.binary(BinaryOp::AddInt32, x, zero, Type::I32);
+        let mut arena = IdArena::new();
+        let add = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // (local.get 0) + 0
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let zero = builder.const_(Literal::I32(0));
+            builder.binary(BinaryOp::AddInt32, x, zero, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = add;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
         // Should be replaced by local.get 0
         assert!(matches!(
-            expr_ref.kind,
+            arena[expr_ref].kind,
             ExpressionKind::LocalGet { id, .. } if id.index() == 0
         ));
     }
 
     #[test]
     fn test_optimize_mul_one() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // 1 * (local.get 0)
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let one = builder.const_(Literal::I32(1));
-        let mul = builder.binary(BinaryOp::MulInt32, one, x, Type::I32);
+        let mut arena = IdArena::new();
+        let mul = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // 1 * (local.get 0)
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let one = builder.const_(Literal::I32(1));
+            builder.binary(BinaryOp::MulInt32, one, x, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = mul;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
         assert!(matches!(
-            expr_ref.kind,
+            arena[expr_ref].kind,
             ExpressionKind::LocalGet { id, .. } if id.index() == 0
         ));
     }
 
     #[test]
     fn test_optimize_mul_zero() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // x * 0 -> 0
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let zero = builder.const_(Literal::I32(0));
-        let mul = builder.binary(BinaryOp::MulInt32, x, zero, Type::I32);
+        let mut arena = IdArena::new();
+        let (mul, mul_rev) = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // x * 0 -> 0
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let zero = builder.const_(Literal::I32(0));
+            let mul = builder.binary(BinaryOp::MulInt32, x, zero, Type::I32);
+            // 0 * x -> 0
+            let mul_rev = builder.binary(BinaryOp::MulInt32, zero, x, Type::I32);
+            (mul, mul_rev)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = mul;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
         assert!(matches!(
-            expr_ref.kind,
+            arena[expr_ref].kind,
             ExpressionKind::Const(Literal::I32(0))
         ));
 
-        // 0 * x -> 0
-        let mul_rev = builder.binary(BinaryOp::MulInt32, zero, x, Type::I32);
         let mut expr_ref_rev = mul_rev;
-        visitor.visit(&mut expr_ref_rev);
+        visitor.visit(&mut expr_ref_rev, &mut arena);
 
         assert!(matches!(
-            expr_ref_rev.kind,
+            arena[expr_ref_rev].kind,
             ExpressionKind::Const(Literal::I32(0))
         ));
     }
 
     #[test]
     fn test_optimize_and_zero() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // x & 0 -> 0
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let zero = builder.const_(Literal::I32(0));
-        let and = builder.binary(BinaryOp::AndInt32, x, zero, Type::I32);
+        let mut arena = IdArena::new();
+        let (and, and_rev) = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // x & 0 -> 0
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let zero = builder.const_(Literal::I32(0));
+            let and = builder.binary(BinaryOp::AndInt32, x, zero, Type::I32);
+            // 0 & x -> 0
+            let and_rev = builder.binary(BinaryOp::AndInt32, zero, x, Type::I32);
+            (and, and_rev)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = and;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
         assert!(matches!(
-            expr_ref.kind,
+            arena[expr_ref].kind,
             ExpressionKind::Const(Literal::I32(0))
         ));
 
-        // 0 & x -> 0
-        let and_rev = builder.binary(BinaryOp::AndInt32, zero, x, Type::I32);
         let mut expr_ref_rev = and_rev;
-        visitor.visit(&mut expr_ref_rev);
+        visitor.visit(&mut expr_ref_rev, &mut arena);
 
         assert!(matches!(
-            expr_ref_rev.kind,
+            arena[expr_ref_rev].kind,
             ExpressionKind::Const(Literal::I32(0))
         ));
     }
 
     #[test]
     fn test_optimize_or_self() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // x | x -> x
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let or = builder.binary(BinaryOp::OrInt32, x, x, Type::I32);
+        let mut arena = IdArena::new();
+        let or = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // x | x -> x
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            builder.binary(BinaryOp::OrInt32, x, x, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = or;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
         assert!(matches!(
-            expr_ref.kind,
+            arena[expr_ref].kind,
             ExpressionKind::LocalGet { id, .. } if id.index() == 0
         ));
     }
 
     #[test]
     fn test_optimize_xor_self() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // x ^ x -> 0
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let xor = builder.binary(BinaryOp::XorInt32, x, x, Type::I32);
+        let mut arena = IdArena::new();
+        let xor = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // x ^ x -> 0
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            builder.binary(BinaryOp::XorInt32, x, x, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = xor;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
         assert!(matches!(
-            expr_ref.kind,
+            arena[expr_ref].kind,
             ExpressionKind::Const(Literal::I32(0))
         ));
     }
 
     #[test]
     fn test_optimize_double_negation() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // !!x -> x != 0
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let neg1 = builder.unary(UnaryOp::EqZInt32, x, Type::I32);
-        let neg2 = builder.unary(UnaryOp::EqZInt32, neg1, Type::I32);
+        let mut arena = IdArena::new();
+        let neg2 = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // !!x -> x != 0
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let neg1 = builder.unary(UnaryOp::EqZInt32, x, Type::I32);
+            builder.unary(UnaryOp::EqZInt32, neg1, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = neg2;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, right, .. } = &expr_ref.kind {
+        if let ExpressionKind::Binary { op, right, .. } = &arena[expr_ref].kind {
             assert_eq!(*op, BinaryOp::NeInt32);
-            assert!(matches!(right.kind, ExpressionKind::Const(Literal::I32(0))));
+            assert!(matches!(
+                arena[*right].kind,
+                ExpressionKind::Const(Literal::I32(0))
+            ));
         } else {
-            panic!("Expected x != 0, got {:?}", expr_ref.kind);
+            panic!("Expected x != 0, got {:?}", arena[expr_ref].kind);
         }
     }
 
     #[test]
     fn test_optimize_commutative_add() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let add = {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // 10 + x -> x + 10
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let c10 = builder.const_(Literal::I32(10));
-        let add = builder.binary(BinaryOp::AddInt32, c10, x, Type::I32);
+            // 10 + x -> x + 10
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let c10 = builder.const_(Literal::I32(10));
+            builder.binary(BinaryOp::AddInt32, c10, x, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = add;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::AddInt32);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I32(10))
             ));
         } else {
@@ -3110,31 +3053,32 @@ mod tests {
 
     #[test]
     fn test_optimize_commutative_mul() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mul = {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // 10 * x -> x * 10
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let c10 = builder.const_(Literal::I32(10));
-        let mul = builder.binary(BinaryOp::MulInt32, c10, x, Type::I32);
+            // 10 * x -> x * 10
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let c10 = builder.const_(Literal::I32(10));
+            builder.binary(BinaryOp::MulInt32, c10, x, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = mul;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::MulInt32);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I32(10))
             ));
         } else {
@@ -3144,31 +3088,32 @@ mod tests {
 
     #[test]
     fn test_optimize_commutative_and() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let and = {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // 10 & x -> x & 10
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let c10 = builder.const_(Literal::I32(10));
-        let and = builder.binary(BinaryOp::AndInt32, c10, x, Type::I32);
+            // 10 & x -> x & 10
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let c10 = builder.const_(Literal::I32(10));
+            builder.binary(BinaryOp::AndInt32, c10, x, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = and;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::AndInt32);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I32(10))
             ));
         } else {
@@ -3178,31 +3123,32 @@ mod tests {
 
     #[test]
     fn test_optimize_commutative_or() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let or = {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // 10 | x -> x | 10
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let c10 = builder.const_(Literal::I32(10));
-        let or = builder.binary(BinaryOp::OrInt32, c10, x, Type::I32);
+            // 10 | x -> x | 10
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let c10 = builder.const_(Literal::I32(10));
+            builder.binary(BinaryOp::OrInt32, c10, x, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = or;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::OrInt32);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I32(10))
             ));
         } else {
@@ -3212,31 +3158,32 @@ mod tests {
 
     #[test]
     fn test_optimize_commutative_xor() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let xor = {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // 10 ^ x -> x ^ 10
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let c10 = builder.const_(Literal::I32(10));
-        let xor = builder.binary(BinaryOp::XorInt32, c10, x, Type::I32);
+            // 10 ^ x -> x ^ 10
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let c10 = builder.const_(Literal::I32(10));
+            builder.binary(BinaryOp::XorInt32, c10, x, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = xor;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::XorInt32);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I32(10))
             ));
         } else {
@@ -3246,31 +3193,32 @@ mod tests {
 
     #[test]
     fn test_optimize_commutative_eq() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let eq = {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // 10 == x -> x == 10
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let c10 = builder.const_(Literal::I32(10));
-        let eq = builder.binary(BinaryOp::EqInt32, c10, x, Type::I32);
+            // 10 == x -> x == 10
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let c10 = builder.const_(Literal::I32(10));
+            builder.binary(BinaryOp::EqInt32, c10, x, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = eq;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::EqInt32);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I32(10))
             ));
         } else {
@@ -3280,31 +3228,32 @@ mod tests {
 
     #[test]
     fn test_optimize_commutative_ne() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let ne = {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // 10 != x -> x != 10
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let c10 = builder.const_(Literal::I32(10));
-        let ne = builder.binary(BinaryOp::NeInt32, c10, x, Type::I32);
+            // 10 != x -> x != 10
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let c10 = builder.const_(Literal::I32(10));
+            builder.binary(BinaryOp::NeInt32, c10, x, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = ne;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::NeInt32);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I32(10))
             ));
         } else {
@@ -3314,31 +3263,32 @@ mod tests {
 
     #[test]
     fn test_optimize_commutative_add_i64() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let add = {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // 10L + x -> x + 10L
-        let x = builder.local_get(LocalId::from(0), Type::I64);
-        let c10 = builder.const_(Literal::I64(10));
-        let add = builder.binary(BinaryOp::AddInt64, c10, x, Type::I64);
+            // 10L + x -> x + 10L
+            let x = builder.local_get(LocalId::from(0), Type::I64);
+            let c10 = builder.const_(Literal::I64(10));
+            builder.binary(BinaryOp::AddInt64, c10, x, Type::I64)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = add;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::AddInt64);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I64(10))
             ));
         } else {
@@ -3348,31 +3298,32 @@ mod tests {
 
     #[test]
     fn test_optimize_commutative_mul_i64() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mul = {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // 10L * x -> x * 10L
-        let x = builder.local_get(LocalId::from(0), Type::I64);
-        let c10 = builder.const_(Literal::I64(10));
-        let mul = builder.binary(BinaryOp::MulInt64, c10, x, Type::I64);
+            // 10L * x -> x * 10L
+            let x = builder.local_get(LocalId::from(0), Type::I64);
+            let c10 = builder.const_(Literal::I64(10));
+            builder.binary(BinaryOp::MulInt64, c10, x, Type::I64)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = mul;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::MulInt64);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I64(10))
             ));
         } else {
@@ -3382,31 +3333,32 @@ mod tests {
 
     #[test]
     fn test_optimize_commutative_and_i64() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let and = {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // 10L & x -> x & 10L
-        let x = builder.local_get(LocalId::from(0), Type::I64);
-        let c10 = builder.const_(Literal::I64(10));
-        let and = builder.binary(BinaryOp::AndInt64, c10, x, Type::I64);
+            // 10L & x -> x & 10L
+            let x = builder.local_get(LocalId::from(0), Type::I64);
+            let c10 = builder.const_(Literal::I64(10));
+            builder.binary(BinaryOp::AndInt64, c10, x, Type::I64)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = and;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::AndInt64);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I64(10))
             ));
         } else {
@@ -3416,31 +3368,32 @@ mod tests {
 
     #[test]
     fn test_optimize_commutative_or_i64() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let or = {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // 10L | x -> x | 10L
-        let x = builder.local_get(LocalId::from(0), Type::I64);
-        let c10 = builder.const_(Literal::I64(10));
-        let or = builder.binary(BinaryOp::OrInt64, c10, x, Type::I64);
+            // 10L | x -> x | 10L
+            let x = builder.local_get(LocalId::from(0), Type::I64);
+            let c10 = builder.const_(Literal::I64(10));
+            builder.binary(BinaryOp::OrInt64, c10, x, Type::I64)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = or;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::OrInt64);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I64(10))
             ));
         } else {
@@ -3450,31 +3403,32 @@ mod tests {
 
     #[test]
     fn test_optimize_commutative_xor_i64() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let xor = {
+            let mut builder = IrBuilder::new(&mut arena);
 
-        // 10L ^ x -> x ^ 10L
-        let x = builder.local_get(LocalId::from(0), Type::I64);
-        let c10 = builder.const_(Literal::I64(10));
-        let xor = builder.binary(BinaryOp::XorInt64, c10, x, Type::I64);
+            // 10L ^ x -> x ^ 10L
+            let x = builder.local_get(LocalId::from(0), Type::I64);
+            let c10 = builder.const_(Literal::I64(10));
+            builder.binary(BinaryOp::XorInt64, c10, x, Type::I64)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = xor;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::XorInt64);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I64(10))
             ));
         } else {
@@ -3484,31 +3438,31 @@ mod tests {
 
     #[test]
     fn test_optimize_commutative_eq_i64() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // 10L == x -> x == 10L
-        let x = builder.local_get(LocalId::from(0), Type::I64);
-        let c10 = builder.const_(Literal::I64(10));
-        let eq = builder.binary(BinaryOp::EqInt64, c10, x, Type::I64);
+        let mut arena = IdArena::new();
+        let eq = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // 10L == x -> x == 10L
+            let x = builder.local_get(LocalId::from(0), Type::I64);
+            let c10 = builder.const_(Literal::I64(10));
+            builder.binary(BinaryOp::EqInt64, c10, x, Type::I64)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = eq;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::EqInt64);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I64(10))
             ));
         } else {
@@ -3518,31 +3472,31 @@ mod tests {
 
     #[test]
     fn test_optimize_commutative_ne_i64() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // 10L != x -> x != 10L
-        let x = builder.local_get(LocalId::from(0), Type::I64);
-        let c10 = builder.const_(Literal::I64(10));
-        let ne = builder.binary(BinaryOp::NeInt64, c10, x, Type::I64);
+        let mut arena = IdArena::new();
+        let ne = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // 10L != x -> x != 10L
+            let x = builder.local_get(LocalId::from(0), Type::I64);
+            let c10 = builder.const_(Literal::I64(10));
+            builder.binary(BinaryOp::NeInt64, c10, x, Type::I64)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = ne;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::NeInt64);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I64(10))
             ));
         } else {
@@ -3552,47 +3506,47 @@ mod tests {
 
     #[test]
     fn test_optimize_sub_zero_i64() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // x - 0 -> x
-        let x = builder.local_get(LocalId::from(0), Type::I64);
-        let zero = builder.const_(Literal::I64(0));
-        let sub = builder.binary(BinaryOp::SubInt64, x, zero, Type::I64);
+        let mut arena = IdArena::new();
+        let sub = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // x - 0 -> x
+            let x = builder.local_get(LocalId::from(0), Type::I64);
+            let zero = builder.const_(Literal::I64(0));
+            builder.binary(BinaryOp::SubInt64, x, zero, Type::I64)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = sub;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
         assert!(matches!(
-            expr_ref.kind,
+            arena[expr_ref].kind,
             ExpressionKind::LocalGet { id, .. } if id.index() == 0
         ));
     }
 
     #[test]
     fn test_optimize_f32_add_nan() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // nan + 1.0 -> should not fold to a constant normally if we want to preserve NaN properties or if the pass avoids folding NaNs
-        let nan = builder.const_(Literal::F32(f32::NAN));
-        let one = builder.const_(Literal::F32(1.0));
-        let add = builder.binary(BinaryOp::AddFloat32, nan, one, Type::F32);
+        let mut arena = IdArena::new();
+        let add = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // nan + 1.0 -> should not fold to a constant normally if we want to preserve NaN properties or if the pass avoids folding NaNs
+            let nan = builder.const_(Literal::F32(f32::NAN));
+            let one = builder.const_(Literal::F32(1.0));
+            builder.binary(BinaryOp::AddFloat32, nan, one, Type::F32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = add;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
         // Based on eval_binary_op, and the fact that 1.0 is not captured by Identities (only 0.0 for add)
         // Const folding rule: Pattern::binary(PatternOp::AnyOp, Pattern::AnyConst, Pattern::AnyConst)
@@ -3603,31 +3557,33 @@ mod tests {
         // AddFloat32 => Some(Literal::F32(left.get_f32() + right.get_f32())),
         // So it folds it to a NaN constant.
 
-        assert!(matches!(expr_ref.kind, ExpressionKind::Const(Literal::F32(v)) if v.is_nan()));
+        assert!(
+            matches!(arena[expr_ref].kind, ExpressionKind::Const(Literal::F32(v)) if v.is_nan())
+        );
     }
 
     #[test]
     fn test_optimize_f32_div_zero() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // 1.0 / 0.0 -> should return None in eval_binary_op and not fold
-        let one = builder.const_(Literal::F32(1.0));
-        let zero = builder.const_(Literal::F32(0.0));
-        let div = builder.binary(BinaryOp::DivFloat32, one, zero, Type::F32);
+        let mut arena = IdArena::new();
+        let div = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // 1.0 / 0.0 -> should return None in eval_binary_op and not fold
+            let one = builder.const_(Literal::F32(1.0));
+            let zero = builder.const_(Literal::F32(0.0));
+            builder.binary(BinaryOp::DivFloat32, one, zero, Type::F32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = div;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
         // Should NOT be folded
         assert!(matches!(
-            expr_ref.kind,
+            arena[expr_ref].kind,
             ExpressionKind::Binary {
                 op: BinaryOp::DivFloat32,
                 ..
@@ -3637,26 +3593,29 @@ mod tests {
 
     #[test]
     fn test_optimize_strength_reduction_mul() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // x * 4 -> x << 2
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let c4 = builder.const_(Literal::I32(4));
-        let mul = builder.binary(BinaryOp::MulInt32, x, c4, Type::I32);
+        let mut arena = IdArena::new();
+        let mul = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // x * 4 -> x << 2
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let c4 = builder.const_(Literal::I32(4));
+            builder.binary(BinaryOp::MulInt32, x, c4, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = mul;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left: _, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left: _, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::ShlInt32);
-            assert!(matches!(right.kind, ExpressionKind::Const(Literal::I32(2))));
+            assert!(matches!(
+                arena[right].kind,
+                ExpressionKind::Const(Literal::I32(2))
+            ));
         } else {
             panic!("Expected shift left for multiplication by power of 2");
         }
@@ -3664,25 +3623,25 @@ mod tests {
 
     #[test]
     fn test_optimize_comparison_eqz() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // x == 0 -> eqz(x)
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let zero = builder.const_(Literal::I32(0));
-        let eq = builder.binary(BinaryOp::EqInt32, x, zero, Type::I32);
+        let mut arena = IdArena::new();
+        let eq = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // x == 0 -> eqz(x)
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let zero = builder.const_(Literal::I32(0));
+            builder.binary(BinaryOp::EqInt32, x, zero, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = eq;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
         assert!(matches!(
-            expr_ref.kind,
+            arena[expr_ref].kind,
             ExpressionKind::Unary {
                 op: UnaryOp::EqZInt32,
                 ..
@@ -3692,33 +3651,33 @@ mod tests {
 
     #[test]
     fn test_optimize_reassociation() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // (x + 10) + 20 -> x + 30
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let c10 = builder.const_(Literal::I32(10));
-        let c20 = builder.const_(Literal::I32(20));
-        let inner_add = builder.binary(BinaryOp::AddInt32, x, c10, Type::I32);
-        let outer_add = builder.binary(BinaryOp::AddInt32, inner_add, c20, Type::I32);
+        let mut arena = IdArena::new();
+        let outer_add = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // (x + 10) + 20 -> x + 30
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let c10 = builder.const_(Literal::I32(10));
+            let c20 = builder.const_(Literal::I32(20));
+            let inner_add = builder.binary(BinaryOp::AddInt32, x, c10, Type::I32);
+            builder.binary(BinaryOp::AddInt32, inner_add, c20, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = outer_add;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::AddInt32);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
             assert!(matches!(
-                right.kind,
+                arena[right].kind,
                 ExpressionKind::Const(Literal::I32(30))
             ));
         } else {
@@ -3728,32 +3687,35 @@ mod tests {
 
     #[test]
     fn test_optimize_shift_chaining() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-
-        // (x << 2) << 3 -> x << 5
-        let x = builder.local_get(LocalId::from(0), Type::I32);
-        let c2 = builder.const_(Literal::I32(2));
-        let c3 = builder.const_(Literal::I32(3));
-        let inner_shl = builder.binary(BinaryOp::ShlInt32, x, c2, Type::I32);
-        let outer_shl = builder.binary(BinaryOp::ShlInt32, inner_shl, c3, Type::I32);
+        let mut arena = IdArena::new();
+        let outer_shl = {
+            let mut builder = IrBuilder::new(&mut arena);
+            // (x << 2) << 3 -> x << 5
+            let x = builder.local_get(LocalId::from(0), Type::I32);
+            let c2 = builder.const_(Literal::I32(2));
+            let c3 = builder.const_(Literal::I32(3));
+            let inner_shl = builder.binary(BinaryOp::ShlInt32, x, c2, Type::I32);
+            builder.binary(BinaryOp::ShlInt32, inner_shl, c3, Type::I32)
+        };
 
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = outer_shl;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
-        if let ExpressionKind::Binary { op, left, right } = expr_ref.kind {
+        if let ExpressionKind::Binary { op, left, right } = arena[expr_ref].kind {
             assert_eq!(op, BinaryOp::ShlInt32);
             assert!(matches!(
-                left.kind,
+                arena[left].kind,
                 ExpressionKind::LocalGet { id, .. } if id.index() == 0
             ));
-            assert!(matches!(right.kind, ExpressionKind::Const(Literal::I32(5))));
+            assert!(matches!(
+                arena[right].kind,
+                ExpressionKind::Const(Literal::I32(5))
+            ));
         } else {
             panic!("Expected chained shift (x << 5)");
         }
@@ -3761,8 +3723,8 @@ mod tests {
 
     #[test]
     fn test_optimize_self_sub() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut arena = IdArena::new();
+        let mut builder = IrBuilder::new(&mut arena);
 
         // x - x -> 0
         let x = builder.local_get(LocalId::from(0), Type::I32);
@@ -3771,14 +3733,13 @@ mod tests {
         let pass = OptimizeInstructions::new();
         let mut visitor = OptimizeInstructionsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
         let mut expr_ref = sub;
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_ref, &mut arena);
 
         assert!(matches!(
-            expr_ref.kind,
+            arena[expr_ref].kind,
             ExpressionKind::Const(Literal::I32(0))
         ));
     }

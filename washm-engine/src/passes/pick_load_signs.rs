@@ -1,4 +1,5 @@
-use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::Module;
 use crate::ir::ops::BinaryOp;
 use crate::ir::visitor::Visitor;
@@ -16,26 +17,25 @@ impl Pass for PickLoadSigns {
         "pick-load-signs"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
-        let allocator = module.allocator;
-        for (_, func) in &mut module.functions {
+    fn run(&mut self, module: &mut Module) {
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        for (_, func) in functions {
             if let Some(body) = func.body_mut() {
-                let mut picker = LoadSignPicker {
-                    builder: IrBuilder::new(allocator),
-                };
-                picker.visit(body);
+                let mut picker = LoadSignPicker;
+                picker.visit(body, arena);
             }
         }
     }
 }
 
-#[allow(dead_code)]
-struct LoadSignPicker<'a> {
-    builder: IrBuilder<'a>,
-}
+struct LoadSignPicker;
 
-impl<'a> Visitor<'a> for LoadSignPicker<'a> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
+impl Visitor for LoadSignPicker {
+    fn visit_expression(
+        &mut self,
+        expr: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
         // Optimization: (i32.load8_s ...) & 0xFF -> i32.load8_u ...
         // Optimization: (i32.load16_s ...) & 0xFFFF -> i32.load16_u ...
 
@@ -46,16 +46,17 @@ impl<'a> Visitor<'a> for LoadSignPicker<'a> {
             left,
             right,
             ..
-        } = &mut expr.kind
+        } = &arena[*expr].kind
         {
-            if let ExpressionKind::Const(Literal::I32(mask)) = right.kind {
-                if let ExpressionKind::Load { bytes, signed, .. } = &mut left.kind {
+            let left_id = *left;
+            let right_id = *right;
+
+            if let ExpressionKind::Const(Literal::I32(mask)) = arena[right_id].kind {
+                if let ExpressionKind::Load { bytes, signed, .. } = &mut arena[left_id].kind {
                     if *signed && ((*bytes == 1 && mask == 0xFF) || (*bytes == 2 && mask == 0xFFFF))
                     {
                         *signed = false;
-                        // We capture the modified *left (which is an ExprRef).
-                        // This ExprRef points to the Load expression (which we just modified in place).
-                        replacement = Some(*left);
+                        replacement = Some(left_id);
                     }
                 }
             }
@@ -65,51 +66,58 @@ impl<'a> Visitor<'a> for LoadSignPicker<'a> {
             *expr = new_expr;
         }
 
-        self.visit_children(expr);
+        self.visit_children(expr, arena);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::expression::ExpressionKind;
+    use crate::ir::expression::{ExpressionKind, IrBuilder};
     use crate::ir::module::Function;
     use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
 
     #[test]
     fn test_pick_load_signs_optimization() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
-        let mem_id = module.add_memory(crate::ir::module::Memory {
-            name: "mem".to_string(),
-            limits: crate::ir::module::MemoryLimits {
-                initial: 1,
-                maximum: None,
-            },
-            kind: crate::ir::module::MemoryKind::Local,
-        });
+        let mem_id = module
+            .memories
+            .alloc(crate::ir::module::Memory {
+                name: "mem".to_string(),
+                limits: crate::ir::module::MemoryLimits {
+                    initial: 1,
+                    maximum: None,
+                },
+                kind: crate::ir::module::MemoryKind::Local,
+            })
+            .cast();
 
         // (i32.load8_s (i32.const 0)) & 0xFF
+        let mut builder = IrBuilder::new(&mut module.expressions);
         let ptr = builder.const_(Literal::I32(0));
         let load = builder.load(mem_id, 1, true, 0, 1, ptr, Type::I32);
         let mask = builder.const_(Literal::I32(0xFF));
         let and = builder.binary(BinaryOp::AndInt32, load, mask, Type::I32);
 
-        let func = Function::new("test".to_string(), Type::NONE, Type::I32, vec![], Some(and));
+        let func = Function::new("test".to_string(), Type::NONE, Type::I32, vec![], and);
         let test_id = module.add_function(func);
 
         let mut pass = PickLoadSigns;
         pass.run(&mut module);
 
-        let body = module.functions[test_id].body().unwrap();
+        let body_id = module
+            .functions
+            .get(test_id.cast())
+            .unwrap()
+            .body()
+            .unwrap();
+        let body = &module.expressions[body_id];
 
         // Should be just Load8U
-        match body.kind {
+        match &body.kind {
             ExpressionKind::Load { bytes, signed, .. } => {
-                assert_eq!(bytes, 1);
+                assert_eq!(*bytes, 1);
                 assert!(!signed); // Changed to unsigned
             }
             ExpressionKind::Binary { .. } => {

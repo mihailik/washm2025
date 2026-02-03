@@ -1,10 +1,13 @@
-use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
-use crate::ir::module::Module;
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{
+    Expression, ExpressionId, ExpressionKind, ExpressionMarker, IrBuilder,
+};
+use crate::ir::module::{Function, Module};
 use crate::ir::visitor::Visitor;
-use crate::ir::{Literal, Type};
+use crate::ir::{Literal, LocalId, Type};
 use crate::passes::Pass;
-use bumpalo::collections::Vec as BumpVec;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 /// ConstHoisting pass: Move repeated constants to locals to reduce code size
 ///
@@ -18,15 +21,13 @@ impl Pass for ConstHoisting {
         "const-hoisting"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
-        let allocator = module.allocator;
-        for (_, func) in &mut module.functions {
-            Self::process_function(func, allocator);
+    fn run(&mut self, module: &mut Module) {
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        for (_, func) in functions {
+            Self::process_function(func, arena);
         }
     }
 }
-
-use std::hash::{Hash, Hasher};
 
 /// Wrapper for Literal to support Hash/Eq for use in HashMap
 #[derive(Debug, Clone)]
@@ -68,17 +69,14 @@ impl Hash for HashableLiteral {
 }
 
 impl ConstHoisting {
-    fn process_function<'a>(
-        func: &mut crate::ir::module::Function<'a>,
-        allocator: &'a bumpalo::Bump,
-    ) {
+    fn process_function(func: &mut Function, arena: &mut IdArena<ExpressionMarker, Expression>) {
         let mut lit_to_local = HashMap::new();
         let mut candidates = Vec::new();
 
-        let counts = if let Some(body) = func.body_mut() {
+        let counts = if let Some(body_id) = func.body_mut() {
             // 1. Scan
             let mut scanner = ConstScanner::new();
-            scanner.visit(body);
+            scanner.visit(body_id, arena);
             scanner.counts
         } else {
             return;
@@ -106,28 +104,30 @@ impl ConstHoisting {
             return;
         }
 
-        if let Some(body) = func.body_mut() {
+        if let Some(body_id) = func.body_mut() {
             // 3. Rewrite body
-            let builder = IrBuilder::new(allocator);
-            let mut rewriter = ConstRewriter {
-                lit_to_local: &lit_to_local,
-                builder,
-                replaced_count: 0,
-            };
-            rewriter.visit(body);
+            {
+                let mut rewriter = ConstRewriter {
+                    lit_to_local: &lit_to_local,
+                };
+                rewriter.visit(body_id, arena);
+            }
 
             // 4. Prepend initialization
-            let mut new_list = BumpVec::new_in(allocator);
+            let mut builder = IrBuilder::new(arena);
+            let mut new_list = Vec::new();
             for (lit, _, local_id) in candidates {
                 let const_expr = builder.const_(lit);
                 let set_expr = builder.local_set(local_id, const_expr);
                 new_list.push(set_expr);
             }
 
-            new_list.push(*body);
+            let body = *body_id;
+            new_list.push(body);
 
-            let new_block = builder.block(None, new_list, body.type_);
-            *body = new_block;
+            let old_ty = builder.arena[body].type_;
+            let new_block = builder.block("", new_list, old_ty);
+            *body_id = new_block;
         }
     }
 }
@@ -144,27 +144,33 @@ impl ConstScanner {
     }
 }
 
-impl<'a> Visitor<'a> for ConstScanner {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if let ExpressionKind::Const(lit) = &expr.kind {
+impl Visitor for ConstScanner {
+    fn visit_expression(
+        &mut self,
+        expr_id: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        if let ExpressionKind::Const(lit) = &arena[*expr_id].kind {
             *self.counts.entry(HashableLiteral(*lit)).or_insert(0) += 1;
         }
-        self.visit_children(expr);
+        self.visit_children(expr_id, arena);
     }
 }
 
-struct ConstRewriter<'a, 'b> {
-    lit_to_local: &'b HashMap<HashableLiteral, crate::ir::LocalId>,
-    builder: IrBuilder<'a>,
-    replaced_count: usize,
+struct ConstRewriter<'a> {
+    lit_to_local: &'a HashMap<HashableLiteral, LocalId>,
 }
 
-impl<'a, 'b> Visitor<'a> for ConstRewriter<'a, 'b> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if let ExpressionKind::Const(lit) = &expr.kind {
+impl<'a> Visitor for ConstRewriter<'a> {
+    fn visit_expression(
+        &mut self,
+        expr_id: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        let mut replacement = None;
+        if let ExpressionKind::Const(lit) = &arena[*expr_id].kind {
             if let Some(&local_id) = self.lit_to_local.get(&HashableLiteral(*lit)) {
-                // Replace with local.get
-                // Type should match literal type
+                let lit = *lit;
                 let ty = match lit {
                     Literal::I32(_) => Type::I32,
                     Literal::I64(_) => Type::I64,
@@ -172,26 +178,29 @@ impl<'a, 'b> Visitor<'a> for ConstRewriter<'a, 'b> {
                     Literal::F64(_) => Type::F64,
                     _ => Type::NONE,
                 };
-                *expr = self.builder.local_get(local_id, ty);
-                self.replaced_count += 1;
+                replacement = Some((local_id, ty));
             }
         }
-        self.visit_children(expr);
+
+        if let Some((local_id, ty)) = replacement {
+            let mut builder = IrBuilder::new(arena);
+            *expr_id = builder.local_get(local_id, ty);
+            return; // Replaced, so no children to visit
+        }
+        self.visit_children(expr_id, arena);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::expression::ExpressionKind;
-    use crate::ir::module::Function;
     use crate::ir::ops::BinaryOp;
-    use bumpalo::Bump;
 
     #[test]
     fn test_const_hoisting_basic() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut module = Module::new();
+        let (expressions, _, _, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        let mut builder = IrBuilder::new(expressions);
 
         // (i32.add (i32.const 42) (i32.const 42))
         let c1 = builder.const_(Literal::I32(42));
@@ -203,13 +212,14 @@ mod tests {
             Type::NONE,
             Type::I32,
             vec![], // No params
-            Some(add),
+            add,
         );
 
         // Manually run process_function logic since Pass::run needs Module
-        ConstHoisting::process_function(&mut func, &bump);
+        ConstHoisting::process_function(&mut func, expressions);
 
-        let body = func.body().unwrap();
+        let body_id = func.body().unwrap();
+        let body = &expressions[body_id];
 
         // Expecting:
         // (block
@@ -221,10 +231,12 @@ mod tests {
             ExpressionKind::Block { list, .. } => {
                 assert_eq!(list.len(), 2);
                 // Check initialization
-                if let ExpressionKind::LocalSet { id, value } = &list[0].kind {
+                let init = &expressions[list[0]];
+                if let ExpressionKind::LocalSet { id, value } = &init.kind {
                     assert_eq!(id.index(), 0);
+                    let val_expr = &expressions[*value];
                     assert!(matches!(
-                        value.kind,
+                        val_expr.kind,
                         ExpressionKind::Const(Literal::I32(42))
                     ));
                 } else {
@@ -232,13 +244,16 @@ mod tests {
                 }
 
                 // Check body replacement
-                if let ExpressionKind::Binary { left, right, .. } = &list[1].kind {
-                    if let ExpressionKind::LocalGet { id, .. } = &left.kind {
+                let body_inner = &expressions[list[1]];
+                if let ExpressionKind::Binary { left, right, .. } = &body_inner.kind {
+                    let l_expr = &expressions[*left];
+                    if let ExpressionKind::LocalGet { id, .. } = &l_expr.kind {
                         assert_eq!(id.index(), 0);
                     } else {
                         panic!("Expected LocalGet for left");
                     }
-                    if let ExpressionKind::LocalGet { id, .. } = &right.kind {
+                    let r_expr = &expressions[*right];
+                    if let ExpressionKind::LocalGet { id, .. } = &r_expr.kind {
                         assert_eq!(id.index(), 0);
                     } else {
                         panic!("Expected LocalGet for right");
@@ -247,7 +262,7 @@ mod tests {
                     panic!("Expected Binary Add");
                 }
 
-                assert_eq!(func.locals().len() - func.num_params(), 1); // Added 1 local
+                assert_eq!(func.locals().len(), 1); // Added 1 local
             }
             _ => panic!("Expected Block wrapper"),
         }

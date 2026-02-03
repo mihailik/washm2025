@@ -3604,7 +3604,6 @@ dependencies = [
  "ahash",
  "anyhow",
  "bitflags 2.10.0",
- "bumpalo",
  "criterion",
  "env_logger",
  "getrandom",
@@ -3626,7 +3625,6 @@ name = "washm-opt"
 version = "0.4.0"
 dependencies = [
  "anyhow",
- "bumpalo",
  "clap 4.5.54",
  "washm",
  "wasmprinter",

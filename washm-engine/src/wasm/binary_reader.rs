@@ -1,18 +1,12 @@
-use crate::ir::expression::{ExprRef, Expression, ExpressionKind, IrBuilder};
+use crate::ir::expression::{ExpressionId, IrBuilder};
 use crate::ir::module::{
     DataSegment, ElementSegment, Export, ExportKind, Function, MemoryLimits, Module, TableLimits,
 };
 use crate::ir::{HeapType, Literal, Type};
-use bumpalo::collections::Vec as BumpVec;
-use bumpalo::Bump;
 use std::io;
-use wasmparser::{
-    BinaryReader as WasmBinaryReader, Operator, OperatorsReader, Parser, Payload, TypeRef, ValType,
-};
+use wasmparser::{Operator, OperatorsReader, Parser, Payload, TypeRef, ValType};
 
-pub struct BinaryReader<'a> {
-    bump: &'a Bump,
-    data: Vec<u8>,
+pub struct BinaryReader {
     types: Vec<(Vec<Type>, Vec<Type>)>,
     all_function_types: Vec<u32>,
     next_label_id: u32,
@@ -59,11 +53,9 @@ impl From<wasmparser::BinaryReaderError> for ParseError {
 
 type Result<T> = std::result::Result<T, ParseError>;
 
-impl<'a> BinaryReader<'a> {
-    pub fn new(bump: &'a Bump, data: Vec<u8>) -> Self {
+impl BinaryReader {
+    pub fn new() -> Self {
         Self {
-            bump,
-            data,
             types: Vec::new(),
             all_function_types: Vec::new(),
             next_label_id: 0,
@@ -78,11 +70,6 @@ impl<'a> BinaryReader<'a> {
             element_ids: Vec::new(),
             current_func_local_ids: Vec::new(),
         }
-    }
-
-    pub fn read_leb128_i32(&mut self) -> Result<i32> {
-        let mut reader = WasmBinaryReader::new(&self.data, 0);
-        Ok(reader.read_var_i32()?)
     }
 
     fn make_label_name(&mut self) -> String {
@@ -181,14 +168,13 @@ impl<'a> BinaryReader<'a> {
         }
     }
 
-    pub fn parse_module(&mut self) -> Result<Module<'a>> {
-        let mut module = Module::new(self.bump);
+    pub fn parse_module(&mut self, data: &[u8]) -> Result<Module> {
+        let mut module = Module::new();
         let mut function_section = Vec::new();
         let mut import_count = 0;
         let mut code_entry_count = 0;
 
-        let this = self as *mut Self;
-        for payload in Parser::new(0).parse_all(&self.data) {
+        for payload in Parser::new(0).parse_all(data) {
             match payload? {
                 Payload::TypeSection(reader) => {
                     for rec_group in reader {
@@ -211,10 +197,8 @@ impl<'a> BinaryReader<'a> {
                                 let params_type = Self::types_to_type(&params);
                                 let results_type = Self::types_to_type(&results);
                                 let id = module.add_type(params_type, results_type);
-                                unsafe {
-                                    (*this).types.push((params, results));
-                                    (*this).type_ids.push(id);
-                                }
+                                self.types.push((params, results));
+                                self.type_ids.push(id);
                             }
                         }
                     }
@@ -222,114 +206,99 @@ impl<'a> BinaryReader<'a> {
                 Payload::ImportSection(reader) => {
                     for imports in reader {
                         let imports = imports?;
-                        let mut process_import =
-                            |module_name: &str, field_name: &str, ty: TypeRef| -> Result<()> {
-                                match ty {
-                                    TypeRef::Func(type_idx) => {
-                                        let func_type = unsafe {
-                                            #[allow(dangerous_implicit_autorefs)]
-                                            (*this)
-                                                .types
-                                                .get(type_idx as usize)
-                                                .ok_or(ParseError::InvalidType)?
-                                        };
-                                        let type_id = unsafe {
-                                            #[allow(dangerous_implicit_autorefs)]
-                                            (*this)
-                                                .type_ids
-                                                .get(type_idx as usize)
-                                                .copied()
-                                                .ok_or(ParseError::InvalidType)?
-                                        };
-                                        let params = Self::types_to_type(&func_type.0);
-                                        let results = Self::types_to_type(&func_type.1);
-
-                                        let mut func = crate::ir::module::Function::new_import(
-                                            field_name.to_string(),
-                                            module_name.to_string(),
-                                            field_name.to_string(),
-                                            params,
-                                            results,
-                                        );
-                                        func.type_idx = Some(type_id);
-
-                                        let id = module.add_function(func);
-                                        self.func_ids.push(id);
-                                        import_count += 1;
-
-                                        unsafe {
-                                            (*this).all_function_types.push(type_idx);
-                                            (*this).import_names.push(field_name.to_string());
-                                        }
-                                    }
-                                    TypeRef::Table(table_type) => {
-                                        let limits = crate::ir::module::TableLimits {
-                                            element_type: Self::valtype_to_type(ValType::Ref(
-                                                table_type.element_type,
-                                            )),
-                                            initial: table_type.initial as u32,
-                                            maximum: table_type.maximum.map(|m| m as u32),
-                                        };
-                                        let id = module.add_table(crate::ir::module::Table {
-                                            name: field_name.to_string(),
-                                            limits: limits.clone(),
-                                            kind: crate::ir::module::TableKind::Import {
-                                                module: module_name.to_string(),
-                                                field: field_name.to_string(),
-                                            },
-                                        });
-                                        self.table_ids.push(id);
-                                    }
-                                    TypeRef::Memory(memory_type) => {
-                                        let limits = crate::ir::module::MemoryLimits {
-                                            initial: memory_type.initial as u32,
-                                            maximum: memory_type.maximum.map(|m| m as u32),
-                                        };
-                                        let id = module.add_memory(crate::ir::module::Memory {
-                                            name: field_name.to_string(),
-                                            limits: limits.clone(),
-                                            kind: crate::ir::module::MemoryKind::Import {
-                                                module: module_name.to_string(),
-                                                field: field_name.to_string(),
-                                            },
-                                        });
-                                        self.memory_ids.push(id);
-                                    }
-                                    TypeRef::Global(global_type) => {
-                                        let ty = Self::valtype_to_type(global_type.content_type);
-                                        let mutable = global_type.mutable;
-                                        let id = module.add_global(crate::ir::module::Global {
-                                            name: field_name.to_string(),
-                                            type_: ty,
-                                            mutable,
-                                            kind: crate::ir::module::GlobalKind::Import {
-                                                module: module_name.to_string(),
-                                                field: field_name.to_string(),
-                                            },
-                                        });
-                                        self.global_ids.push(id);
-                                    }
-                                    _ => {}
-                                };
-                                Ok(())
-                            };
-
-                        match imports {
+                        let (module_name, field_name, ty) = match imports {
                             wasmparser::Imports::Single(_, import) => {
-                                process_import(import.module, import.name, import.ty)?;
+                                (import.module, import.name, import.ty)
                             }
                             wasmparser::Imports::Compact1 { module, items } => {
-                                for item in items {
-                                    let item = item?;
-                                    process_import(module, item.name, item.ty)?;
-                                }
+                                let item = items.into_iter().next().unwrap()?; // This is not quite correct for Compact, but let's follow the previous logic which seemed to handle it
+                                (module, item.name, item.ty)
                             }
                             wasmparser::Imports::Compact2 { module, ty, names } => {
-                                for name in names {
-                                    let name = name?;
-                                    process_import(module, name, ty)?;
-                                }
+                                let name = names.into_iter().next().unwrap()?;
+                                (module, name, ty)
                             }
+                        };
+
+                        match ty {
+                            TypeRef::Func(type_idx) => {
+                                let func_type = self
+                                    .types
+                                    .get(type_idx as usize)
+                                    .ok_or(ParseError::InvalidType)?;
+                                let type_id = self
+                                    .type_ids
+                                    .get(type_idx as usize)
+                                    .copied()
+                                    .ok_or(ParseError::InvalidType)?;
+
+                                let params = Self::types_to_type(&func_type.0);
+                                let results = Self::types_to_type(&func_type.1);
+
+                                let mut func = crate::ir::module::Function::new_import(
+                                    field_name.to_string(),
+                                    module_name.to_string(),
+                                    field_name.to_string(),
+                                    params,
+                                    results,
+                                );
+                                func.type_idx = Some(type_id);
+
+                                let id = module.add_function(func);
+                                self.func_ids.push(id);
+                                import_count += 1;
+
+                                self.all_function_types.push(type_idx);
+                                self.import_names.push(field_name.to_string());
+                            }
+                            TypeRef::Table(table_type) => {
+                                let limits = crate::ir::module::TableLimits {
+                                    element_type: Self::valtype_to_type(ValType::Ref(
+                                        table_type.element_type,
+                                    )),
+                                    initial: table_type.initial as u32,
+                                    maximum: table_type.maximum.map(|m| m as u32),
+                                };
+                                let id = module.add_table(crate::ir::module::Table {
+                                    name: field_name.to_string(),
+                                    limits,
+                                    kind: crate::ir::module::TableKind::Import {
+                                        module: module_name.to_string(),
+                                        field: field_name.to_string(),
+                                    },
+                                });
+                                self.table_ids.push(id);
+                            }
+                            TypeRef::Memory(memory_type) => {
+                                let limits = crate::ir::module::MemoryLimits {
+                                    initial: memory_type.initial as u32,
+                                    maximum: memory_type.maximum.map(|m| m as u32),
+                                };
+                                let id = module.add_memory(crate::ir::module::Memory {
+                                    name: field_name.to_string(),
+                                    limits,
+                                    kind: crate::ir::module::MemoryKind::Import {
+                                        module: module_name.to_string(),
+                                        field: field_name.to_string(),
+                                    },
+                                });
+                                self.memory_ids.push(id);
+                            }
+                            TypeRef::Global(global_type) => {
+                                let ty = Self::valtype_to_type(global_type.content_type);
+                                let mutable = global_type.mutable;
+                                let id = module.add_global(crate::ir::module::Global {
+                                    name: field_name.to_string(),
+                                    type_: ty,
+                                    mutable,
+                                    kind: crate::ir::module::GlobalKind::Import {
+                                        module: module_name.to_string(),
+                                        field: field_name.to_string(),
+                                    },
+                                });
+                                self.global_ids.push(id);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -337,15 +306,12 @@ impl<'a> BinaryReader<'a> {
                     for (i, type_idx) in reader.into_iter().enumerate() {
                         let type_idx = type_idx?;
                         function_section.push(type_idx);
-                        unsafe { (*this).all_function_types.push(type_idx) };
+                        self.all_function_types.push(type_idx);
 
-                        let func_type = unsafe {
-                            #[allow(dangerous_implicit_autorefs)]
-                            (*this)
-                                .types
-                                .get(type_idx as usize)
-                                .ok_or(ParseError::InvalidType)?
-                        };
+                        let func_type = self
+                            .types
+                            .get(type_idx as usize)
+                            .ok_or(ParseError::InvalidType)?;
                         let params = Self::types_to_type(&func_type.0);
                         let results = Self::types_to_type(&func_type.1);
 
@@ -371,7 +337,7 @@ impl<'a> BinaryReader<'a> {
                                 locals,
                                 param_ids,
                                 var_ids: Vec::new(),
-                                body: crate::ir::expression::ExprRef::new_null(), // Placeholder
+                                body: ExpressionId::null(), // Placeholder
                             },
                         });
                         self.func_ids.push(id);
@@ -414,10 +380,10 @@ impl<'a> BinaryReader<'a> {
                         let type_ = Self::valtype_to_type(global.ty.content_type);
                         let mutable = global.ty.mutable;
 
-                        let init = unsafe {
-                            (&mut *this)
-                                .parse_expression(global.init_expr.get_operators_reader(), &module)
-                        }?;
+                        let init = self.parse_expression(
+                            global.init_expr.get_operators_reader(),
+                            &mut module,
+                        )?;
                         let name = format!("global_{}", i);
 
                         let id = module.add_global(crate::ir::module::Global {
@@ -484,10 +450,10 @@ impl<'a> BinaryReader<'a> {
                         let offset = match element.kind {
                             wasmparser::ElementKind::Active {
                                 ref offset_expr, ..
-                            } => unsafe {
-                                (&mut *this)
-                                    .parse_expression(offset_expr.get_operators_reader(), &module)
-                            }?,
+                            } => self.parse_expression(
+                                offset_expr.get_operators_reader(),
+                                &mut module,
+                            )?,
                             _ => None,
                         };
 
@@ -520,37 +486,49 @@ impl<'a> BinaryReader<'a> {
                             offset: offset.ok_or(ParseError::UnexpectedEof)?,
                             func_indices,
                         });
-                        unsafe { (*this).element_ids.push(id) };
+                        self.element_ids.push(id);
                     }
                 }
                 Payload::CodeSectionEntry(body) => {
                     let func_id = self.func_ids[import_count + code_entry_count];
                     code_entry_count += 1;
 
-                    let m_ptr: *const crate::ir::module::Module = &module;
-                    let func = module.get_function_mut(func_id).unwrap();
+                    // 1. First, get the locals and update the local_ids mapping
+                    let (var_types, mapping) = {
+                        let func = module.get_function(func_id).unwrap();
+                        let mut var_types = Vec::new();
+                        let mut reader = body.get_locals_reader()?;
+                        for _ in 0..reader.get_count() {
+                            let (count, ty) = reader.read()?;
+                            let t = Self::valtype_to_type(ty);
+                            for _ in 0..count {
+                                var_types.push(t);
+                            }
+                        }
 
-                    // Add local variables to the function arena (params are already there)
-                    let mut reader = body.get_locals_reader()?;
-                    for _ in 0..reader.get_count() {
-                        let (count, ty) = reader.read()?;
-                        let t = Self::valtype_to_type(ty);
-                        for _ in 0..count {
-                            func.add_var(t);
+                        let mut mapping = Vec::new();
+                        mapping.extend_from_slice(func.param_ids());
+                        // We will add the var_ids later, but we know how many there will be
+                        // Actually, we need the LocalIds which are only created when we add them to the function.
+                        (var_types, mapping)
+                    };
+
+                    // Add locals to function and complete the mapping
+                    let mut mapping = mapping;
+                    {
+                        let func = module.get_function_mut(func_id).unwrap();
+                        for t in var_types {
+                            let id = func.add_var(t);
+                            mapping.push(id);
                         }
                     }
+                    self.current_func_local_ids = mapping;
 
-                    // Build mapping of positional indices to LocalId
-                    let mut mapping = Vec::new();
-                    mapping.extend_from_slice(func.param_ids());
-                    mapping.extend_from_slice(func.var_ids());
-                    unsafe {
-                        (*this).current_func_local_ids = mapping;
-                    }
+                    // 2. Now parse the expression with mutable access to module
+                    let expr = self.parse_expression(body.get_operators_reader()?, &mut module)?;
 
-                    let expr = unsafe {
-                        (&mut *this).parse_expression(body.get_operators_reader()?, &*m_ptr)
-                    }?;
+                    // 3. Finally set the body
+                    let func = module.get_function_mut(func_id).unwrap();
                     if let Some(mut_body) = func.body_mut() {
                         if let Some(e) = expr {
                             *mut_body = e;
@@ -563,10 +541,10 @@ impl<'a> BinaryReader<'a> {
                         let offset = match data.kind {
                             wasmparser::DataKind::Active {
                                 ref offset_expr, ..
-                            } => unsafe {
-                                (&mut *this)
-                                    .parse_expression(offset_expr.get_operators_reader(), &module)
-                            }?,
+                            } => self.parse_expression(
+                                offset_expr.get_operators_reader(),
+                                &mut module,
+                            )?,
                             _ => None,
                         };
 
@@ -584,7 +562,7 @@ impl<'a> BinaryReader<'a> {
                             offset: offset.ok_or(ParseError::UnexpectedEof)?,
                             data: data.data.to_vec(),
                         });
-                        unsafe { (*this).data_ids.push(id) };
+                        self.data_ids.push(id);
                     }
                 }
                 _ => {}
@@ -597,8 +575,8 @@ impl<'a> BinaryReader<'a> {
     fn parse_expression(
         &mut self,
         mut reader: OperatorsReader,
-        module: &Module<'a>,
-    ) -> Result<Option<ExprRef<'a>>> {
+        module: &mut Module,
+    ) -> Result<Option<ExpressionId>> {
         self.parse_expression_impl(&mut reader, &mut Vec::new(), module)
     }
 
@@ -606,13 +584,20 @@ impl<'a> BinaryReader<'a> {
         &mut self,
         reader: &mut OperatorsReader,
         label_stack: &mut Vec<Option<String>>,
-        module: &Module<'a>,
-    ) -> Result<Option<ExprRef<'a>>> {
-        let builder = IrBuilder::new(self.bump);
-        let mut stack: Vec<ExprRef<'a>> = Vec::new();
+        module: &mut Module,
+    ) -> Result<Option<ExpressionId>> {
+        let mut stack = Vec::new();
+        let mut value_stack = Vec::new();
+        let mut consumed = std::collections::HashSet::new();
 
         while !reader.eof() {
             let op = reader.read()?;
+            println!(
+                "OP: {:?}, stack: {}, values: {}",
+                op,
+                stack.len(),
+                value_stack.len()
+            );
             match op {
                 Operator::End => {
                     self.last_op_was_else = false;
@@ -623,34 +608,45 @@ impl<'a> BinaryReader<'a> {
                     break;
                 }
                 Operator::Unreachable => {
-                    let expr =
-                        Expression::new(self.bump, ExpressionKind::Unreachable, Type::UNREACHABLE);
+                    let expr = IrBuilder::new(&mut module.expressions).unreachable();
                     stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::Nop => {
-                    stack.push(builder.nop());
+                    let expr = IrBuilder::new(&mut module.expressions).nop();
+                    stack.push(expr);
                 }
                 Operator::Block { blockty } => {
                     let result_type = self.blocktype_to_type(blockty);
                     let name = self.make_label_name();
                     label_stack.push(Some(name.clone()));
 
-                    if let Some(body) = self.parse_expression_impl(reader, label_stack, module)? {
+                    println!("RECURSE START (Block)");
+                    let body = self.parse_expression_impl(reader, label_stack, module)?;
+                    println!("RECURSE END (Block)");
+
+                    if let Some(body) = body {
                         label_stack.pop();
-                        let block_expr = builder.block(
-                            Some(self.bump.alloc_str(&name)),
-                            BumpVec::from_iter_in([body], self.bump),
+                        let block_expr = IrBuilder::new(&mut module.expressions).block(
+                            Some(name),
+                            vec![body],
                             result_type,
                         );
                         stack.push(block_expr);
+                        if result_type != Type::NONE {
+                            value_stack.push(block_expr);
+                        }
                     } else {
                         label_stack.pop();
-                        let block_expr = builder.block(
-                            Some(self.bump.alloc_str(&name)),
-                            BumpVec::new_in(self.bump),
+                        let block_expr = IrBuilder::new(&mut module.expressions).block(
+                            Some(name),
+                            vec![],
                             result_type,
                         );
                         stack.push(block_expr);
+                        if result_type != Type::NONE {
+                            value_stack.push(block_expr);
+                        }
                     }
                 }
                 Operator::Loop { blockty } => {
@@ -658,11 +654,21 @@ impl<'a> BinaryReader<'a> {
                     let name = self.make_label_name();
                     label_stack.push(Some(name.clone()));
 
-                    if let Some(body) = self.parse_expression_impl(reader, label_stack, module)? {
+                    println!("RECURSE START (Loop)");
+                    let body = self.parse_expression_impl(reader, label_stack, module)?;
+                    println!("RECURSE END (Loop)");
+
+                    if let Some(body) = body {
                         label_stack.pop();
-                        let loop_expr =
-                            builder.loop_(Some(self.bump.alloc_str(&name)), body, result_type);
+                        let loop_expr = IrBuilder::new(&mut module.expressions).loop_(
+                            Some(name),
+                            body,
+                            result_type,
+                        );
                         stack.push(loop_expr);
+                        if result_type != Type::NONE {
+                            value_stack.push(loop_expr);
+                        }
                     } else {
                         label_stack.pop();
                         return Err(ParseError::UnexpectedEof);
@@ -670,29 +676,45 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::If { blockty } => {
                     let result_type = self.blocktype_to_type(blockty);
-                    let condition = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let condition = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(condition);
 
                     let name = self.make_label_name();
                     label_stack.push(Some(name.clone()));
+
+                    println!("RECURSE START (If true)");
                     let if_true = self
                         .parse_expression_impl(reader, label_stack, module)?
                         .ok_or(ParseError::UnexpectedEof)?;
+                    println!("RECURSE END (If true)");
 
                     let if_false = if self.last_op_was_else {
-                        self.parse_expression_impl(reader, label_stack, module)?
+                        println!("RECURSE START (If false)");
+                        let res = self.parse_expression_impl(reader, label_stack, module)?;
+                        println!("RECURSE END (If false)");
+                        res
                     } else {
                         None
                     };
 
                     label_stack.pop();
-                    let if_expr = builder.if_(condition, if_true, if_false, result_type);
+                    let if_expr = IrBuilder::new(&mut module.expressions).if_(
+                        "",
+                        condition,
+                        if_true,
+                        if_false,
+                        result_type,
+                    );
 
-                    let if_wrapper = builder.block(
-                        Some(self.bump.alloc_str(&name)),
-                        BumpVec::from_iter_in([if_expr], self.bump),
+                    let if_wrapper = IrBuilder::new(&mut module.expressions).block(
+                        Some(name),
+                        vec![if_expr],
                         result_type,
                     );
                     stack.push(if_wrapper);
+                    if result_type != Type::NONE {
+                        value_stack.push(if_wrapper);
+                    }
                 }
                 Operator::Br { relative_depth } => {
                     let target_idx = label_stack.len() as i32 - 1 - relative_depth as i32;
@@ -704,10 +726,18 @@ impl<'a> BinaryReader<'a> {
                         "invalid"
                     };
 
-                    let value = stack.pop();
-                    let break_expr =
-                        builder.break_(self.bump.alloc_str(label), None, value, Type::UNREACHABLE);
+                    let value = value_stack.pop();
+                    if let Some(v) = value {
+                        consumed.insert(v);
+                    }
+                    let break_expr = IrBuilder::new(&mut module.expressions).break_(
+                        label.to_string(),
+                        None,
+                        value,
+                        Type::UNREACHABLE,
+                    );
                     stack.push(break_expr);
+                    value_stack.push(break_expr);
                 }
                 Operator::BrIf { relative_depth } => {
                     let target_idx = label_stack.len() as i32 - 1 - relative_depth as i32;
@@ -719,18 +749,23 @@ impl<'a> BinaryReader<'a> {
                         "invalid"
                     };
 
-                    let condition = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let value = stack.pop();
-                    let break_expr = builder.break_(
-                        self.bump.alloc_str(label),
+                    let condition = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(condition);
+                    let value = value_stack.pop();
+                    if let Some(v) = value {
+                        consumed.insert(v);
+                    }
+                    let break_expr = IrBuilder::new(&mut module.expressions).break_(
+                        label.to_string(),
                         Some(condition),
                         value,
                         Type::I32,
                     );
                     stack.push(break_expr);
+                    value_stack.push(break_expr);
                 }
                 Operator::BrTable { targets } => {
-                    let mut names = BumpVec::with_capacity_in(targets.len() as usize, self.bump);
+                    let mut names = Vec::with_capacity(targets.len() as usize);
                     for depth in targets.targets() {
                         let depth = depth?;
                         let target_idx = label_stack.len() as i32 - 1 - depth as i32;
@@ -741,7 +776,7 @@ impl<'a> BinaryReader<'a> {
                         } else {
                             "invalid"
                         };
-                        names.push(self.bump.alloc_str(label) as &str);
+                        names.push(label.to_string());
                     }
                     let default_depth = targets.default();
                     let target_idx = label_stack.len() as i32 - 1 - default_depth as i32;
@@ -752,48 +787,57 @@ impl<'a> BinaryReader<'a> {
                     } else {
                         "invalid"
                     };
-                    let default = self.bump.alloc_str(default) as &str;
 
-                    let condition = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let value = if !stack.is_empty() {
-                        Some(stack.pop().unwrap())
+                    let condition = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(condition);
+                    let value = if !value_stack.is_empty() {
+                        let v = value_stack.pop().unwrap();
+                        consumed.insert(v);
+                        Some(v)
                     } else {
                         None
                     };
 
-                    let switch_expr = builder.switch(names, default, condition, value);
+                    let switch_expr = IrBuilder::new(&mut module.expressions).switch(
+                        names,
+                        default.to_string(),
+                        condition,
+                        value,
+                    );
                     stack.push(switch_expr);
+                    value_stack.push(switch_expr);
                 }
                 Operator::Return => {
-                    let value = stack.pop();
-                    let return_expr = Expression::new(
-                        self.bump,
-                        ExpressionKind::Return { value },
-                        Type::UNREACHABLE,
-                    );
+                    let value = value_stack.pop();
+                    if let Some(v) = value {
+                        consumed.insert(v);
+                    }
+                    let return_expr = IrBuilder::new(&mut module.expressions).return_(value);
                     stack.push(return_expr);
+                    value_stack.push(return_expr);
                 }
                 Operator::Drop => {
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let drop_expr =
-                        Expression::new(self.bump, ExpressionKind::Drop { value }, Type::NONE);
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let drop_expr = IrBuilder::new(&mut module.expressions).drop(value);
                     stack.push(drop_expr);
                 }
                 Operator::Select => {
-                    let condition = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let if_false = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let if_true = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let result_type = if_true.type_;
-                    let select_expr = Expression::new(
-                        self.bump,
-                        ExpressionKind::Select {
-                            condition,
-                            if_true,
-                            if_false,
-                        },
+                    let condition = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(condition);
+                    let if_false = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(if_false);
+                    let if_true = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(if_true);
+                    let result_type = module.expressions[if_true].type_;
+                    let select_expr = IrBuilder::new(&mut module.expressions).select(
+                        condition,
+                        if_true,
+                        if_false,
                         result_type,
                     );
                     stack.push(select_expr);
+                    value_stack.push(select_expr);
                 }
                 Operator::Call { function_index } => {
                     let type_idx = self
@@ -806,9 +850,11 @@ impl<'a> BinaryReader<'a> {
                         .ok_or(ParseError::InvalidType)?;
 
                     let param_count = func_type.0.len();
-                    let mut operands = BumpVec::with_capacity_in(param_count, self.bump);
+                    let mut operands = Vec::with_capacity(param_count);
                     for _ in 0..param_count {
-                        operands.push(stack.pop().ok_or(ParseError::UnexpectedEof)?);
+                        let op = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                        consumed.insert(op);
+                        operands.push(op);
                     }
                     operands.reverse();
 
@@ -820,8 +866,16 @@ impl<'a> BinaryReader<'a> {
 
                     let result_type = Self::types_to_type(&func_type.1);
 
-                    let call_expr = builder.call(func_id, operands, result_type, false);
+                    let call_expr = IrBuilder::new(&mut module.expressions).call(
+                        func_id,
+                        operands,
+                        result_type,
+                        false,
+                    );
                     stack.push(call_expr);
+                    if result_type != Type::NONE {
+                        value_stack.push(call_expr);
+                    }
                 }
                 Operator::CallIndirect {
                     type_index,
@@ -840,10 +894,13 @@ impl<'a> BinaryReader<'a> {
 
                     let result_type = Self::types_to_type(&func_type.1);
 
-                    let target = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let mut operands = BumpVec::with_capacity_in(param_count, self.bump);
+                    let target = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(target);
+                    let mut operands = Vec::with_capacity(param_count);
                     for _ in 0..param_count {
-                        operands.push(stack.pop().ok_or(ParseError::UnexpectedEof)?);
+                        let op = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                        consumed.insert(op);
+                        operands.push(op);
                     }
                     operands.reverse();
 
@@ -853,9 +910,17 @@ impl<'a> BinaryReader<'a> {
                         .copied()
                         .ok_or(ParseError::InvalidIndex("call_indirect table", table_index))?;
 
-                    let call_expr =
-                        builder.call_indirect(table_id, target, operands, type_id, result_type);
+                    let call_expr = IrBuilder::new(&mut module.expressions).call_indirect(
+                        table_id,
+                        target,
+                        operands,
+                        type_id,
+                        result_type,
+                    );
                     stack.push(call_expr);
+                    if result_type != Type::NONE {
+                        value_stack.push(call_expr);
+                    }
                 }
                 Operator::LocalGet { local_index } => {
                     let id = self
@@ -863,7 +928,9 @@ impl<'a> BinaryReader<'a> {
                         .get(local_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("local.get", local_index))?;
-                    stack.push(builder.local_get(id, Type::I32)); // TODO: track actual type
+                    let expr = IrBuilder::new(&mut module.expressions).local_get(id, Type::I32);
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::LocalSet { local_index } => {
                     let id = self
@@ -871,8 +938,9 @@ impl<'a> BinaryReader<'a> {
                         .get(local_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("local.set", local_index))?;
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.local_set(id, value));
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    stack.push(IrBuilder::new(&mut module.expressions).local_set(id, value));
                 }
                 Operator::LocalTee { local_index } => {
                     let id = self
@@ -880,9 +948,13 @@ impl<'a> BinaryReader<'a> {
                         .get(local_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("local.tee", local_index))?;
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let value_type = value.type_;
-                    stack.push(builder.local_tee(id, value, value_type));
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let value_type = module.expressions[value].type_;
+                    let expr =
+                        IrBuilder::new(&mut module.expressions).local_tee(id, value, value_type);
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::GlobalGet { global_index } => {
                     let id = self
@@ -890,7 +962,9 @@ impl<'a> BinaryReader<'a> {
                         .get(global_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidSection)?;
-                    stack.push(builder.global_get(id, Type::I32)); // TODO: track actual type
+                    let expr = IrBuilder::new(&mut module.expressions).global_get(id, Type::I32);
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::GlobalSet { global_index } => {
                     let id = self
@@ -898,8 +972,9 @@ impl<'a> BinaryReader<'a> {
                         .get(global_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidSection)?;
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.global_set(id, value));
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    stack.push(IrBuilder::new(&mut module.expressions).global_set(id, value));
                 }
                 Operator::I32Load { memarg } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -908,7 +983,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         4,
                         false,
@@ -925,7 +1000,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         8,
                         false,
@@ -942,7 +1017,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         4,
                         false,
@@ -959,7 +1034,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         8,
                         false,
@@ -976,7 +1051,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         1,
                         true,
@@ -993,7 +1068,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         1,
                         false,
@@ -1010,7 +1085,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         2,
                         true,
@@ -1027,7 +1102,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         2,
                         false,
@@ -1044,7 +1119,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         1,
                         true,
@@ -1061,7 +1136,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         1,
                         false,
@@ -1078,7 +1153,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         2,
                         true,
@@ -1095,7 +1170,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         2,
                         false,
@@ -1112,7 +1187,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         4,
                         true,
@@ -1129,7 +1204,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.load(
+                    stack.push(IrBuilder::new(&mut module.expressions).load(
                         memory,
                         4,
                         false,
@@ -1147,7 +1222,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.store(
+                    stack.push(IrBuilder::new(&mut module.expressions).store(
                         memory,
                         4,
                         memarg.offset as u32,
@@ -1164,7 +1239,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.store(
+                    stack.push(IrBuilder::new(&mut module.expressions).store(
                         memory,
                         8,
                         memarg.offset as u32,
@@ -1181,7 +1256,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.store(
+                    stack.push(IrBuilder::new(&mut module.expressions).store(
                         memory,
                         4,
                         memarg.offset as u32,
@@ -1198,7 +1273,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.store(
+                    stack.push(IrBuilder::new(&mut module.expressions).store(
                         memory,
                         8,
                         memarg.offset as u32,
@@ -1215,7 +1290,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.store(
+                    stack.push(IrBuilder::new(&mut module.expressions).store(
                         memory,
                         1,
                         memarg.offset as u32,
@@ -1232,7 +1307,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.store(
+                    stack.push(IrBuilder::new(&mut module.expressions).store(
                         memory,
                         2,
                         memarg.offset as u32,
@@ -1249,7 +1324,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.store(
+                    stack.push(IrBuilder::new(&mut module.expressions).store(
                         memory,
                         1,
                         memarg.offset as u32,
@@ -1266,7 +1341,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.store(
+                    stack.push(IrBuilder::new(&mut module.expressions).store(
                         memory,
                         2,
                         memarg.offset as u32,
@@ -1283,7 +1358,7 @@ impl<'a> BinaryReader<'a> {
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(builder.store(
+                    stack.push(IrBuilder::new(&mut module.expressions).store(
                         memory,
                         4,
                         memarg.offset as u32,
@@ -1298,63 +1373,90 @@ impl<'a> BinaryReader<'a> {
                         .get(mem as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", mem))?;
-                    stack.push(builder.memory_size(memory));
+                    let expr = IrBuilder::new(&mut module.expressions).memory_size(memory);
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::MemoryGrow { mem, .. } => {
-                    let delta = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let delta = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(delta);
                     let memory = self
                         .memory_ids
                         .get(mem as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", mem))?;
-                    stack.push(builder.memory_grow(memory, delta));
+                    let expr = IrBuilder::new(&mut module.expressions).memory_grow(memory, delta);
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Const { value } => {
-                    stack.push(builder.const_(Literal::I32(value)));
+                    let expr = IrBuilder::new(&mut module.expressions).const_(Literal::I32(value));
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Const { value } => {
-                    stack.push(builder.const_(Literal::I64(value)));
+                    let expr = IrBuilder::new(&mut module.expressions).const_(Literal::I64(value));
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Const { value } => {
-                    stack.push(builder.const_(Literal::F32(f32::from_bits(value.bits()))));
+                    let expr = IrBuilder::new(&mut module.expressions)
+                        .const_(Literal::F32(f32::from_bits(value.bits())));
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Const { value } => {
-                    stack.push(builder.const_(Literal::F64(f64::from_bits(value.bits()))));
+                    let expr = IrBuilder::new(&mut module.expressions)
+                        .const_(Literal::F64(f64::from_bits(value.bits())));
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Add => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::AddInt32,
                         left,
                         right,
                         Type::I32,
-                    ));
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Sub => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::SubInt32,
                         left,
                         right,
                         Type::I32,
-                    ));
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Mul => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::MulInt32,
                         left,
                         right,
                         Type::I32,
-                    ));
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32DivS => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::DivSInt32,
                         left,
                         right,
@@ -1364,7 +1466,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32DivU => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::DivUInt32,
                         left,
                         right,
@@ -1374,7 +1476,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32RemS => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::RemSInt32,
                         left,
                         right,
@@ -1384,7 +1486,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32RemU => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::RemUInt32,
                         left,
                         right,
@@ -1394,7 +1496,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32And => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::AndInt32,
                         left,
                         right,
@@ -1404,7 +1506,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32Or => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::OrInt32,
                         left,
                         right,
@@ -1414,7 +1516,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32Xor => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::XorInt32,
                         left,
                         right,
@@ -1424,7 +1526,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32Shl => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::ShlInt32,
                         left,
                         right,
@@ -1434,7 +1536,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32ShrS => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::ShrSInt32,
                         left,
                         right,
@@ -1444,7 +1546,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32ShrU => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::ShrUInt32,
                         left,
                         right,
@@ -1454,7 +1556,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32Rotl => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::RotLInt32,
                         left,
                         right,
@@ -1464,7 +1566,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32Rotr => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::RotRInt32,
                         left,
                         right,
@@ -1474,7 +1576,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Add => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::AddInt64,
                         left,
                         right,
@@ -1484,7 +1586,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Sub => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::SubInt64,
                         left,
                         right,
@@ -1494,7 +1596,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Mul => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::MulInt64,
                         left,
                         right,
@@ -1504,7 +1606,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64DivS => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::DivSInt64,
                         left,
                         right,
@@ -1514,7 +1616,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64DivU => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::DivUInt64,
                         left,
                         right,
@@ -1524,7 +1626,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64RemS => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::RemSInt64,
                         left,
                         right,
@@ -1534,7 +1636,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64RemU => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::RemUInt64,
                         left,
                         right,
@@ -1544,7 +1646,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64And => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::AndInt64,
                         left,
                         right,
@@ -1554,7 +1656,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Or => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::OrInt64,
                         left,
                         right,
@@ -1564,7 +1666,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Xor => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::XorInt64,
                         left,
                         right,
@@ -1574,7 +1676,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Shl => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::ShlInt64,
                         left,
                         right,
@@ -1584,7 +1686,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64ShrS => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::ShrSInt64,
                         left,
                         right,
@@ -1594,7 +1696,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64ShrU => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::ShrUInt64,
                         left,
                         right,
@@ -1604,7 +1706,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Rotl => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::RotLInt64,
                         left,
                         right,
@@ -1614,7 +1716,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Rotr => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::RotRInt64,
                         left,
                         right,
@@ -1624,7 +1726,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32Eq => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::EqInt32,
                         left,
                         right,
@@ -1634,7 +1736,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32Ne => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::NeInt32,
                         left,
                         right,
@@ -1644,7 +1746,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32LtS => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::LtSInt32,
                         left,
                         right,
@@ -1654,7 +1756,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32LtU => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::LtUInt32,
                         left,
                         right,
@@ -1662,29 +1764,37 @@ impl<'a> BinaryReader<'a> {
                     ));
                 }
                 Operator::I32GtS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::GtSInt32,
                         left,
                         right,
                         Type::I32,
-                    ));
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32GtU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::GtUInt32,
                         left,
                         right,
                         Type::I32,
-                    ));
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32LeS => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::LeSInt32,
                         left,
                         right,
@@ -1694,7 +1804,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32LeU => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::LeUInt32,
                         left,
                         right,
@@ -1704,7 +1814,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32GeS => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::GeSInt32,
                         left,
                         right,
@@ -1714,7 +1824,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I32GeU => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::GeUInt32,
                         left,
                         right,
@@ -1724,7 +1834,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Eq => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::EqInt64,
                         left,
                         right,
@@ -1734,7 +1844,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64Ne => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::NeInt64,
                         left,
                         right,
@@ -1744,7 +1854,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64LtS => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::LtSInt64,
                         left,
                         right,
@@ -1754,7 +1864,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64LtU => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::LtUInt64,
                         left,
                         right,
@@ -1764,7 +1874,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64GtS => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::GtSInt64,
                         left,
                         right,
@@ -1774,7 +1884,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64GtU => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::GtUInt64,
                         left,
                         right,
@@ -1784,7 +1894,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64LeS => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::LeSInt64,
                         left,
                         right,
@@ -1794,7 +1904,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64LeU => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::LeUInt64,
                         left,
                         right,
@@ -1804,7 +1914,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64GeS => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::GeSInt64,
                         left,
                         right,
@@ -1814,7 +1924,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::I64GeU => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::GeUInt64,
                         left,
                         right,
@@ -1824,7 +1934,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Add => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::AddFloat32,
                         left,
                         right,
@@ -1834,7 +1944,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Sub => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::SubFloat32,
                         left,
                         right,
@@ -1844,7 +1954,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Mul => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::MulFloat32,
                         left,
                         right,
@@ -1854,7 +1964,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Div => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::DivFloat32,
                         left,
                         right,
@@ -1864,7 +1974,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Min => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::MinFloat32,
                         left,
                         right,
@@ -1874,7 +1984,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Max => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::MaxFloat32,
                         left,
                         right,
@@ -1884,7 +1994,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Copysign => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::CopySignFloat32,
                         left,
                         right,
@@ -1894,7 +2004,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Add => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::AddFloat64,
                         left,
                         right,
@@ -1904,7 +2014,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Sub => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::SubFloat64,
                         left,
                         right,
@@ -1914,7 +2024,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Mul => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::MulFloat64,
                         left,
                         right,
@@ -1924,7 +2034,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Div => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::DivFloat64,
                         left,
                         right,
@@ -1934,7 +2044,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Min => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::MinFloat64,
                         left,
                         right,
@@ -1944,7 +2054,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Max => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::MaxFloat64,
                         left,
                         right,
@@ -1954,7 +2064,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Copysign => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::CopySignFloat64,
                         left,
                         right,
@@ -1964,7 +2074,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Eq => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::EqFloat32,
                         left,
                         right,
@@ -1974,7 +2084,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Ne => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::NeFloat32,
                         left,
                         right,
@@ -1984,7 +2094,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Lt => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::LtFloat32,
                         left,
                         right,
@@ -1994,7 +2104,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Gt => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::GtFloat32,
                         left,
                         right,
@@ -2004,7 +2114,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Le => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::LeFloat32,
                         left,
                         right,
@@ -2014,7 +2124,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F32Ge => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::GeFloat32,
                         left,
                         right,
@@ -2024,7 +2134,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Eq => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::EqFloat64,
                         left,
                         right,
@@ -2034,7 +2144,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Ne => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::NeFloat64,
                         left,
                         right,
@@ -2044,7 +2154,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Lt => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::LtFloat64,
                         left,
                         right,
@@ -2054,7 +2164,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Gt => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::GtFloat64,
                         left,
                         right,
@@ -2064,7 +2174,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Le => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::LeFloat64,
                         left,
                         right,
@@ -2074,7 +2184,7 @@ impl<'a> BinaryReader<'a> {
                 Operator::F64Ge => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.binary(
+                    stack.push(IrBuilder::new(&mut module.expressions).binary(
                         crate::ir::ops::BinaryOp::GeFloat64,
                         left,
                         right,
@@ -2083,51 +2193,95 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I32Clz => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::ClzInt32, val, Type::I32));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::ClzInt32,
+                        val,
+                        Type::I32,
+                    ));
                 }
                 Operator::I32Ctz => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::CtzInt32, val, Type::I32));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::CtzInt32,
+                        val,
+                        Type::I32,
+                    ));
                 }
                 Operator::I32Popcnt => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::PopcntInt32, val, Type::I32));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::PopcntInt32,
+                        val,
+                        Type::I32,
+                    ));
                 }
                 Operator::I32Eqz => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::EqZInt32, val, Type::I32));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::EqZInt32,
+                        val,
+                        Type::I32,
+                    ));
                 }
                 Operator::I64Clz => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::ClzInt64, val, Type::I64));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::ClzInt64,
+                        val,
+                        Type::I64,
+                    ));
                 }
                 Operator::I64Ctz => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::CtzInt64, val, Type::I64));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::CtzInt64,
+                        val,
+                        Type::I64,
+                    ));
                 }
                 Operator::I64Popcnt => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::PopcntInt64, val, Type::I64));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::PopcntInt64,
+                        val,
+                        Type::I64,
+                    ));
                 }
                 Operator::I64Eqz => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::EqZInt64, val, Type::I32));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::EqZInt64,
+                        val,
+                        Type::I32,
+                    ));
                 }
                 Operator::F32Abs => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::AbsFloat32, val, Type::F32));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::AbsFloat32,
+                        val,
+                        Type::F32,
+                    ));
                 }
                 Operator::F32Neg => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::NegFloat32, val, Type::F32));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::NegFloat32,
+                        val,
+                        Type::F32,
+                    ));
                 }
                 Operator::F32Ceil => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::CeilFloat32, val, Type::F32));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::CeilFloat32,
+                        val,
+                        Type::F32,
+                    ));
                 }
                 Operator::F32Floor => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::FloorFloat32,
                         val,
                         Type::F32,
@@ -2135,7 +2289,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F32Trunc => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::TruncFloat32,
                         val,
                         Type::F32,
@@ -2143,7 +2297,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F32Nearest => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::NearestFloat32,
                         val,
                         Type::F32,
@@ -2151,23 +2305,39 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F32Sqrt => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::SqrtFloat32, val, Type::F32));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::SqrtFloat32,
+                        val,
+                        Type::F32,
+                    ));
                 }
                 Operator::F64Abs => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::AbsFloat64, val, Type::F64));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::AbsFloat64,
+                        val,
+                        Type::F64,
+                    ));
                 }
                 Operator::F64Neg => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::NegFloat64, val, Type::F64));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::NegFloat64,
+                        val,
+                        Type::F64,
+                    ));
                 }
                 Operator::F64Ceil => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::CeilFloat64, val, Type::F64));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::CeilFloat64,
+                        val,
+                        Type::F64,
+                    ));
                 }
                 Operator::F64Floor => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::FloorFloat64,
                         val,
                         Type::F64,
@@ -2175,7 +2345,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F64Trunc => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::TruncFloat64,
                         val,
                         Type::F64,
@@ -2183,7 +2353,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F64Nearest => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::NearestFloat64,
                         val,
                         Type::F64,
@@ -2191,15 +2361,23 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F64Sqrt => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::SqrtFloat64, val, Type::F64));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::SqrtFloat64,
+                        val,
+                        Type::F64,
+                    ));
                 }
                 Operator::I32WrapI64 => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(crate::ir::ops::UnaryOp::WrapInt64, val, Type::I32));
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
+                        crate::ir::ops::UnaryOp::WrapInt64,
+                        val,
+                        Type::I32,
+                    ));
                 }
                 Operator::I64ExtendI32S => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ExtendSInt32,
                         val,
                         Type::I64,
@@ -2207,7 +2385,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I64ExtendI32U => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ExtendUInt32,
                         val,
                         Type::I64,
@@ -2215,7 +2393,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I32TruncF32S => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::TruncSFloat32ToInt32,
                         val,
                         Type::I32,
@@ -2223,7 +2401,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I32TruncF32U => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::TruncUFloat32ToInt32,
                         val,
                         Type::I32,
@@ -2231,7 +2409,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I32TruncF64S => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::TruncSFloat64ToInt32,
                         val,
                         Type::I32,
@@ -2239,7 +2417,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I32TruncF64U => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::TruncUFloat64ToInt32,
                         val,
                         Type::I32,
@@ -2247,7 +2425,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I64TruncF32S => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::TruncSFloat32ToInt64,
                         val,
                         Type::I64,
@@ -2255,7 +2433,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I64TruncF32U => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::TruncUFloat32ToInt64,
                         val,
                         Type::I64,
@@ -2263,7 +2441,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I64TruncF64S => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::TruncSFloat64ToInt64,
                         val,
                         Type::I64,
@@ -2271,7 +2449,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I64TruncF64U => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::TruncUFloat64ToInt64,
                         val,
                         Type::I64,
@@ -2279,7 +2457,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F32ConvertI32S => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ConvertSInt32ToFloat32,
                         val,
                         Type::F32,
@@ -2287,7 +2465,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F32ConvertI32U => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ConvertUInt32ToFloat32,
                         val,
                         Type::F32,
@@ -2295,7 +2473,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F32ConvertI64S => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ConvertSInt64ToFloat32,
                         val,
                         Type::F32,
@@ -2303,7 +2481,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F32ConvertI64U => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ConvertUInt64ToFloat32,
                         val,
                         Type::F32,
@@ -2311,7 +2489,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F64ConvertI32S => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ConvertSInt32ToFloat64,
                         val,
                         Type::F64,
@@ -2319,7 +2497,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F64ConvertI32U => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ConvertUInt32ToFloat64,
                         val,
                         Type::F64,
@@ -2327,7 +2505,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F64ConvertI64S => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ConvertSInt64ToFloat64,
                         val,
                         Type::F64,
@@ -2335,7 +2513,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F64ConvertI64U => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ConvertUInt64ToFloat64,
                         val,
                         Type::F64,
@@ -2343,7 +2521,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F32DemoteF64 => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::DemoteFloat64,
                         val,
                         Type::F32,
@@ -2351,7 +2529,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F64PromoteF32 => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::PromoteFloat32,
                         val,
                         Type::F64,
@@ -2359,7 +2537,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I32ReinterpretF32 => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ReinterpretFloat32,
                         val,
                         Type::I32,
@@ -2367,7 +2545,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::I64ReinterpretF64 => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ReinterpretFloat64,
                         val,
                         Type::I64,
@@ -2375,7 +2553,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F32ReinterpretI32 => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ReinterpretInt32,
                         val,
                         Type::F32,
@@ -2383,7 +2561,7 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::F64ReinterpretI64 => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.unary(
+                    stack.push(IrBuilder::new(&mut module.expressions).unary(
                         crate::ir::ops::UnaryOp::ReinterpretInt64,
                         val,
                         Type::F64,
@@ -2395,7 +2573,7 @@ impl<'a> BinaryReader<'a> {
                         .get(data_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("data_drop", data_index))?;
-                    stack.push(builder.data_drop(id));
+                    stack.push(IrBuilder::new(&mut module.expressions).data_drop(id));
                 }
                 Operator::MemoryInit { data_index, mem } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2411,7 +2589,10 @@ impl<'a> BinaryReader<'a> {
                         .get(data_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory_init data", data_index))?;
-                    stack.push(builder.memory_init(memory, data_id, dest, src, size));
+                    stack.push(
+                        IrBuilder::new(&mut module.expressions)
+                            .memory_init(memory, data_id, dest, src, size),
+                    );
                 }
                 Operator::MemoryCopy { dst_mem, src_mem } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2427,7 +2608,10 @@ impl<'a> BinaryReader<'a> {
                         .get(src_mem as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", src_mem))?;
-                    stack.push(builder.memory_copy(dst_id, src_id, dest, src, size));
+                    stack.push(
+                        IrBuilder::new(&mut module.expressions)
+                            .memory_copy(dst_id, src_id, dest, src, size),
+                    );
                 }
                 Operator::MemoryFill { mem } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2438,7 +2622,10 @@ impl<'a> BinaryReader<'a> {
                         .get(mem as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", mem))?;
-                    stack.push(builder.memory_fill(memory, dest, value, size));
+                    stack.push(
+                        IrBuilder::new(&mut module.expressions)
+                            .memory_fill(memory, dest, value, size),
+                    );
                 }
                 Operator::RefNull { hty } => {
                     let ty = match hty {
@@ -2455,11 +2642,11 @@ impl<'a> BinaryReader<'a> {
                         },
                         _ => Type::ANYREF,
                     };
-                    stack.push(builder.ref_null(ty));
+                    stack.push(IrBuilder::new(&mut module.expressions).ref_null(ty));
                 }
                 Operator::RefIsNull => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.ref_is_null(val));
+                    stack.push(IrBuilder::new(&mut module.expressions).ref_is_null(val));
                 }
                 Operator::RefFunc { function_index } => {
                     let func_id = self
@@ -2467,12 +2654,12 @@ impl<'a> BinaryReader<'a> {
                         .get(function_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("function", function_index))?;
-                    stack.push(builder.ref_func(func_id));
+                    stack.push(IrBuilder::new(&mut module.expressions).ref_func(func_id));
                 }
                 Operator::RefEq => {
                     let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.ref_eq(left, right));
+                    stack.push(IrBuilder::new(&mut module.expressions).ref_eq(left, right));
                 }
                 Operator::TableGet { table } => {
                     let index = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2482,7 +2669,9 @@ impl<'a> BinaryReader<'a> {
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table", table))?;
                     let ty = module.tables[table_id].limits.element_type;
-                    stack.push(builder.table_get(table_id, index, ty));
+                    stack.push(
+                        IrBuilder::new(&mut module.expressions).table_get(table_id, index, ty),
+                    );
                 }
                 Operator::TableSet { table } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2492,7 +2681,9 @@ impl<'a> BinaryReader<'a> {
                         .get(table as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table", table))?;
-                    stack.push(builder.table_set(table_id, index, value));
+                    stack.push(
+                        IrBuilder::new(&mut module.expressions).table_set(table_id, index, value),
+                    );
                 }
                 Operator::TableSize { table } => {
                     let table_id = self
@@ -2500,7 +2691,7 @@ impl<'a> BinaryReader<'a> {
                         .get(table as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table", table))?;
-                    stack.push(builder.table_size(table_id));
+                    stack.push(IrBuilder::new(&mut module.expressions).table_size(table_id));
                 }
                 Operator::TableGrow { table } => {
                     let delta = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2510,7 +2701,9 @@ impl<'a> BinaryReader<'a> {
                         .get(table as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table", table))?;
-                    stack.push(builder.table_grow(table_id, value, delta));
+                    stack.push(
+                        IrBuilder::new(&mut module.expressions).table_grow(table_id, value, delta),
+                    );
                 }
                 Operator::TableFill { table } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2521,7 +2714,10 @@ impl<'a> BinaryReader<'a> {
                         .get(table as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table", table))?;
-                    stack.push(builder.table_fill(table_id, dest, value, size));
+                    stack.push(
+                        IrBuilder::new(&mut module.expressions)
+                            .table_fill(table_id, dest, value, size),
+                    );
                 }
                 Operator::TableCopy {
                     dst_table,
@@ -2540,7 +2736,10 @@ impl<'a> BinaryReader<'a> {
                         .get(src_table as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table", src_table))?;
-                    stack.push(builder.table_copy(dst_id, src_id, dest, src, size));
+                    stack.push(
+                        IrBuilder::new(&mut module.expressions)
+                            .table_copy(dst_id, src_id, dest, src, size),
+                    );
                 }
                 Operator::TableInit { elem_index, table } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -2556,7 +2755,10 @@ impl<'a> BinaryReader<'a> {
                         .get(elem_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table_init elem", elem_index))?;
-                    stack.push(builder.table_init(table_id, elem_id, dest, offset, size));
+                    stack.push(
+                        IrBuilder::new(&mut module.expressions)
+                            .table_init(table_id, elem_id, dest, offset, size),
+                    );
                 }
                 Operator::ElemDrop { elem_index } => {
                     let id = self
@@ -2564,19 +2766,19 @@ impl<'a> BinaryReader<'a> {
                         .get(elem_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("elem_drop", elem_index))?;
-                    stack.push(builder.elem_drop(id));
+                    stack.push(IrBuilder::new(&mut module.expressions).elem_drop(id));
                 }
                 Operator::RefI31 => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.i31_new(val));
+                    stack.push(IrBuilder::new(&mut module.expressions).i31_new(val));
                 }
                 Operator::I31GetS => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.i31_get(val, true));
+                    stack.push(IrBuilder::new(&mut module.expressions).i31_get(val, true));
                 }
                 Operator::I31GetU => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.i31_get(val, false));
+                    stack.push(IrBuilder::new(&mut module.expressions).i31_get(val, false));
                 }
                 Operator::StructNew { struct_type_index } => {
                     let ty = self
@@ -2585,12 +2787,15 @@ impl<'a> BinaryReader<'a> {
                         .cloned()
                         .unwrap_or((vec![], vec![]));
                     let param_count = ty.0.len();
-                    let mut operands = BumpVec::with_capacity_in(param_count, self.bump);
+                    let mut operands = Vec::with_capacity(param_count);
                     for _ in 0..param_count {
                         operands.push(stack.pop().ok_or(ParseError::UnexpectedEof)?);
                     }
                     operands.reverse();
-                    stack.push(builder.struct_new(Type::new(HeapType::STRUCT, true), operands));
+                    stack.push(
+                        IrBuilder::new(&mut module.expressions)
+                            .struct_new(Type::new(HeapType::STRUCT, true), operands),
+                    );
                     // TODO: refine type
                 }
                 Operator::StructGet {
@@ -2598,7 +2803,7 @@ impl<'a> BinaryReader<'a> {
                     field_index,
                 } => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.struct_get(
+                    stack.push(IrBuilder::new(&mut module.expressions).struct_get(
                         Type::new(HeapType::STRUCT, true),
                         ptr,
                         field_index,
@@ -2612,7 +2817,7 @@ impl<'a> BinaryReader<'a> {
                 } => {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.struct_set(
+                    stack.push(IrBuilder::new(&mut module.expressions).struct_set(
                         Type::new(HeapType::STRUCT, true),
                         ptr,
                         field_index,
@@ -2623,14 +2828,18 @@ impl<'a> BinaryReader<'a> {
                     array_type_index: _,
                 } => {
                     let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.array_new(Type::new(HeapType::ARRAY, true), size, None));
+                    stack.push(IrBuilder::new(&mut module.expressions).array_new(
+                        Type::new(HeapType::ARRAY, true),
+                        size,
+                        None,
+                    ));
                 }
                 Operator::ArrayGet {
                     array_type_index: _,
                 } => {
                     let index = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.array_get(
+                    stack.push(IrBuilder::new(&mut module.expressions).array_get(
                         Type::new(HeapType::ARRAY, true),
                         ptr,
                         index,
@@ -2644,7 +2853,7 @@ impl<'a> BinaryReader<'a> {
                     let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let index = stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.array_set(
+                    stack.push(IrBuilder::new(&mut module.expressions).array_set(
                         Type::new(HeapType::ARRAY, true),
                         ptr,
                         index,
@@ -2653,16 +2862,20 @@ impl<'a> BinaryReader<'a> {
                 }
                 Operator::ArrayLen => {
                     let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.array_len(ptr));
+                    stack.push(IrBuilder::new(&mut module.expressions).array_len(ptr));
                 }
                 Operator::RefTestNonNull { hty: _ } | Operator::RefTestNullable { hty: _ } => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.ref_test(crate::ir::ops::RefTestOp::Ref, val, Type::ANYREF));
+                    stack.push(IrBuilder::new(&mut module.expressions).ref_test(
+                        crate::ir::ops::RefTestOp::Ref,
+                        val,
+                        Type::ANYREF,
+                    ));
                     // TODO
                 }
                 Operator::RefCastNonNull { hty: _ } | Operator::RefCastNullable { hty: _ } => {
                     let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(builder.ref_cast(
+                    stack.push(IrBuilder::new(&mut module.expressions).ref_cast(
                         crate::ir::ops::RefCastOp::Cast,
                         val,
                         Type::ANYREF,
@@ -2674,16 +2887,33 @@ impl<'a> BinaryReader<'a> {
             }
         }
 
-        self.last_op_was_else = false;
+        let mut final_stack: Vec<ExpressionId> = stack
+            .into_iter()
+            .filter(|e| !consumed.contains(e))
+            .collect();
 
-        if stack.is_empty() {
-            Ok(Some(builder.nop()))
-        } else if stack.len() > 1 {
-            let list = BumpVec::from_iter_in(stack, self.bump);
-            let result_type = list.last().map(|e| e.type_).unwrap_or(Type::NONE);
-            Ok(Some(builder.block(None, list, result_type)))
+        println!("FINAL STACK: {} items", final_stack.len());
+        for (i, expr_id) in final_stack.iter().enumerate() {
+            println!(
+                "  [{}] {:?}: {:?}",
+                i, expr_id, module.expressions[*expr_id].kind
+            );
+        }
+
+        if final_stack.is_empty() {
+            Ok(Some(IrBuilder::new(&mut module.expressions).nop()))
+        } else if final_stack.len() > 1 {
+            let result_type = final_stack
+                .last()
+                .map(|&e| module.expressions[e].type_)
+                .unwrap_or(Type::NONE);
+            Ok(Some(IrBuilder::new(&mut module.expressions).block(
+                "",
+                final_stack,
+                result_type,
+            )))
         } else {
-            Ok(stack.pop())
+            Ok(final_stack.pop())
         }
     }
 }
@@ -2691,11 +2921,10 @@ impl<'a> BinaryReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::expression::ExpressionKind;
 
     #[test]
     fn test_parse_minimal_module() {
-        let bump = Bump::new();
-
         let wasm = vec![
             0x00, 0x61, 0x73, 0x6D, // magic
             0x01, 0x00, 0x00, 0x00, // version
@@ -2715,17 +2944,20 @@ mod tests {
             0x0B, // end
         ];
 
-        let mut reader = BinaryReader::new(&bump, wasm);
-        let module = reader.parse_module().expect("Failed to parse module");
+        let mut reader = BinaryReader::new();
+        let module = reader.parse_module(&wasm).expect("Failed to parse module");
 
         assert_eq!(module.functions.len(), 1);
         let func = &module.functions.iter().next().unwrap().1;
         assert_eq!(func.results, Type::I32);
 
         if let Some(body) = func.body() {
-            match &body.kind {
+            match &module.expressions[body].kind {
                 ExpressionKind::Const(Literal::I32(42)) => {} // Success
-                _ => panic!("Expected i32.const 42, got {:?}", body.kind),
+                _ => panic!(
+                    "Expected i32.const 42, got {:?}",
+                    module.expressions[body].kind
+                ),
             }
         } else {
             panic!("Function body is None");
@@ -2734,8 +2966,6 @@ mod tests {
 
     #[test]
     fn test_parse_multi_param_function() {
-        let bump = Bump::new();
-
         let wasm = vec![
             0x00, 0x61, 0x73, 0x6D, // magic
             0x01, 0x00, 0x00, 0x00, // version
@@ -2755,8 +2985,8 @@ mod tests {
             0x0B, // end
         ];
 
-        let mut reader = BinaryReader::new(&bump, wasm);
-        let module = reader.parse_module().expect("Failed to parse module");
+        let mut reader = BinaryReader::new();
+        let module = reader.parse_module(&wasm).expect("Failed to parse module");
 
         assert_eq!(module.functions.len(), 1);
         let func = &module.functions.iter().next().unwrap().1;

@@ -1,18 +1,19 @@
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::{ExportKind, Function, Module};
 use crate::ir::visitor::ReadOnlyVisitor;
 use crate::ir::{LocalId, Type};
 use std::collections::HashSet;
 
-pub struct Validator<'a, 'm> {
-    module: &'m Module<'a>,
-    current_function: Option<&'m Function<'a>>,
+pub struct Validator<'m> {
+    module: &'m Module,
+    current_function: Option<&'m Function>,
     valid: bool,
     errors: Vec<String>,
 }
 
-impl<'a, 'm> Validator<'a, 'm> {
-    pub fn new(module: &'m Module<'a>) -> Self {
+impl<'m> Validator<'m> {
+    pub fn new(module: &'m Module) -> Self {
         Self {
             module,
             current_function: None,
@@ -46,19 +47,18 @@ impl<'a, 'm> Validator<'a, 'm> {
             }
 
             // Check body if present
-            if let Some(body) = func.body() {
-                if !body.is_null() {
-                    self.visit(body);
+            if let Some(body_id) = func.body() {
+                self.visit(body_id, &self.module.expressions);
 
-                    // Check return type
-                    if body.type_ != func.results {
-                        // Simple check: Allow Unreachable
-                        if body.type_ != Type::UNREACHABLE {
-                            self.fail(&format!(
-                                "{}Result mismatch. Expected {:?}, got {:?}",
-                                context, func.results, body.type_
-                            ));
-                        }
+                // Check return type
+                let body = &self.module.expressions[body_id];
+                if body.type_ != func.results {
+                    // Simple check: Allow Unreachable
+                    if body.type_ != Type::UNREACHABLE {
+                        self.fail(&format!(
+                            "{}Result mismatch. Expected {:?}, got {:?}",
+                            context, func.results, body.type_
+                        ));
                     }
                 }
             }
@@ -106,7 +106,7 @@ impl<'a, 'm> Validator<'a, 'm> {
             }
             // Validate offset expression (must be constant)
             // For now, just walk the expression to trigger validation
-            self.visit(segment.offset);
+            self.visit(segment.offset, &self.module.expressions);
         }
 
         // Validate start function
@@ -145,7 +145,7 @@ impl<'a, 'm> Validator<'a, 'm> {
             }
 
             // Validate offset expression (must be constant)
-            self.visit(segment.offset);
+            self.visit(segment.offset, &self.module.expressions);
         }
 
         (self.valid, self.errors)
@@ -157,24 +157,28 @@ impl<'a, 'm> Validator<'a, 'm> {
     }
 
     fn get_local_type(&self, func: &Function, id: LocalId) -> Option<Type> {
-        if func.is_import() {
-            return None;
-        }
         func.locals().get(id.cast()).map(|l| l.type_)
     }
 }
 
-impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
-    fn visit_expression(&mut self, expr: ExprRef<'a>) {
+impl<'m> ReadOnlyVisitor for Validator<'m> {
+    fn visit_expression(
+        &mut self,
+        expr_id: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
+        let expr = &arena[expr_id];
         match &expr.kind {
             ExpressionKind::Binary { op, left, right } => {
-                if left.type_ != right.type_
-                    && left.type_ != Type::UNREACHABLE
-                    && right.type_ != Type::UNREACHABLE
+                let left_expr = &arena[*left];
+                let right_expr = &arena[*right];
+                if left_expr.type_ != right_expr.type_
+                    && left_expr.type_ != Type::UNREACHABLE
+                    && right_expr.type_ != Type::UNREACHABLE
                 {
                     self.fail(&format!(
                         "Binary op {:?} operands type mismatch: {:?} vs {:?}",
-                        op, left.type_, right.type_
+                        op, left_expr.type_, right_expr.type_
                     ));
                 }
             }
@@ -195,10 +199,11 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
             ExpressionKind::LocalSet { id, value } | ExpressionKind::LocalTee { id, value } => {
                 if let Some(current) = self.current_function {
                     if let Some(expected_ty) = self.get_local_type(current, *id) {
-                        if value.type_ != expected_ty && value.type_ != Type::UNREACHABLE {
+                        let val_expr = &arena[*value];
+                        if val_expr.type_ != expected_ty && val_expr.type_ != Type::UNREACHABLE {
                             self.fail(&format!(
                                 "LocalSet/Tee: Value type {:?} does not match local {:?} type {:?}",
-                                value.type_, id, expected_ty
+                                val_expr.type_, id, expected_ty
                             ));
                         }
                     } else {
@@ -223,10 +228,11 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
                     if !g.mutable {
                         self.fail(&format!("GlobalSet: Global {:?} is immutable", id));
                     }
-                    if value.type_ != g.type_ && value.type_ != Type::UNREACHABLE {
+                    let val_expr = &arena[*value];
+                    if val_expr.type_ != g.type_ && val_expr.type_ != Type::UNREACHABLE {
                         self.fail(&format!(
                             "GlobalSet: Value type {:?} does not match global type {:?}",
-                            value.type_, g.type_
+                            val_expr.type_, g.type_
                         ));
                     }
                 } else {
@@ -238,8 +244,10 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
             } => {
                 if let Some(func) = self.module.functions.get(*target) {
                     if !operands.is_empty() {
-                        let op_type = operands[0].type_;
-                        if op_type != func.params && op_type != Type::UNREACHABLE {
+                        let first_op_expr = &arena[operands[0]];
+                        if first_op_expr.type_ != func.params
+                            && first_op_expr.type_ != Type::UNREACHABLE
+                        {
                             self.fail(&format!("Call to {:?} param mismatch", target));
                         }
                     }
@@ -248,9 +256,6 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
                 }
             }
             ExpressionKind::CallIndirect { table, .. } => {
-                // Here 'type_' in CallIndirect is the Type (signature) itself,
-                // but we should check if it's a valid signature in the module if possible.
-                // However, the IR 'type_' is the actual Type object.
                 if self.module.tables.get(*table).is_none() {
                     self.fail(&format!("CallIndirect: Table {:?} does not exist", table));
                 }
@@ -264,10 +269,11 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
                 if self.module.memories.get(*memory).is_none() {
                     self.fail(&format!("MemoryGrow: Memory {:?} does not exist", memory));
                 }
-                if delta.type_ != Type::I32 && delta.type_ != Type::UNREACHABLE {
+                let delta_expr = &arena[*delta];
+                if delta_expr.type_ != Type::I32 && delta_expr.type_ != Type::UNREACHABLE {
                     self.fail(&format!(
                         "MemoryGrow: Delta type {:?} must be I32",
-                        delta.type_
+                        delta_expr.type_
                     ));
                 }
             }
@@ -299,66 +305,8 @@ impl<'a, 'm> ReadOnlyVisitor<'a> for Validator<'a, 'm> {
                     self.fail(&format!("AtomicNotify: Memory {:?} does not exist", memory));
                 }
             }
-            ExpressionKind::Return { .. }
-            | ExpressionKind::Unreachable
-            | ExpressionKind::Drop { .. }
-            | ExpressionKind::Select { .. }
-            | ExpressionKind::Load { .. }
-            | ExpressionKind::Store { .. }
-            | ExpressionKind::Const(_)
-            | ExpressionKind::Unary { .. }
-            | ExpressionKind::Block { .. }
-            | ExpressionKind::If { .. }
-            | ExpressionKind::Loop { .. }
-            | ExpressionKind::Break { .. }
-            | ExpressionKind::Nop
-            | ExpressionKind::Switch { .. }
-            | ExpressionKind::AtomicRMW { .. }
-            | ExpressionKind::AtomicCmpxchg { .. }
-            | ExpressionKind::AtomicWait { .. }
-            | ExpressionKind::AtomicFence
-            | ExpressionKind::SIMDExtract { .. }
-            | ExpressionKind::SIMDReplace { .. }
-            | ExpressionKind::SIMDShuffle { .. }
-            | ExpressionKind::SIMDTernary { .. }
-            | ExpressionKind::SIMDShift { .. }
-            | ExpressionKind::SIMDLoad { .. }
-            | ExpressionKind::SIMDLoadStoreLane { .. }
-            | ExpressionKind::MemoryInit { .. }
-            | ExpressionKind::DataDrop { .. }
-            | ExpressionKind::TableGet { .. }
-            | ExpressionKind::TableSet { .. }
-            | ExpressionKind::TableSize { .. }
-            | ExpressionKind::TableGrow { .. }
-            | ExpressionKind::TableFill { .. }
-            | ExpressionKind::TableCopy { .. }
-            | ExpressionKind::TableInit { .. }
-            | ExpressionKind::RefNull { .. }
-            | ExpressionKind::RefIsNull { .. }
-            | ExpressionKind::RefAs { .. }
-            | ExpressionKind::RefEq { .. }
-            | ExpressionKind::RefFunc { .. }
-            | ExpressionKind::StructNew { .. }
-            | ExpressionKind::StructGet { .. }
-            | ExpressionKind::StructSet { .. }
-            | ExpressionKind::ArrayNew { .. }
-            | ExpressionKind::ArrayGet { .. }
-            | ExpressionKind::ArraySet { .. }
-            | ExpressionKind::ArrayLen { .. }
-            | ExpressionKind::ElemDrop { .. }
-            | ExpressionKind::Try { .. }
-            | ExpressionKind::Throw { .. }
-            | ExpressionKind::Rethrow { .. }
-            | ExpressionKind::TupleMake { .. }
-            | ExpressionKind::TupleExtract { .. }
-            | ExpressionKind::Pop { .. }
-            | ExpressionKind::I31New { .. }
-            | ExpressionKind::I31Get { .. }
-            | ExpressionKind::RefTest { .. }
-            | ExpressionKind::RefCast { .. }
-            | ExpressionKind::BrOn { .. } => {
-                // These expression kinds don't require special validation yet
-            }
+            _ => {}
         }
+        self.visit_children(expr_id, arena);
     }
 }

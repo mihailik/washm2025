@@ -1,6 +1,8 @@
 use crate::analysis::call_graph::CallGraph;
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::Module;
+use crate::ir::visitor::ReadOnlyVisitor;
 use crate::ir::{FuncId, GlobalId, Literal};
 use std::collections::{HashMap, HashSet};
 
@@ -61,16 +63,21 @@ impl GlobalAnalysis {
     }
 
     fn analyze_usage(&mut self, module: &Module) {
+        let mut visitor = UsageVisitor {
+            module,
+            analysis: self,
+        };
+
         for (_, func) in &module.functions {
             if let Some(body) = func.body() {
-                self.visit_usage(module, body);
+                visitor.visit(body, &module.expressions);
             }
         }
 
         // Visit global initializers
         for (_, global) in module.globals.iter() {
             if let crate::ir::module::GlobalKind::Local { init } = &global.kind {
-                self.visit_usage(module, *init);
+                visitor.visit(*init, &module.expressions);
             }
         }
 
@@ -98,140 +105,35 @@ impl GlobalAnalysis {
                 }
 
                 let is_effectively_constant = !global.mutable
-                    || !self.written_globals.contains(&gid)
-                    || !self.non_init_written.contains(&gid);
+                    || (!self.written_globals.contains(&gid)
+                        && !self.non_init_written.contains(&gid));
 
                 if is_effectively_constant {
-                    self.constant_globals.insert(gid);
-
-                    // Try to resolve the value
                     if let crate::ir::module::GlobalKind::Local { init } = &global.kind {
-                        if let ExpressionKind::Const(value) = &init.kind {
-                            if let std::collections::hash_map::Entry::Vacant(e) =
-                                self.global_values.entry(gid)
-                            {
-                                e.insert(*value);
-                                changed = true;
-                            }
-                        } else if let ExpressionKind::GlobalGet { id: other_id } = &init.kind {
-                            if let Some(value) = self.global_values.get(other_id) {
-                                let val = *value;
-                                if !(self.global_values.get(&gid) == Some(&val)) {
-                                    self.global_values.insert(gid, val);
-                                    changed = true;
-                                }
-                            }
-                        }
-                    } else if let crate::ir::module::GlobalKind::Import { .. } = &global.kind {
-                        if !global.mutable {
+                        if let Some(val) = self.eval_constant_expression(module, *init) {
                             self.constant_globals.insert(gid);
+                            self.global_values.insert(gid, val);
+                            changed = true;
+                        } else if !global.mutable {
+                            // Even if we don't know the value, it's still constant
+                            self.constant_globals.insert(gid);
+                            changed = true;
                         }
+                    } else if global.is_import() && !global.mutable {
+                        self.constant_globals.insert(gid);
+                        changed = true;
                     }
                 }
             }
         }
     }
 
-    fn visit_usage(&mut self, module: &Module, expr: ExprRef) {
+    fn eval_constant_expression(&self, module: &Module, expr_id: ExpressionId) -> Option<Literal> {
+        let expr = &module.expressions[expr_id];
         match &expr.kind {
-            ExpressionKind::GlobalGet { id } => {
-                let id = *id;
-                self.read_globals.insert(id);
-                *self.read_counts.entry(id).or_insert(0) += 1;
-            }
-            ExpressionKind::GlobalSet { id, value } => {
-                let id = *id;
-                self.written_globals.insert(id);
-                *self.write_counts.entry(id).or_insert(0) += 1;
-
-                // Check if we are writing a value different from the initializer
-                if let ExpressionKind::Const(lit) = &value.kind {
-                    if let Some(global) = module.globals.get(id.cast()) {
-                        if let crate::ir::module::GlobalKind::Local { init } = &global.kind {
-                            if let ExpressionKind::Const(init_lit) = &init.kind {
-                                if lit != init_lit {
-                                    self.non_init_written.insert(id);
-                                }
-                            } else {
-                                // Non-const initializer, any write is non-init (effectively)
-                                self.non_init_written.insert(id);
-                            }
-                        }
-                    }
-                } else {
-                    // Non-const value being set
-                    self.non_init_written.insert(id);
-                }
-
-                self.visit_usage(module, *value);
-            }
-            ExpressionKind::Block { list, .. } => {
-                for child in list.iter() {
-                    self.visit_usage(module, *child);
-                }
-            }
-            ExpressionKind::Loop { body, .. } => self.visit_usage(module, *body),
-            ExpressionKind::If {
-                condition,
-                if_true,
-                if_false,
-                ..
-            } => {
-                self.visit_usage(module, *condition);
-                self.visit_usage(module, *if_true);
-                if let Some(e) = if_false {
-                    self.visit_usage(module, *e);
-                }
-            }
-            ExpressionKind::Binary { left, right, .. } => {
-                self.visit_usage(module, *left);
-                self.visit_usage(module, *right);
-            }
-            ExpressionKind::Unary { value, .. } => self.visit_usage(module, *value),
-            ExpressionKind::Const(_) | ExpressionKind::Nop | ExpressionKind::Unreachable => {}
-            ExpressionKind::Call { operands, .. }
-            | ExpressionKind::CallIndirect { operands, .. } => {
-                for arg in operands {
-                    self.visit_usage(module, *arg);
-                }
-                if let ExpressionKind::CallIndirect { target, .. } = &expr.kind {
-                    self.visit_usage(module, *target);
-                }
-            }
-            ExpressionKind::LocalGet { .. } => {}
-            ExpressionKind::LocalSet { value, .. } | ExpressionKind::LocalTee { value, .. } => {
-                self.visit_usage(module, *value);
-            }
-            ExpressionKind::Drop { value } => self.visit_usage(module, *value),
-            ExpressionKind::Select {
-                condition,
-                if_true,
-                if_false,
-            } => {
-                self.visit_usage(module, *condition);
-                self.visit_usage(module, *if_true);
-                self.visit_usage(module, *if_false);
-            }
-            ExpressionKind::Load { ptr, .. } => self.visit_usage(module, *ptr),
-            ExpressionKind::Store { ptr, value, .. } => {
-                self.visit_usage(module, *ptr);
-                self.visit_usage(module, *value);
-            }
-            ExpressionKind::Return { value: Some(v) } => {
-                self.visit_usage(module, *v);
-            }
-            ExpressionKind::Return { value: None } => {}
-            ExpressionKind::Switch {
-                condition, value, ..
-            } => {
-                self.visit_usage(module, *condition);
-                if let Some(v) = value {
-                    self.visit_usage(module, *v);
-                }
-            }
-            _ => {
-                // Fallback for other expressions if any
-            }
+            ExpressionKind::Const(lit) => Some(*lit),
+            ExpressionKind::GlobalGet { id } => self.global_values.get(id).cloned(),
+            _ => None,
         }
     }
 
@@ -279,100 +181,106 @@ impl GlobalAnalysis {
     }
 }
 
+struct UsageVisitor<'a> {
+    module: &'a Module,
+    analysis: &'a mut GlobalAnalysis,
+}
+
+impl ReadOnlyVisitor for UsageVisitor<'_> {
+    fn visit_expression(
+        &mut self,
+        expr_id: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
+        let expr = &arena[expr_id];
+        match &expr.kind {
+            ExpressionKind::GlobalGet { id } => {
+                let id = *id;
+                self.analysis.read_globals.insert(id);
+                *self.analysis.read_counts.entry(id).or_insert(0) += 1;
+            }
+            ExpressionKind::GlobalSet { id, value } => {
+                let id = *id;
+                self.analysis.written_globals.insert(id);
+                *self.analysis.write_counts.entry(id).or_insert(0) += 1;
+
+                // Check if it's written with a constant value
+                if let ExpressionKind::Const(lit) = &arena[*value].kind {
+                    let lit = *lit;
+                    if let Some(global) = self.module.globals.get(id.cast()) {
+                        if let crate::ir::module::GlobalKind::Local { init } = &global.kind {
+                            if let ExpressionKind::Const(init_lit) = &arena[*init].kind {
+                                if lit != *init_lit {
+                                    self.analysis.non_init_written.insert(id);
+                                }
+                            } else {
+                                // Non-const initializer, any write is non-init (effectively)
+                                self.analysis.non_init_written.insert(id);
+                            }
+                        }
+                    }
+                } else {
+                    // Non-const value being set
+                    self.analysis.non_init_written.insert(id);
+                }
+            }
+            _ => {}
+        }
+        self.visit_children(expr_id, arena);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ir::expression::IrBuilder;
-    use crate::ir::module::{Function, Module};
+    use crate::ir::module::Function;
     use crate::ir::Type;
-    use bumpalo::Bump;
 
     #[test]
     fn test_reachability() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut module = Module::new();
+        let (arena, _, _, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        let mut builder = IrBuilder::new(arena);
 
-        // Dummy IDs for builder.call (will update after adding to module)
-        let f1_placeholder: FuncId = 1.into();
-        let f2_placeholder: FuncId = 2.into();
+        // Dummy IDs for builder.call (will be replaced after adding to module)
+        // We'll build the expressions first
 
         // Func 0: Exported, calls Func 1
-        let call1 = builder.call(
-            f1_placeholder,
-            bumpalo::collections::Vec::new_in(&bump),
-            Type::NONE,
-            false,
-        );
-        let func0 = Function::new(
-            "func0".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(call1),
-        );
+        let f1_id: FuncId = 1.into();
+        let f2_id: FuncId = 2.into();
 
-        // Func 1: Called by Func 0, calls Func 2
-        let call2 = builder.call(
-            f2_placeholder,
-            bumpalo::collections::Vec::new_in(&bump),
-            Type::NONE,
-            false,
-        );
-        let func1 = Function::new(
-            "func1".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(call2),
-        );
+        let call1 = builder.call(f1_id, vec![], Type::NONE, false);
+        let f0 = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], call1);
 
-        // Func 2: Called by Func 1
+        // Func 1: Internal, calls Func 2
+        let call2 = builder.call(f2_id, vec![], Type::NONE, false);
+        let f1 = Function::new("f1".to_string(), Type::NONE, Type::NONE, vec![], call2);
+
+        // Func 2: Internal, leaf
         let nop = builder.nop();
-        let func2_def = Function::new(
-            "func2".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(nop),
-        );
+        let f2 = Function::new("f2".to_string(), Type::NONE, Type::NONE, vec![], nop);
 
-        // Func 3: Unreachable (not exported, not called)
+        // Func 3: Unreachable
         let nop2 = builder.nop();
-        let func3 = Function::new(
-            "func3".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(nop2),
+        let f3 = Function::new("f3".to_string(), Type::NONE, Type::NONE, vec![], nop2);
+
+        let id0 = module.add_function(f0);
+        let _id1 = module.add_function(f1);
+        let _id2 = module.add_function(f2);
+        let id3 = module.add_function(f3);
+
+        module.add_export(
+            "f0".to_string(),
+            crate::ir::module::ExportKind::Function(id0),
         );
-
-        let mut module = Module::new(&bump);
-        let f0_id = module.add_function(func0);
-        let f1_id = module.add_function(func1);
-        let f2_id = module.add_function(func2_def);
-        let f3_id = module.add_function(func3);
-
-        // Patch placeholder IDs
-        if let Some(mut_body) = module.functions[f0_id].body_mut() {
-            if let ExpressionKind::Call { target, .. } = &mut mut_body.kind {
-                *target = f1_id;
-            }
-        }
-        if let Some(mut_body) = module.functions[f1_id].body_mut() {
-            if let ExpressionKind::Call { target, .. } = &mut mut_body.kind {
-                *target = f2_id;
-            }
-        }
-
-        // Export func0
-        module.export_function(f0_id, "main".to_string());
 
         let call_graph = CallGraph::build(&module);
         let analysis = GlobalAnalysis::analyze(&module, &call_graph);
 
-        assert!(analysis.reachable_functions.contains(&f0_id));
-        assert!(analysis.reachable_functions.contains(&f1_id));
-        assert!(analysis.reachable_functions.contains(&f2_id));
-        assert!(!analysis.reachable_functions.contains(&f3_id));
+        assert!(analysis.reachable_functions.contains(&id0));
+        assert!(analysis.reachable_functions.contains(&1.into()));
+        assert!(analysis.reachable_functions.contains(&2.into()));
+        assert!(!analysis.reachable_functions.contains(&id3));
     }
 }

@@ -11,7 +11,7 @@ impl Pass for TypeRefining {
         "type-refining"
     }
 
-    fn run<'a>(&mut self, _module: &mut Module<'a>) {
+    fn run(&mut self, _module: &mut Module) {
         // Placeholder for advanced type system analysis
         // Requires full GC type definitions which are not fully exposed in this simplified port yet.
     }
@@ -21,12 +21,10 @@ impl Pass for TypeRefining {
 mod tests {
     use super::*;
     use crate::ir::module::Module;
-    use bumpalo::Bump;
 
     #[test]
     fn test_type_refining_runs() {
-        let bump = Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         let mut pass = TypeRefining;
         pass.run(&mut module);
     }

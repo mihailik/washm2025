@@ -1,4 +1,5 @@
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
 use crate::ir::Type;
@@ -12,19 +13,24 @@ struct LocalAnalyzer {
     assigned_types: HashMap<crate::ir::LocalId, Option<Type>>,
 }
 
-impl<'a> Visitor<'a> for LocalAnalyzer {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
+impl Visitor for LocalAnalyzer {
+    fn visit_expression(
+        &mut self,
+        expr: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        let e = &arena[*expr];
         if let ExpressionKind::LocalSet { id, value } | ExpressionKind::LocalTee { id, value } =
-            &expr.kind
+            &e.kind
         {
+            let value_type = arena[*value].type_;
             let entry = self.assigned_types.entry(*id).or_insert(None);
             if let Some(current) = entry {
-                *current = Type::get_lub(*current, value.type_);
+                *current = Type::get_lub(*current, value_type);
             } else {
-                *entry = Some(value.type_);
+                *entry = Some(value_type);
             }
         }
-        self.visit_children(expr);
     }
 }
 
@@ -33,14 +39,14 @@ impl Pass for LocalSubtyping {
         "local-subtyping"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         for (_, func) in &mut module.functions {
             if let Some(mut body) = func.body() {
                 // 1. Map from local ID to the LUB of types assigned
                 let mut analyzer = LocalAnalyzer {
                     assigned_types: HashMap::new(),
                 };
-                analyzer.visit(&mut body);
+                analyzer.visit(&mut body, &mut module.expressions);
                 let inferred_types = analyzer.assigned_types;
 
                 // 2. Update vars (excluding parameters)
@@ -82,16 +88,17 @@ mod tests {
     use crate::ir::expression::IrBuilder;
     use crate::ir::module::{Function, Module};
     use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
 
     #[test]
     fn test_local_subtyping_noop_mvp() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut module = Module::new();
+        let set = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
 
-        // (local.set 0 (i32.const 42))
-        let c42 = builder.const_(Literal::I32(42));
-        let set = builder.local_set(0, c42);
+            // (local.set 0 (i32.const 42))
+            let c42 = builder.const_(Literal::I32(42));
+            builder.local_set(crate::ir::LocalId::from_u32(0), c42)
+        };
 
         // Function has local 0 as I32
         let func = Function::new(
@@ -99,20 +106,16 @@ mod tests {
             Type::NONE,
             Type::NONE,
             vec![Type::I32], // Local 0
-            Some(set),
+            set,
         );
 
-        let bump_mod = Bump::new();
-        let mut module = Module::new(&bump_mod);
         module.add_function(func);
 
         let mut pass = LocalSubtyping;
         pass.run(&mut module);
 
         // Should remain I32
-        assert_eq!(
-            module.functions[module.functions.iter().next().unwrap().0].vars()[0],
-            Type::I32
-        );
+        let func_id = module.functions.iter().next().unwrap().0;
+        assert_eq!(module.functions[func_id].vars()[0], Type::I32);
     }
 }

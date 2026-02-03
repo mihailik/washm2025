@@ -5,8 +5,6 @@ use crate::ir::expression::*;
 use crate::ir::module::*;
 use crate::ir::ops::*;
 use crate::ir::visitor::Visitor;
-use bumpalo::collections::Vec as BumpVec;
-use bumpalo::Bump;
 
 #[test]
 fn test_type_name() {
@@ -40,33 +38,34 @@ fn test_signature() {
 
 #[test]
 fn test_validation_failure() {
-    let bump = Bump::new();
-    let _module_name = "test_module";
+    let mut module = Module::new();
 
     // Create mismatched binary op: i32 + f32
-    let left = ExprRef::new(bump.alloc(Expression {
-        kind: ExpressionKind::Const(Literal::I32(1)),
-        type_: Type::I32,
-    }));
-    let right = ExprRef::new(bump.alloc(Expression {
-        kind: ExpressionKind::Const(Literal::F32(2.0)),
-        type_: Type::F32,
-    }));
+    let left = module.expressions.alloc(Expression::new(
+        ExpressionKind::Const(Literal::I32(1)),
+        Type::I32,
+    ));
+    let right = module.expressions.alloc(Expression::new(
+        ExpressionKind::Const(Literal::F32(2.0)),
+        Type::F32,
+    ));
 
-    let binary_expr = ExprRef::new(bump.alloc(Expression {
-        kind: ExpressionKind::Binary {
+    let binary_expr = module.expressions.alloc(Expression::new(
+        ExpressionKind::Binary {
             op: BinaryOp::AddInt32, // Note: using int32 add
             left,
             right,
         },
-        type_: Type::I32, // Result type claimed to be i32
-    }));
+        Type::I32, // Result type claimed to be i32
+    ));
 
-    let mut module = Module::new(&bump);
-    let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
-    if let Some(mut_body) = func.body_mut() {
-        *mut_body = binary_expr;
-    }
+    let func = Function::new(
+        "test".to_string(),
+        Type::NONE,
+        Type::NONE,
+        vec![],
+        binary_expr,
+    );
     module.add_function(func);
 
     let validator = Validator::new(&module);
@@ -79,44 +78,38 @@ fn test_validation_failure() {
 
 #[test]
 fn test_global_validation() {
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
+    let mut module = Module::new();
+    let _builder = IrBuilder::new(&mut module.expressions);
 
-    macro_rules! create_globals {
-        ($module:expr) => {
-            $module.add_global(crate::ir::module::Global {
+    // 1. Test GlobalSet on immutable global (g0)
+    {
+        let mut module = Module::new();
+        let g0_id = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            module.globals.alloc(crate::ir::module::Global {
                 name: "g0".to_string(),
                 kind: crate::ir::module::GlobalKind::Local {
                     init: builder.const_(Literal::I32(0)),
                 },
                 type_: Type::I32,
                 mutable: false,
-            });
-            $module.add_global(crate::ir::module::Global {
-                name: "g1".to_string(),
-                kind: crate::ir::module::GlobalKind::Local {
-                    init: builder.const_(Literal::F32(0.0)),
-                },
-                type_: Type::F32,
-                mutable: true,
-            });
+            })
         };
-    }
 
-    // 1. Test GlobalSet on immutable global (g0)
-    {
-        let mut module = Module::new(&bump);
-        create_globals!(&mut module);
-        let g0_id = module.globals.ids().next().unwrap().cast();
+        let set_immutable = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let val = builder.const_(Literal::I32(42));
+            builder.global_set(g0_id, val)
+        };
 
-        let val = builder.const_(Literal::I32(42));
-        let set_immutable = builder.global_set(g0_id, val);
-
-        let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
-        if let Some(mut_body) = func.body_mut() {
-            *mut_body = set_immutable;
-        }
-        module.functions.push(func);
+        let func = Function::new(
+            "test".to_string(),
+            Type::NONE,
+            Type::NONE,
+            vec![],
+            set_immutable,
+        );
+        module.add_function(func);
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
@@ -126,20 +119,41 @@ fn test_global_validation() {
 
     // 2. Test GlobalSet type mismatch
     {
-        let mut module = Module::new(&bump);
-        create_globals!(&mut module);
-        let mut ids = module.globals.ids();
-        let _ = ids.next();
-        let g1_id = ids.next().unwrap().cast();
+        let mut module = Module::new();
+        let g1_id = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            module.globals.alloc(crate::ir::module::Global {
+                name: "g0".to_string(),
+                kind: crate::ir::module::GlobalKind::Local {
+                    init: builder.const_(Literal::I32(0)),
+                },
+                type_: Type::I32,
+                mutable: false,
+            });
+            module.globals.alloc(crate::ir::module::Global {
+                name: "g1".to_string(),
+                kind: crate::ir::module::GlobalKind::Local {
+                    init: builder.const_(Literal::F32(0.0)),
+                },
+                type_: Type::F32,
+                mutable: true,
+            })
+        };
 
-        let val = builder.const_(Literal::I32(42)); // i32
-        let set_mismatch = builder.global_set(g1_id, val); // trying to set to g1 (f32)
+        let set_mismatch = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let val = builder.const_(Literal::I32(42)); // i32
+            builder.global_set(g1_id, val)
+        };
 
-        let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
-        if let Some(mut_body) = func.body_mut() {
-            *mut_body = set_mismatch;
-        }
-        module.functions.push(func);
+        let func = Function::new(
+            "test".to_string(),
+            Type::NONE,
+            Type::NONE,
+            vec![],
+            set_mismatch,
+        );
+        module.add_function(func);
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
@@ -151,17 +165,15 @@ fn test_global_validation() {
 
     // 3. Test GlobalGet out of bounds
     {
-        let mut module = Module::new(&bump);
-        create_globals!(&mut module);
+        let mut module = Module::new();
+        let get_oob = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let oob_id: GlobalId = GlobalId::from_raw_parts(99, 0);
+            builder.global_get(oob_id, Type::I32)
+        };
 
-        let oob_id: GlobalId = GlobalId::from_raw_parts(99, 0);
-        let get_oob = builder.global_get(oob_id, Type::I32);
-
-        let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
-        if let Some(mut_body) = func.body_mut() {
-            *mut_body = get_oob;
-        }
-        module.functions.push(func);
+        let func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], get_oob);
+        module.add_function(func);
 
         let validator = Validator::new(&module);
         let (valid, errors) = validator.validate();
@@ -172,24 +184,24 @@ fn test_global_validation() {
 
 #[test]
 fn test_ir_construction() {
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
+    let mut module = Module::new();
+    let (const_expr, block) = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
-    let const_expr = builder.const_(Literal::I32(42));
+        let const_expr = builder.const_(Literal::I32(42));
+        let list = vec![const_expr];
+        let block = builder.block("my_block", list, Type::I32);
+        (const_expr, block)
+    };
 
-    match const_expr.kind {
+    match module.expressions[const_expr].kind {
         ExpressionKind::Const(Literal::I32(42)) => (),
         _ => panic!("Expected Const(42)"),
     }
-    assert_eq!(const_expr.type_, Type::I32);
+    assert_eq!(module.expressions[const_expr].type_, Type::I32);
 
-    let mut list = BumpVec::new_in(&bump);
-    list.push(const_expr);
-
-    let block = builder.block(Some("my_block"), list, Type::I32);
-
-    if let ExpressionKind::Block { name, list } = &block.kind {
-        assert_eq!(*name, Some("my_block"));
+    if let ExpressionKind::Block { name, list } = &module.expressions[block].kind {
+        assert_eq!(*name, Some("my_block".to_string()));
         assert_eq!(list.len(), 1);
     } else {
         panic!("Expected Block");
@@ -198,18 +210,18 @@ fn test_ir_construction() {
 
 #[test]
 fn test_binary_op() {
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
+    let mut module = Module::new();
+    let mut builder = IrBuilder::new(&mut module.expressions);
 
     let left = builder.const_(Literal::I32(10));
     let right = builder.const_(Literal::I32(32));
 
     let add = builder.binary(BinaryOp::AddInt32, left, right, Type::I32);
 
-    if let ExpressionKind::Binary { op, left, right } = &add.kind {
+    if let ExpressionKind::Binary { op, left, right } = &module.expressions[add].kind {
         assert_eq!(*op, BinaryOp::AddInt32);
-        assert_eq!(left.type_, Type::I32);
-        assert_eq!(right.type_, Type::I32);
+        assert_eq!(module.expressions[*left].type_, Type::I32);
+        assert_eq!(module.expressions[*right].type_, Type::I32);
     } else {
         panic!("Expected Binary");
     }
@@ -219,27 +231,30 @@ struct CountVisitor {
     count: usize,
 }
 
-impl<'a> Visitor<'a> for CountVisitor {
-    fn visit_expression(&mut self, _expr: &mut ExprRef<'a>) {
+impl Visitor for CountVisitor {
+    fn visit_expression(
+        &mut self,
+        _expr: &mut ExpressionId,
+        _arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
         self.count += 1;
     }
 }
 
 #[test]
 fn test_visitor() {
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
+    let mut module = Module::new();
+    let mut builder = IrBuilder::new(&mut module.expressions);
 
     let c1 = builder.const_(Literal::I32(1));
     let c2 = builder.const_(Literal::I32(2));
     let add = builder.binary(BinaryOp::AddInt32, c1, c2, Type::I32);
 
-    let mut list = BumpVec::new_in(&bump);
-    list.push(add);
-    let mut block = builder.block(None, list, Type::I32);
+    let list = vec![add];
+    let mut block = builder.block("", list, Type::I32);
 
     let mut v = CountVisitor { count: 0 };
-    v.visit(&mut block);
+    v.visit(&mut block, &mut module.expressions);
 
     // Block (1) -> Add (1) -> Const (1) + Const (1) = 4 expressions
     assert_eq!(v.count, 4);
@@ -247,29 +262,22 @@ fn test_visitor() {
 
 #[test]
 fn test_module_construction() {
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
+    let mut module = Module::new();
+    let mut builder = IrBuilder::new(&mut module.expressions);
 
     // fn add_one(x: i32) -> i32
-    let local_get = builder.local_get(0, Type::I32);
+    let local_get = builder.local_get(crate::ir::LocalId::from_u32(0), Type::I32);
     let const_1 = builder.const_(Literal::I32(1));
     let add = builder.binary(BinaryOp::AddInt32, local_get, const_1, Type::I32);
 
-    let func = Function::new(
-        "add_one".to_string(),
-        Type::I32,
-        Type::I32,
-        vec![],
-        Some(add),
-    );
-    let mut module = Module::new(&bump);
+    let func = Function::new("add_one".to_string(), Type::I32, Type::I32, vec![], add);
     module.add_function(func);
 
     assert!(module.get_function_by_name("add_one").is_some());
 
     let (_, f) = module.get_function_by_name("add_one").unwrap();
     if let Some(body) = f.body() {
-        if let ExpressionKind::Binary { op, .. } = body.kind {
+        if let ExpressionKind::Binary { op, .. } = module.expressions[body].kind {
             assert_eq!(op, BinaryOp::AddInt32);
         } else {
             panic!("Expected Binary");
@@ -281,13 +289,13 @@ fn test_module_construction() {
 fn test_export_validation() {
     use crate::ir::module::{ExportKind, Global, MemoryLimits};
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
+    let mut module = Module::new();
+    let mut builder = IrBuilder::new(&mut module.expressions);
+    let _nop = builder.nop();
 
     // Setup a basic valid module components
-    let _func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
     let global_init = builder.const_(Literal::I32(0));
-    let global = Global {
+    let _global = Global {
         name: "g0".to_string(),
         type_: Type::I32,
         mutable: false,
@@ -301,10 +309,19 @@ fn test_export_validation() {
 
     // 1. Valid exports
     {
-        let func_valid = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
-        let mut module = Module::new(&bump);
-        module.functions.push(func_valid);
-        let g0_id = module.add_global(global);
+        let mut module = Module::new();
+        let (nop, g0_init) = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            (builder.nop(), builder.const_(Literal::I32(0)))
+        };
+        let g0_id = module.add_global(Global {
+            name: "g0".to_string(),
+            type_: Type::I32,
+            mutable: false,
+            kind: GlobalKind::Local { init: g0_init },
+        });
+        let func_valid = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], nop);
+        module.add_function(func_valid);
         module.add_memory(Memory {
             name: "".to_string(),
             kind: MemoryKind::Local,
@@ -327,7 +344,7 @@ fn test_export_validation() {
 
     // 2. Duplicate export name
     {
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         module.add_export(
             "same".to_string(),
             ExportKind::Function(FuncId::from_raw_parts(0, 0)),
@@ -345,8 +362,10 @@ fn test_export_validation() {
 
     // 3. Function OOB
     {
-        let func_valid = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let nop = builder.nop();
+        let func_valid = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], nop);
         module.add_function(func_valid);
         module.add_export(
             "f1".to_string(),
@@ -360,7 +379,7 @@ fn test_export_validation() {
 
     // 4. Global OOB
     {
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         let oob_id: GlobalId = GlobalId::from_raw_parts(99, 0);
         module.add_export("g0".to_string(), ExportKind::Global(oob_id));
 
@@ -372,7 +391,7 @@ fn test_export_validation() {
 
     // 5. Memory OOB / No Memory
     {
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         module.add_export(
             "m0".to_string(),
             ExportKind::Memory(MemoryId::from_raw_parts(0, 0)),
@@ -390,19 +409,19 @@ fn test_exports_roundtrip() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
+    let mut module = Module::new();
+    let (nop, init_expr) = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        (builder.nop(), builder.const_(Literal::I32(123)))
+    };
 
-    let func = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], None);
-    let mut module = Module::new(&bump);
-    module.functions.push(func);
+    let func = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], nop);
+    module.add_function(func);
     let g0_id = module.add_global(Global {
         name: "g0".to_string(),
         type_: Type::I32,
         mutable: false,
-        kind: crate::ir::module::GlobalKind::Local {
-            init: builder.const_(Literal::I32(123)),
-        },
+        kind: crate::ir::module::GlobalKind::Local { init: init_expr },
     });
     module.add_memory(Memory {
         name: "".to_string(),
@@ -428,9 +447,8 @@ fn test_exports_roundtrip() {
     let bytes = writer.write_module(&module).expect("write failed");
 
     // Read
-    let read_bump = Bump::new();
-    let mut reader = BinaryReader::new(&read_bump, bytes);
-    let read_module = reader.parse_module().expect("parse failed");
+    let mut reader = BinaryReader::new();
+    let read_module = reader.parse_module(&bytes).expect("parse failed");
 
     // Verify
     assert_eq!(read_module.exports.len(), 3);
@@ -470,8 +488,7 @@ fn test_imports_roundtrip() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // 1. Function Import (param: i32, result: none)
     module.add_import(Import {
@@ -506,9 +523,8 @@ fn test_imports_roundtrip() {
     let bytes = writer.write_module(&module).expect("write failed");
 
     // Read
-    let read_bump = Bump::new();
-    let mut reader = BinaryReader::new(&read_bump, bytes);
-    let read_module = reader.parse_module().expect("parse failed");
+    let mut reader = BinaryReader::new();
+    let read_module = reader.parse_module(&bytes).expect("parse failed");
 
     assert_eq!(read_module.functions.len(), 1);
     assert_eq!(read_module.globals.len(), 1);
@@ -551,11 +567,7 @@ fn test_imports_roundtrip() {
 fn test_import_validation() {
     use crate::ir::module::Global;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Import Global: i32, immutable
     let g_imp_id = module.add_global(Global {
@@ -569,7 +581,10 @@ fn test_import_validation() {
     });
 
     // Define Global: f32, mutable
-    let init_expr = builder.const_(Literal::F32(1.0));
+    let init_expr = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::F32(1.0))
+    };
     let g_def_id = module.add_global(Global {
         name: "g_def".to_string(),
         type_: Type::F32,
@@ -579,14 +594,11 @@ fn test_import_validation() {
 
     // Test 1: Get imported global - Valid
     {
-        let get_imp = builder.global_get(g_imp_id, Type::I32);
-        let func = Function::new(
-            "test1".to_string(),
-            Type::NONE,
-            Type::I32,
-            vec![],
-            Some(get_imp),
-        );
+        let get_imp = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.global_get(g_imp_id, Type::I32)
+        };
+        let func = Function::new("test1".to_string(), Type::NONE, Type::I32, vec![], get_imp);
         module.functions.push(func);
 
         let validator = Validator::new(&module);
@@ -597,14 +609,11 @@ fn test_import_validation() {
 
     // Test 2: Get defined global - Valid
     {
-        let get_def = builder.global_get(g_def_id, Type::F32);
-        let func = Function::new(
-            "test2".to_string(),
-            Type::NONE,
-            Type::F32,
-            vec![],
-            Some(get_def),
-        );
+        let get_def = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.global_get(g_def_id, Type::F32)
+        };
+        let func = Function::new("test2".to_string(), Type::NONE, Type::F32, vec![], get_def);
         module.functions.push(func);
 
         let validator = Validator::new(&module);
@@ -615,15 +624,11 @@ fn test_import_validation() {
 
     // Test 3: Get OOB global - Invalid
     {
-        let get_oob =
-            builder.global_get(crate::ir::GlobalId::from_raw_parts(2, 0).cast(), Type::I32);
-        let func = Function::new(
-            "test3".to_string(),
-            Type::NONE,
-            Type::I32,
-            vec![],
-            Some(get_oob),
-        );
+        let get_oob = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.global_get(crate::ir::GlobalId::from_raw_parts(2, 0).cast(), Type::I32)
+        };
+        let func = Function::new("test3".to_string(), Type::NONE, Type::I32, vec![], get_oob);
         module.functions.push(func);
 
         let validator = Validator::new(&module);
@@ -639,17 +644,19 @@ fn test_data_section_roundtrip() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
+    let (offset1, offset2) = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        (
+            builder.const_(Literal::I32(0)),
+            builder.const_(Literal::I32(100)),
+        )
+    };
 
     // Add memory
     module.set_memory(1, Some(10));
 
     // Data segment 1: "Hello" at offset 0
-    let offset1 = builder.const_(Literal::I32(0));
     module.add_data_segment(DataSegment {
         memory_index: MemoryId::from_raw_parts(0, 0),
         offset: offset1,
@@ -657,7 +664,6 @@ fn test_data_section_roundtrip() {
     });
 
     // Data segment 2: "World" at offset 100
-    let offset2 = builder.const_(Literal::I32(100));
     module.add_data_segment(DataSegment {
         memory_index: MemoryId::from_raw_parts(0, 0),
         offset: offset2,
@@ -669,9 +675,8 @@ fn test_data_section_roundtrip() {
     let bytes = writer.write_module(&module).expect("write failed");
 
     // Read
-    let read_bump = Bump::new();
-    let mut reader = BinaryReader::new(&read_bump, bytes);
-    let read_module = reader.parse_module().expect("parse failed");
+    let mut reader = BinaryReader::new();
+    let read_module = reader.parse_module(&bytes).expect("parse failed");
 
     // Verify
     assert_eq!(read_module.data.len(), 2);
@@ -679,7 +684,7 @@ fn test_data_section_roundtrip() {
     let seg1 = &read_module.data[0];
     assert_eq!(seg1.memory_index, MemoryId::from_raw_parts(0, 0));
     assert_eq!(seg1.data, b"Hello");
-    if let ExpressionKind::Const(Literal::I32(val)) = seg1.offset.kind {
+    if let ExpressionKind::Const(Literal::I32(val)) = read_module.expressions[seg1.offset].kind {
         assert_eq!(val, 0);
     } else {
         panic!("Expected const offset");
@@ -688,7 +693,7 @@ fn test_data_section_roundtrip() {
     let seg2 = &read_module.data[1];
     assert_eq!(seg2.memory_index, MemoryId::from_raw_parts(0, 0));
     assert_eq!(seg2.data, b"World");
-    if let ExpressionKind::Const(Literal::I32(val)) = seg2.offset.kind {
+    if let ExpressionKind::Const(Literal::I32(val)) = read_module.expressions[seg2.offset].kind {
         assert_eq!(val, 100);
     } else {
         panic!("Expected const offset");
@@ -699,16 +704,15 @@ fn test_data_section_roundtrip() {
 fn test_data_section_validation() {
     use crate::ir::module::DataSegment;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test 1: Valid data segment
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         module.set_memory(1, None);
 
-        let offset = builder.const_(Literal::I32(0));
+        let offset = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(0))
+        };
         module.add_data_segment(DataSegment {
             memory_index: MemoryId::from_raw_parts(0, 0),
             offset,
@@ -722,11 +726,13 @@ fn test_data_section_validation() {
 
     // Test 2: Data segment without memory
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         // No memory defined
 
-        let offset = builder.const_(Literal::I32(0));
+        let offset = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(0))
+        };
         module.add_data_segment(DataSegment {
             memory_index: MemoryId::from_raw_parts(0, 0),
             offset,
@@ -741,11 +747,13 @@ fn test_data_section_validation() {
 
     // Test 3: Invalid memory index
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         module.set_memory(1, None);
 
-        let offset = builder.const_(Literal::I32(0));
+        let offset = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(0))
+        };
         module.add_data_segment(DataSegment {
             memory_index: 1.into(), // Invalid: only 0 allowed
             offset,
@@ -764,21 +772,14 @@ fn test_start_section_roundtrip() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Add a function to be the start function
-    let body = builder.const_(Literal::I32(42));
-    let func = Function::new(
-        "init".to_string(),
-        Type::NONE,
-        Type::NONE,
-        vec![],
-        Some(body),
-    );
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(42))
+    };
+    let func = Function::new("init".to_string(), Type::NONE, Type::NONE, vec![], body);
     module.add_function(func);
 
     // Set as start function (index 0)
@@ -789,9 +790,8 @@ fn test_start_section_roundtrip() {
     let bytes = writer.write_module(&module).expect("write failed");
 
     // Read
-    let read_bump = Bump::new();
-    let mut reader = BinaryReader::new(&read_bump, bytes);
-    let read_module = reader.parse_module().expect("parse failed");
+    let mut reader = BinaryReader::new();
+    let read_module = reader.parse_module(&bytes).expect("parse failed");
 
     // Verify
     assert_eq!(read_module.start, Some(FuncId::from_raw_parts(0, 0)));
@@ -799,23 +799,16 @@ fn test_start_section_roundtrip() {
 
 #[test]
 fn test_start_section_validation() {
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test 1: Valid start function (no params, no results)
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
-        let const_expr = builder.const_(Literal::I32(0));
-        let body = builder.drop(const_expr); // Drop the i32 to get Type::NONE
-        let func = Function::new(
-            "start".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(body),
-        );
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let const_expr = builder.const_(Literal::I32(0));
+            builder.drop(const_expr) // Drop the i32 to get Type::NONE
+        };
+        let func = Function::new("start".to_string(), Type::NONE, Type::NONE, vec![], body);
         module.add_function(func);
         module.set_start(FuncId::from_raw_parts(0, 0));
 
@@ -826,8 +819,7 @@ fn test_start_section_validation() {
 
     // Test 2: Start function out of bounds
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         module.set_start(99.into()); // No functions exist
 
         let validator = Validator::new(&module);
@@ -838,16 +830,18 @@ fn test_start_section_validation() {
 
     // Test 3: Start function with parameters (invalid)
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
-        let body = builder.local_get(0, Type::I32);
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.local_get(0, Type::I32)
+        };
         let func = Function::new(
             "bad_start".to_string(),
             Type::I32, // Has parameter
             Type::NONE,
             vec![],
-            Some(body),
+            body,
         );
         module.add_function(func);
         module.set_start(FuncId::from_raw_parts(0, 0));
@@ -860,16 +854,18 @@ fn test_start_section_validation() {
 
     // Test 4: Start function with results (invalid)
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
-        let body = builder.const_(Literal::I32(42));
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(42))
+        };
         let func = Function::new(
             "bad_start".to_string(),
             Type::NONE,
             Type::I32, // Has result
             vec![],
-            Some(body),
+            body,
         );
         module.add_function(func);
         module.set_start(FuncId::from_raw_parts(0, 0));
@@ -887,15 +883,15 @@ fn test_table_and_element_roundtrip() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Add functions that will be referenced in the element segment
-    let func1 = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], None);
-    let func2 = Function::new("f1".to_string(), Type::NONE, Type::NONE, vec![], None);
+    let (nop, offset) = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        (builder.nop(), builder.const_(Literal::I32(0)))
+    };
+    let func1 = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], nop);
+    let func2 = Function::new("f1".to_string(), Type::NONE, Type::NONE, vec![], nop);
     module.add_function(func1);
     module.add_function(func2);
 
@@ -903,7 +899,6 @@ fn test_table_and_element_roundtrip() {
     module.set_table(10, Some(20));
 
     // Add element segment: initialize table[0..2] with functions [0, 1]
-    let offset = builder.const_(Literal::I32(0));
     module.add_element_segment(ElementSegment {
         table_index: TableId::from_raw_parts(0, 0),
         offset,
@@ -915,9 +910,8 @@ fn test_table_and_element_roundtrip() {
     let bytes = writer.write_module(&module).expect("write failed");
 
     // Read
-    let read_bump = Bump::new();
-    let mut reader = BinaryReader::new(&read_bump, bytes);
-    let read_module = reader.parse_module().expect("parse failed");
+    let mut reader = BinaryReader::new();
+    let read_module = reader.parse_module(&bytes).expect("parse failed");
 
     // Verify table
     assert!(!read_module.tables.is_empty());
@@ -934,7 +928,7 @@ fn test_table_and_element_roundtrip() {
         elem.func_indices,
         vec![FuncId::from_raw_parts(0, 0), 1.into()]
     );
-    if let ExpressionKind::Const(Literal::I32(val)) = elem.offset.kind {
+    if let ExpressionKind::Const(Literal::I32(val)) = read_module.expressions[elem.offset].kind {
         assert_eq!(val, 0);
     } else {
         panic!("Expected const offset");
@@ -945,15 +939,15 @@ fn test_table_and_element_roundtrip() {
 fn test_table_and_element_validation() {
     use crate::ir::module::ElementSegment;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test 1: Valid table and element segment
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
-        let func = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], None);
+        let (nop, offset) = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            (builder.nop(), builder.const_(Literal::I32(0)))
+        };
+        let func = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], nop);
         module.add_function(func);
 
         module.add_table(Table {
@@ -966,7 +960,6 @@ fn test_table_and_element_validation() {
             kind: TableKind::Local,
         });
 
-        let offset = builder.const_(Literal::I32(0));
         module.add_element_segment(ElementSegment {
             table_index: TableId::from_raw_parts(0, 0),
             offset,
@@ -980,13 +973,15 @@ fn test_table_and_element_validation() {
 
     // Test 2: Element segment without table
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
-        let func = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], None);
+        let (nop, offset) = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            (builder.nop(), builder.const_(Literal::I32(0)))
+        };
+        let func = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], nop);
         module.add_function(func);
 
-        let offset = builder.const_(Literal::I32(0));
         module.add_element_segment(ElementSegment {
             table_index: TableId::from_raw_parts(0, 0),
             offset,
@@ -1001,8 +996,7 @@ fn test_table_and_element_validation() {
 
     // Test 3: Element with invalid function index
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
         module.add_table(Table {
             name: "".to_string(),
@@ -1014,7 +1008,10 @@ fn test_table_and_element_validation() {
             kind: TableKind::Local,
         });
 
-        let offset = builder.const_(Literal::I32(0));
+        let offset = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(0))
+        };
         module.add_element_segment(ElementSegment {
             table_index: TableId::from_raw_parts(0, 0),
             offset,
@@ -1029,10 +1026,13 @@ fn test_table_and_element_validation() {
 
     // Test 4: Invalid table index in element segment
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
-        let func = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], None);
+        let (nop, offset) = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            (builder.nop(), builder.const_(Literal::I32(0)))
+        };
+        let func = Function::new("f0".to_string(), Type::NONE, Type::NONE, vec![], nop);
         module.add_function(func);
 
         module.add_table(Table {
@@ -1045,7 +1045,6 @@ fn test_table_and_element_validation() {
             kind: TableKind::Local,
         });
 
-        let offset = builder.const_(Literal::I32(0));
         module.add_element_segment(ElementSegment {
             table_index: 1.into(), // Invalid: only 0 allowed
             offset,
@@ -1066,29 +1065,27 @@ fn test_type_section_roundtrip() {
 
     // Test 1: Empty types
     {
-        let bump = bumpalo::Bump::new();
-        let module = Module::new(&bump);
+        let module = Module::new();
 
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let mut reader = BinaryReader::new(&bump, bytes);
-        let parsed = reader.parse_module().expect("Failed to parse");
+        let mut reader = BinaryReader::new();
+        let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
         assert_eq!(parsed.types.len(), 0);
     }
 
     // Test 2: Single type (i32) -> (i32)
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         module.add_type(Type::I32, Type::I32);
 
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let mut reader = BinaryReader::new(&bump, bytes);
-        let parsed = reader.parse_module().expect("Failed to parse");
+        let mut reader = BinaryReader::new();
+        let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
         assert_eq!(parsed.types.len(), 1);
         assert_eq!(parsed.types[0].params, Type::I32);
@@ -1097,8 +1094,7 @@ fn test_type_section_roundtrip() {
 
     // Test 3: Multiple types
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         module.add_type(Type::I32, Type::I32);
         module.add_type(Type::I32, Type::NONE);
         module.add_type(Type::NONE, Type::F64);
@@ -1106,8 +1102,8 @@ fn test_type_section_roundtrip() {
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let mut reader = BinaryReader::new(&bump, bytes);
-        let parsed = reader.parse_module().expect("Failed to parse");
+        let mut reader = BinaryReader::new();
+        let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
         assert_eq!(parsed.types.len(), 3);
         assert_eq!(parsed.types[0].params, Type::I32);
@@ -1135,8 +1131,7 @@ fn test_type_section_all_basic_types() {
 
     for (param_type, param_name) in &test_types {
         for (result_type, result_name) in &test_types {
-            let bump = bumpalo::Bump::new();
-            let mut module = Module::new(&bump);
+            let mut module = Module::new();
             module.add_type(*param_type, *result_type);
 
             let mut writer = BinaryWriter::new();
@@ -1144,9 +1139,9 @@ fn test_type_section_all_basic_types() {
                 .write_module(&module)
                 .unwrap_or_else(|_| panic!("Failed to write {} -> {}", param_name, result_name));
 
-            let mut reader = BinaryReader::new(&bump, bytes);
+            let mut reader = BinaryReader::new();
             let parsed = reader
-                .parse_module()
+                .parse_module(&bytes)
                 .unwrap_or_else(|_| panic!("Failed to parse {} -> {}", param_name, result_name));
 
             assert_eq!(
@@ -1177,15 +1172,14 @@ fn test_type_section_empty_signatures() {
 
     // Test 1: () -> ()
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         module.add_type(Type::NONE, Type::NONE);
 
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let mut reader = BinaryReader::new(&bump, bytes);
-        let parsed = reader.parse_module().expect("Failed to parse");
+        let mut reader = BinaryReader::new();
+        let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
         assert_eq!(parsed.types.len(), 1);
         assert_eq!(parsed.types[0].params, Type::NONE);
@@ -1194,15 +1188,14 @@ fn test_type_section_empty_signatures() {
 
     // Test 2: () -> (i32)
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         module.add_type(Type::NONE, Type::I32);
 
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let mut reader = BinaryReader::new(&bump, bytes);
-        let parsed = reader.parse_module().expect("Failed to parse");
+        let mut reader = BinaryReader::new();
+        let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
         assert_eq!(parsed.types.len(), 1);
         assert_eq!(parsed.types[0].params, Type::NONE);
@@ -1211,15 +1204,14 @@ fn test_type_section_empty_signatures() {
 
     // Test 3: (f64) -> ()
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         module.add_type(Type::F64, Type::NONE);
 
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let mut reader = BinaryReader::new(&bump, bytes);
-        let parsed = reader.parse_module().expect("Failed to parse");
+        let mut reader = BinaryReader::new();
+        let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
         assert_eq!(parsed.types.len(), 1);
         assert_eq!(parsed.types[0].params, Type::F64);
@@ -1238,8 +1230,7 @@ fn test_type_section_reference_types() {
     for (ref_type, name) in &ref_types {
         // Test: (ref) -> ()
         {
-            let bump = bumpalo::Bump::new();
-            let mut module = Module::new(&bump);
+            let mut module = Module::new();
             module.add_type(*ref_type, Type::NONE);
 
             let mut writer = BinaryWriter::new();
@@ -1247,9 +1238,9 @@ fn test_type_section_reference_types() {
                 .write_module(&module)
                 .unwrap_or_else(|_| panic!("Failed to write {} -> ()", name));
 
-            let mut reader = BinaryReader::new(&bump, bytes);
+            let mut reader = BinaryReader::new();
             let parsed = reader
-                .parse_module()
+                .parse_module(&bytes)
                 .unwrap_or_else(|_| panic!("Failed to parse {} -> ()", name));
 
             assert_eq!(parsed.types.len(), 1);
@@ -1259,8 +1250,7 @@ fn test_type_section_reference_types() {
 
         // Test: () -> (ref)
         {
-            let bump = bumpalo::Bump::new();
-            let mut module = Module::new(&bump);
+            let mut module = Module::new();
             module.add_type(Type::NONE, *ref_type);
 
             let mut writer = BinaryWriter::new();
@@ -1268,9 +1258,9 @@ fn test_type_section_reference_types() {
                 .write_module(&module)
                 .unwrap_or_else(|_| panic!("Failed to write () -> {}", name));
 
-            let mut reader = BinaryReader::new(&bump, bytes);
+            let mut reader = BinaryReader::new();
             let parsed = reader
-                .parse_module()
+                .parse_module(&bytes)
                 .unwrap_or_else(|_| panic!("Failed to parse () -> {}", name));
 
             assert_eq!(parsed.types.len(), 1);
@@ -1286,8 +1276,7 @@ fn test_type_section_many_types() {
     use crate::wasm::binary_writer::BinaryWriter;
 
     // Test with 100 types to ensure proper LEB128 encoding and no limit issues
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     for i in 0..100 {
         let param_type = match i % 5 {
             0 => Type::I32,
@@ -1308,8 +1297,8 @@ fn test_type_section_many_types() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.types.len(), 100, "Should have 100 types");
 
@@ -1346,31 +1335,32 @@ fn test_type_section_with_functions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
-    // Test that types are properly associated with functions
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Add explicit types
     module.add_type(Type::I32, Type::I32); // type 0
     module.add_type(Type::F64, Type::F64); // type 1
 
     // Add functions that should reference these types
-    let body1 = builder.const_(Literal::I32(42));
-    let func1 = Function::new("f1".to_string(), Type::I32, Type::I32, vec![], Some(body1));
+    let (body1, body2) = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        (
+            builder.const_(Literal::I32(42)),
+            builder.const_(Literal::F64(1.23)),
+        )
+    };
+
+    let func1 = Function::new("f1".to_string(), Type::I32, Type::I32, vec![], body1);
     module.add_function(func1);
 
-    let body2 = builder.const_(Literal::F64(1.23));
-    let func2 = Function::new("f2".to_string(), Type::F64, Type::F64, vec![], Some(body2));
+    let func2 = Function::new("f2".to_string(), Type::F64, Type::F64, vec![], body2);
     module.add_function(func2);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     // Should have at least the 2 explicit types (writer may add more if needed)
     assert!(parsed.types.len() >= 2, "Should have at least 2 types");
@@ -1385,8 +1375,7 @@ fn test_type_section_with_imports() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Add explicit types
     module.add_type(Type::I32, Type::I32); // type 0
@@ -1408,8 +1397,8 @@ fn test_type_section_with_imports() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     // Should have the explicit types
     assert_eq!(parsed.types.len(), 2, "Should have 2 types");
@@ -1422,25 +1411,23 @@ fn test_type_section_deduplication() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
-    // Test that writer deduplicates identical type signatures
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Add three functions with the same signature
     for i in 0..3 {
-        let body = builder.const_(Literal::I32(i));
-        let func = Function::new(format!("f{}", i), Type::I32, Type::I32, vec![], Some(body));
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(i as i32))
+        };
+        let func = Function::new(format!("f{}", i), Type::I32, Type::I32, vec![], body);
         module.add_function(func);
     }
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     // Should only have 1 type (deduplicated)
     assert_eq!(
@@ -1460,12 +1447,7 @@ fn test_function_section_explicit_type_indices() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
-    // Test explicit type_idx in functions
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Add explicit types
     module.add_type(Type::I32, Type::I32); // type 0
@@ -1473,44 +1455,49 @@ fn test_function_section_explicit_type_indices() {
     module.add_type(Type::NONE, Type::I64); // type 2
 
     // Create functions with explicit type indices
-    let body1 = builder.const_(Literal::I32(42));
+    let (body1, body2, body3) = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        (
+            builder.const_(Literal::I32(42)),
+            builder.const_(Literal::F64(std::f64::consts::PI)),
+            builder.const_(Literal::I64(99)),
+        )
+    };
     let func1 = Function::with_type_idx(
         "f0".to_string(),
         0.into(),
         Type::I32,
         Type::I32,
         vec![],
-        Some(body1),
+        body1,
     );
     module.add_function(func1);
 
-    let body2 = builder.const_(Literal::F64(std::f64::consts::PI));
     let func2 = Function::with_type_idx(
         "f1".to_string(),
         1.into(),
         Type::F64,
         Type::F64,
         vec![],
-        Some(body2),
+        body2,
     );
     module.add_function(func2);
 
-    let body3 = builder.const_(Literal::I64(99));
     let func3 = Function::with_type_idx(
         "f2".to_string(),
         2.into(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body3),
+        body3,
     );
     module.add_function(func3);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.types.len(), 3);
     assert_eq!(parsed.functions.len(), 3);
@@ -1535,50 +1522,45 @@ fn test_function_section_mixed_type_specification() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
-    // Test mixing explicit type_idx and inferred types
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.add_type(Type::I32, Type::I32); // type 0
 
+    let (body1, body2) = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        (
+            builder.const_(Literal::I32(1)),
+            builder.const_(Literal::F64(2.0)),
+        )
+    };
+
     // Function with explicit type_idx
-    let body1 = builder.const_(Literal::I32(1));
     let func1 = Function::with_type_idx(
         "explicit".to_string(),
         0.into(),
         Type::I32,
         Type::I32,
         vec![],
-        Some(body1),
+        body1,
     );
     module.add_function(func1);
 
     // Function without type_idx (will be inferred)
-    let body2 = builder.const_(Literal::F64(2.0));
-    let func2 = Function::new(
-        "inferred".to_string(),
-        Type::F64,
-        Type::F64,
-        vec![],
-        Some(body2),
-    );
+    let func2 = Function::new("inferred".to_string(), Type::F64, Type::F64, vec![], body2);
     module.add_function(func2);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 2);
     // Both functions should have type_idx after round-trip
     assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
         .type_idx
         .is_some());
-    assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
+    assert!(parsed.functions[FuncId::from_raw_parts(1, 0)]
         .type_idx
         .is_some());
 }
@@ -1588,12 +1570,7 @@ fn test_function_section_many_functions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
-    // Test with 50 functions
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     for i in 0..50 {
         let (param_type, result_type) = match i % 4 {
@@ -1603,28 +1580,25 @@ fn test_function_section_many_functions() {
             _ => (Type::I64, Type::NONE),
         };
 
-        let body = match result_type {
-            t if t == Type::I32 => builder.const_(Literal::I32(i)),
-            t if t == Type::I64 => builder.const_(Literal::I64(i as i64)),
-            t if t == Type::F64 => builder.const_(Literal::F64(i as f64)),
-            _ => builder.nop(),
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            match result_type {
+                t if t == Type::I32 => builder.const_(Literal::I32(i as i32)),
+                t if t == Type::I64 => builder.const_(Literal::I64(i as i64)),
+                t if t == Type::F64 => builder.const_(Literal::F64(i as f64)),
+                _ => builder.nop(),
+            }
         };
 
-        let func = Function::new(
-            format!("func_{}", i),
-            param_type,
-            result_type,
-            vec![],
-            Some(body),
-        );
+        let func = Function::new(format!("func_{}", i), param_type, result_type, vec![], body);
         module.add_function(func);
     }
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 50, "Should have 50 functions");
     // All functions should have type indices
@@ -1641,23 +1615,22 @@ fn test_function_section_many_functions() {
 fn test_function_section_validation_type_idx_bounds() {
     use crate::analysis::validation::Validator;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test 1: Valid type_idx
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         module.add_type(Type::I32, Type::I32);
 
-        let body = builder.const_(Literal::I32(42));
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(42))
+        };
         let func = Function::with_type_idx(
             "valid".to_string(),
             0.into(),
             Type::I32,
             Type::I32,
             vec![],
-            Some(body),
+            body,
         );
         module.add_function(func);
 
@@ -1668,18 +1641,20 @@ fn test_function_section_validation_type_idx_bounds() {
 
     // Test 2: Out of bounds type_idx
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         module.add_type(Type::I32, Type::I32);
 
-        let body = builder.const_(Literal::I32(42));
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(42))
+        };
         let func = Function::with_type_idx(
             "oob".to_string(),
             99.into(), // Out of bounds
             Type::I32,
             Type::I32,
             vec![],
-            Some(body),
+            body,
         );
         module.add_function(func);
 
@@ -1691,18 +1666,20 @@ fn test_function_section_validation_type_idx_bounds() {
 
     // Test 3: Type signature mismatch
     {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         module.add_type(Type::I32, Type::I32);
 
-        let body = builder.const_(Literal::F64(std::f64::consts::PI));
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::F64(std::f64::consts::PI))
+        };
         let func = Function::with_type_idx(
             "mismatch".to_string(),
             0.into(),
             Type::F64, // Doesn't match type 0
             Type::F64,
             vec![],
-            Some(body),
+            body,
         );
         module.add_function(func);
 
@@ -1718,22 +1695,20 @@ fn test_function_section_no_types() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
+    let mut module = Module::new();
 
-    // Test that functions work even without explicit types in module
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
-
-    let body = builder.const_(Literal::I32(42));
-    let func = Function::new("f".to_string(), Type::I32, Type::I32, vec![], Some(body));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(42))
+    };
+    let func = Function::new("f".to_string(), Type::I32, Type::I32, vec![], body);
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     // Writer should have inferred and created a type
     assert!(!parsed.types.is_empty(), "Should have inferred types");
@@ -1745,9 +1720,6 @@ fn test_function_section_all_value_type_combinations() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     let value_types = [
         (Type::I32, Literal::I32(0)),
         (Type::I64, Literal::I64(0)),
@@ -1757,16 +1729,18 @@ fn test_function_section_all_value_type_combinations() {
 
     for (i, (param_type, _)) in value_types.iter().enumerate() {
         for (j, (result_type, lit)) in value_types.iter().enumerate() {
-            let bump = bumpalo::Bump::new();
-            let mut module = Module::new(&bump);
+            let mut module = Module::new();
 
-            let body = builder.const_(lit.clone());
+            let body = {
+                let mut builder = IrBuilder::new(&mut module.expressions);
+                builder.const_(lit.clone())
+            };
             let func = Function::new(
                 format!("f_{}_{}", i, j),
                 *param_type,
                 *result_type,
                 vec![],
-                Some(body),
+                body,
             );
             module.add_function(func);
 
@@ -1775,9 +1749,9 @@ fn test_function_section_all_value_type_combinations() {
                 .write_module(&module)
                 .unwrap_or_else(|e| panic!("Failed to write param {} result {}: {:?}", i, j, e));
 
-            let mut reader = BinaryReader::new(&bump, bytes);
+            let mut reader = BinaryReader::new();
             let parsed = reader
-                .parse_module()
+                .parse_module(&bytes)
                 .unwrap_or_else(|e| panic!("Failed to parse param {} result {}: {:?}", i, j, e));
 
             assert_eq!(parsed.functions.len(), 1);
@@ -1799,16 +1773,15 @@ fn test_function_section_empty() {
     use crate::wasm::binary_writer::BinaryWriter;
 
     // Test module with types but no functions
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_type(Type::I32, Type::I32);
     module.add_type(Type::F64, Type::F64);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.types.len(), 2);
     assert_eq!(parsed.functions.len(), 0);
@@ -1818,9 +1791,6 @@ fn test_function_section_empty() {
 fn test_function_section_with_locals() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
-
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
 
     // Test functions with various local variable counts
     let test_cases = [
@@ -1835,16 +1805,18 @@ fn test_function_section_with_locals() {
     ];
 
     for (locals, desc) in &test_cases {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
-        let body = builder.const_(Literal::I32(42));
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(42))
+        };
         let func = Function::new(
             format!("f_{}", desc),
             Type::NONE,
             Type::I32,
             locals.clone(),
-            Some(body),
+            body,
         );
         module.add_function(func);
 
@@ -1853,9 +1825,9 @@ fn test_function_section_with_locals() {
             .write_module(&module)
             .unwrap_or_else(|e| panic!("Failed to write: {}: {:?}", desc, e));
 
-        let mut reader = BinaryReader::new(&bump, bytes);
+        let mut reader = BinaryReader::new();
         let parsed = reader
-            .parse_module()
+            .parse_module(&bytes)
             .unwrap_or_else(|e| panic!("Failed to parse: {}: {:?}", desc, e));
 
         assert_eq!(
@@ -1864,8 +1836,9 @@ fn test_function_section_with_locals() {
             "Function count mismatch: {}",
             desc
         );
+        let func_id = parsed.functions.ids().next().unwrap();
         assert_eq!(
-            parsed.functions[FuncId::from_raw_parts(0, 0)].vars().len(),
+            parsed.functions[func_id].vars().len(),
             locals.len(),
             "Local count mismatch: {}",
             desc
@@ -1878,24 +1851,22 @@ fn test_function_section_shared_type_indices() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
-    // Test multiple functions sharing the same type
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_type(Type::I32, Type::I32); // type 0
 
     // Create 5 functions all using type 0
     for i in 0..5 {
-        let body = builder.const_(Literal::I32(i));
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(i))
+        };
         let func = Function::with_type_idx(
             format!("shared_{}", i),
             0.into(),
             Type::I32,
             Type::I32,
             vec![],
-            Some(body),
+            body,
         );
         module.add_function(func);
     }
@@ -1903,8 +1874,8 @@ fn test_function_section_shared_type_indices() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.types.len(), 1, "Should have 1 shared type");
     assert_eq!(parsed.functions.len(), 5);
@@ -1925,12 +1896,7 @@ fn test_function_section_type_ordering() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
-    // Test that type indices are correctly maintained in order
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Add types in specific order
     module.add_type(Type::I32, Type::I32); // type 0
@@ -1947,23 +1913,20 @@ fn test_function_section_type_ordering() {
             _ => (Type::F64, Literal::F64(0.0)),
         };
 
-        let body = builder.const_(lit);
-        let func = Function::with_type_idx(
-            format!("f{}", i).into(),
-            i.into(),
-            typ,
-            typ,
-            vec![],
-            Some(body),
-        );
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(lit)
+        };
+        let func =
+            Function::with_type_idx(format!("f{}", i).into(), i.into(), typ, typ, vec![], body);
         module.add_function(func);
     }
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 4);
 
@@ -1992,12 +1955,7 @@ fn test_function_section_with_imports() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
-    // Test interaction between imported and defined functions
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.add_type(Type::I32, Type::I32); // type 0
     module.add_type(Type::F64, Type::F64); // type 1
@@ -2016,33 +1974,38 @@ fn test_function_section_with_imports() {
     });
 
     // Add 2 defined functions
-    let body1 = builder.const_(Literal::I32(1));
+    let (body1, body2) = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        (
+            builder.const_(Literal::I32(1)),
+            builder.const_(Literal::F64(2.0)),
+        )
+    };
     let func1 = Function::with_type_idx(
         "local1".to_string(),
         0.into(),
         Type::I32,
         Type::I32,
         vec![],
-        Some(body1),
+        body1,
     );
     module.add_function(func1);
 
-    let body2 = builder.const_(Literal::F64(2.0));
     let func2 = Function::with_type_idx(
         "local2".to_string(),
         1.into(),
         Type::F64,
         Type::F64,
         vec![],
-        Some(body2),
+        body2,
     );
     module.add_function(func2);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     // Function space: imports come first, then defined functions
     assert_eq!(parsed.functions.len(), 4);
@@ -2054,29 +2017,30 @@ fn test_function_section_no_body() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    // Test function with no body (None)
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_type(Type::I32, Type::I32);
 
+    let nop = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
     let func = Function::with_type_idx(
         "no_body".to_string(),
         0.into(),
         Type::I32,
         Type::I32,
         vec![],
-        None,
+        nop,
     );
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    // Body parsing might differ - just verify structure is preserved
 }
 
 #[test]
@@ -2084,40 +2048,38 @@ fn test_function_section_reference_types() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
+    let mut module = Module::new();
 
-    // Test functions with reference types
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let nop = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
 
     // funcref parameter
-    let body1 = builder.nop();
     let func1 = Function::new(
         "takes_funcref".to_string(),
         Type::FUNCREF,
         Type::NONE,
         vec![],
-        Some(body1),
+        nop,
     );
     module.add_function(func1);
 
     // externref parameter
-    let body2 = builder.nop();
     let func2 = Function::new(
         "takes_externref".to_string(),
         Type::EXTERNREF,
         Type::NONE,
         vec![],
-        Some(body2),
+        nop,
     );
     module.add_function(func2);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 2);
     // Use iterator to get IDs in order
@@ -2133,22 +2095,21 @@ fn test_function_section_type_inference_deduplication() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
-    // Test that writer correctly deduplicates inferred types
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
+    let _builder = IrBuilder::new(&mut module.expressions);
 
     // Add 10 functions with same signature (no explicit type_idx)
     for i in 0..10 {
-        let body = builder.const_(Literal::I32(i));
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(i))
+        };
         let func = Function::new(
             format!("inferred_{}", i),
             Type::I32,
             Type::I32,
             vec![],
-            Some(body),
+            body,
         );
         module.add_function(func);
     }
@@ -2156,8 +2117,8 @@ fn test_function_section_type_inference_deduplication() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     // Should deduplicate to 1 type
     assert_eq!(
@@ -2183,8 +2144,7 @@ fn test_function_section_validation_empty_module() {
     use crate::analysis::validation::Validator;
 
     // Test validation with no functions
-    let bump = bumpalo::Bump::new();
-    let module = Module::new(&bump);
+    let module = Module::new();
     let validator = Validator::new(&module);
     let (valid, errors) = validator.validate();
     assert!(valid, "Empty module should be valid: {:?}", errors);
@@ -2194,15 +2154,14 @@ fn test_function_section_validation_empty_module() {
 fn test_function_section_validation_no_type_idx() {
     use crate::analysis::validation::Validator;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test validation of function without explicit type_idx
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let body = builder.const_(Literal::I32(42));
-    let func = Function::new("f".to_string(), Type::I32, Type::I32, vec![], Some(body));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(42))
+    };
+    let func = Function::new("f".to_string(), Type::I32, Type::I32, vec![], body);
     module.add_function(func);
 
     let validator = Validator::new(&module);
@@ -2219,12 +2178,8 @@ fn test_function_section_mixed_signatures() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test with diverse function signatures
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     let signatures = [
         (Type::NONE, Type::NONE, Literal::I32(0), "() -> ()"),
@@ -2235,16 +2190,19 @@ fn test_function_section_mixed_signatures() {
     ];
 
     for (i, (param, result, lit, _desc)) in signatures.iter().enumerate() {
-        let body = builder.const_(lit.clone());
-        let func = Function::new(format!("f{}", i), *param, *result, vec![], Some(body));
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(lit.clone())
+        };
+        let func = Function::new(format!("f{}", i), *param, *result, vec![], body);
         module.add_function(func);
     }
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 5);
 
@@ -2260,12 +2218,8 @@ fn test_function_section_large_type_index() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test with many types to ensure large type indices work
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Add 200 types
     for i in 0..200 {
@@ -2279,22 +2233,25 @@ fn test_function_section_large_type_index() {
     }
 
     // Add function referencing type 199
-    let body = builder.const_(Literal::F64(std::f64::consts::PI));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::F64(std::f64::consts::PI))
+    };
     let func = Function::with_type_idx(
         "f199".to_string(),
         199.into(),
         Type::F64,
         Type::F64,
         vec![],
-        Some(body),
+        body,
     );
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.types.len(), 200);
     assert_eq!(parsed.functions.len(), 1);
@@ -2309,30 +2266,29 @@ fn test_function_section_locals_all_types() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test function with locals of all basic types
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     let locals = vec![Type::I32, Type::I64, Type::F32, Type::F64, Type::V128];
 
-    let body = builder.const_(Literal::I32(0));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(0))
+    };
     let func = Function::new(
         "all_locals".to_string(),
         Type::NONE,
         Type::I32,
         locals,
-        Some(body),
+        body,
     );
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
     assert_eq!(
@@ -2368,27 +2324,20 @@ fn test_code_section_simple_const() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
+    let mut module = Module::new();
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
-
-    let body = builder.const_(Literal::I32(42));
-    let func = Function::new(
-        "const_i32".to_string(),
-        Type::NONE,
-        Type::I32,
-        vec![],
-        Some(body),
-    );
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(42))
+    };
+    let func = Function::new("const_i32".to_string(), Type::NONE, Type::I32, vec![], body);
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
     assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
@@ -2401,9 +2350,6 @@ fn test_code_section_all_const_types() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test each constant type
     let test_cases = [
         (Literal::I32(42), Type::I32),
@@ -2413,24 +2359,20 @@ fn test_code_section_all_const_types() {
     ];
 
     for (lit, typ) in &test_cases {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
-        let body = builder.const_(lit.clone());
-        let func = Function::new(
-            "const_test".to_string(),
-            Type::NONE,
-            *typ,
-            vec![],
-            Some(body),
-        );
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(lit.clone())
+        };
+        let func = Function::new("const_test".to_string(), Type::NONE, *typ, vec![], body);
         module.add_function(func);
 
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let mut reader = BinaryReader::new(&bump, bytes);
-        let parsed = reader.parse_module().expect("Failed to parse");
+        let mut reader = BinaryReader::new();
+        let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
         assert_eq!(parsed.functions.len(), 1);
         assert_eq!(parsed.functions[FuncId::from_raw_parts(0, 0)].results, *typ);
@@ -2443,9 +2385,6 @@ fn test_code_section_binary_ops() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test only the integer binary operations that are currently supported
     let test_ops = [
         (BinaryOp::AddInt32, "add_i32"),
@@ -2455,19 +2394,21 @@ fn test_code_section_binary_ops() {
     ];
 
     for (op, name) in &test_ops {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
-        let left = builder.const_(Literal::I32(10));
-        let right = builder.const_(Literal::I32(20));
-        let body = builder.binary(*op, left, right, Type::I32);
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let left = builder.const_(Literal::I32(10));
+            let right = builder.const_(Literal::I32(20));
+            builder.binary(*op, left, right, Type::I32)
+        };
 
         let func = Function::new(
             format!("test_{}", name),
             Type::NONE,
             Type::I32,
             vec![],
-            Some(body),
+            body,
         );
         module.add_function(func);
 
@@ -2476,9 +2417,9 @@ fn test_code_section_binary_ops() {
             .write_module(&module)
             .unwrap_or_else(|e| panic!("Failed to write {}: {:?}", name, e));
 
-        let mut reader = BinaryReader::new(&bump, bytes);
+        let mut reader = BinaryReader::new();
         let parsed = reader
-            .parse_module()
+            .parse_module(&bytes)
             .unwrap_or_else(|e| panic!("Failed to parse {}: {:?}", name, e));
 
         assert_eq!(parsed.functions.len(), 1);
@@ -2495,37 +2436,30 @@ fn test_code_section_nested_expressions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test: (1 + 2) + (3 + 4)
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let c1 = builder.const_(Literal::I32(1));
-    let c2 = builder.const_(Literal::I32(2));
-    let add1 = builder.binary(BinaryOp::AddInt32, c1, c2, Type::I32);
+    let result = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let c1 = builder.const_(Literal::I32(1));
+        let c2 = builder.const_(Literal::I32(2));
+        let add1 = builder.binary(BinaryOp::AddInt32, c1, c2, Type::I32);
 
-    let c3 = builder.const_(Literal::I32(3));
-    let c4 = builder.const_(Literal::I32(4));
-    let add2 = builder.binary(BinaryOp::AddInt32, c3, c4, Type::I32);
+        let c3 = builder.const_(Literal::I32(3));
+        let c4 = builder.const_(Literal::I32(4));
+        let add2 = builder.binary(BinaryOp::AddInt32, c3, c4, Type::I32);
 
-    let result = builder.binary(BinaryOp::AddInt32, add1, add2, Type::I32);
+        builder.binary(BinaryOp::AddInt32, add1, add2, Type::I32)
+    };
 
-    let func = Function::new(
-        "nested".to_string(),
-        Type::NONE,
-        Type::I32,
-        vec![],
-        Some(result),
-    );
+    let func = Function::new("nested".to_string(), Type::NONE, Type::I32, vec![], result);
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
     assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
@@ -2538,36 +2472,31 @@ fn test_code_section_local_operations() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test local.get and local.set
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    // Function with 1 local
-    let val = builder.const_(Literal::I32(42));
-    let set_local = builder.local_set(0, val);
-    let get_local = builder.local_get(0, Type::I32);
-    let mut list = BumpVec::new_in(&bump);
-    list.push(set_local);
-    list.push(get_local);
-    let body = builder.block(None, list, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let val = builder.const_(Literal::I32(42));
+        let set_local = builder.local_set(LocalId::from(0), val);
+        let get_local = builder.local_get(LocalId::from(0), Type::I32);
+        builder.block("", vec![set_local, get_local], Type::I32)
+    };
 
     let func = Function::new(
         "locals".to_string(),
         Type::NONE,
         Type::I32,
         vec![Type::I32],
-        Some(body),
+        body,
     );
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
     assert_eq!(
@@ -2581,38 +2510,29 @@ fn test_code_section_control_flow_block() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test block control flow
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let c1 = builder.const_(Literal::I32(1));
-    let c2 = builder.const_(Literal::I32(2));
-    let mut list = BumpVec::new_in(&bump);
-    list.push(c1);
-    list.push(c2);
-    let body = builder.block(None, list, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let c1 = builder.const_(Literal::I32(1));
+        let c2 = builder.const_(Literal::I32(2));
+        builder.block("", vec![c1, c2], Type::I32)
+    };
 
-    let func = Function::new(
-        "block".to_string(),
-        Type::NONE,
-        Type::I32,
-        vec![],
-        Some(body),
-    );
+    let func = Function::new("block".to_string(), Type::NONE, Type::I32, vec![], body);
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
-    if let Some(body) = parsed.functions[FuncId::from_raw_parts(0, 0)].body() {
-        if let ExpressionKind::Block { .. } = &body.kind {
+    let id = parsed.functions.ids().next().unwrap();
+    if let Some(body) = parsed.functions[id].body() {
+        if let ExpressionKind::Block { .. } = &parsed.expressions[body].kind {
             // Success - block parsed correctly
         } else {
             panic!("Expected Block expression");
@@ -2629,34 +2549,27 @@ fn test_code_section_control_flow_loop() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test loop control flow
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let loop_body = builder.const_(Literal::I32(1));
-    let body = builder.loop_(None, loop_body, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let loop_body = builder.const_(Literal::I32(1));
+        builder.loop_("", loop_body, Type::I32)
+    };
 
-    let func = Function::new(
-        "loop".to_string(),
-        Type::NONE,
-        Type::I32,
-        vec![],
-        Some(body),
-    );
+    let func = Function::new("loop".to_string(), Type::NONE, Type::I32, vec![], body);
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
     if let Some(body) = parsed.functions[FuncId::from_raw_parts(0, 0)].body() {
-        if let ExpressionKind::Loop { .. } = &body.kind {
+        if let ExpressionKind::Loop { .. } = &module.expressions[body].kind {
             // Success - loop parsed correctly
         } else {
             panic!("Expected Loop expression");
@@ -2669,32 +2582,25 @@ fn test_code_section_nop() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test nop instruction
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let body = builder.nop();
-    let func = Function::new(
-        "nop".to_string(),
-        Type::NONE,
-        Type::NONE,
-        vec![],
-        Some(body),
-    );
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
+    let func = Function::new("nop".to_string(), Type::NONE, Type::NONE, vec![], body);
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
     if let Some(body) = parsed.functions[FuncId::from_raw_parts(0, 0)].body() {
-        if let ExpressionKind::Nop = &body.kind {
+        if let ExpressionKind::Nop = &module.expressions[body].kind {
             // Success - nop parsed correctly
         } else {
             panic!("Expected Nop expression");
@@ -2708,50 +2614,49 @@ fn test_code_section_multiple_functions_with_bodies() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test multiple functions with different body types
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Function 1: constant
-    let body1 = builder.const_(Literal::I32(1));
-    let func1 = Function::new("f1".to_string(), Type::NONE, Type::I32, vec![], Some(body1));
+    let body1 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(1))
+    };
+    let func1 = Function::new("f1".to_string(), Type::NONE, Type::I32, vec![], body1);
     module.add_function(func1);
 
     // Function 2: binary operation
-    let c1 = builder.const_(Literal::I32(2));
-    let c2 = builder.const_(Literal::I32(3));
-    let body2 = builder.binary(BinaryOp::AddInt32, c1, c2, Type::I32);
-    let func2 = Function::new("f2".to_string(), Type::NONE, Type::I32, vec![], Some(body2));
+    let body2 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let c1 = builder.const_(Literal::I32(2));
+        let c2 = builder.const_(Literal::I32(3));
+        builder.binary(BinaryOp::AddInt32, c1, c2, Type::I32)
+    };
+    let func2 = Function::new("f2".to_string(), Type::NONE, Type::I32, vec![], body2);
     module.add_function(func2);
 
     // Function 3: nop
-    let body3 = builder.nop();
-    let func3 = Function::new(
-        "f3".to_string(),
-        Type::NONE,
-        Type::NONE,
-        vec![],
-        Some(body3),
-    );
+    let body3 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
+    let func3 = Function::new("f3".to_string(), Type::NONE, Type::NONE, vec![], body3);
     module.add_function(func3);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 3);
     assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
         .body()
         .is_some());
-    assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
+    assert!(parsed.functions[FuncId::from_raw_parts(1, 0)]
         .body()
         .is_some());
-    assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
+    assert!(parsed.functions[FuncId::from_raw_parts(2, 0)]
         .body()
         .is_some());
 }
@@ -2761,34 +2666,26 @@ fn test_code_section_deep_nesting() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test deeply nested blocks (10 levels)
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let mut expr = builder.const_(Literal::I32(42));
-    for _ in 0..10 {
-        let mut list = BumpVec::new_in(&bump);
-        list.push(expr);
-        expr = builder.block(None, list, Type::I32);
-    }
+    let expr = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let mut expr = builder.const_(Literal::I32(42));
+        for _ in 0..10 {
+            expr = builder.block("", vec![expr], Type::I32);
+        }
+        expr
+    };
 
-    let func = Function::new(
-        "deep".to_string(),
-        Type::NONE,
-        Type::I32,
-        vec![],
-        Some(expr),
-    );
+    let func = Function::new("deep".to_string(), Type::NONE, Type::I32, vec![], expr);
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
     assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
@@ -2798,43 +2695,43 @@ fn test_code_section_deep_nesting() {
 
 #[test]
 fn test_code_section_global_operations() {
-    use crate::ir::module::Global;
+    use crate::ir::module::{Global, GlobalKind};
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test global.get
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    // Add a global
-    let global_init = builder.const_(Literal::I32(100));
-    let global = Global {
-        name: "g0".to_string(),
-        type_: Type::I32,
-        mutable: false,
-        kind: GlobalKind::Local { init: global_init },
+    let (_g0_id, body) = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        // Add a global
+        let global_init = builder.const_(Literal::I32(100));
+        let g0_id = module.globals.alloc(Global {
+            name: "g0".to_string(),
+            type_: Type::I32,
+            mutable: false,
+            kind: GlobalKind::Local { init: global_init },
+        });
+
+        // Function that gets the global
+        let body = builder.global_get(g0_id, Type::I32);
+        (g0_id, body)
     };
-    let g0_id = module.add_global(global);
 
-    // Function that gets the global
-    let body = builder.global_get(g0_id, Type::I32);
     let func = Function::new(
         "get_global".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     );
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
     assert_eq!(parsed.globals.len(), 1);
@@ -2846,17 +2743,20 @@ fn test_code_section_empty_function_body() {
     use crate::wasm::binary_writer::BinaryWriter;
 
     // Test function with no body (None)
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let func = Function::new("empty".to_string(), Type::NONE, Type::NONE, vec![], None);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
+    let func = Function::new("empty".to_string(), Type::NONE, Type::NONE, vec![], body);
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -2867,11 +2767,15 @@ fn test_code_section_empty_function_body() {
 fn test_validation_type_index_out_of_bounds() {
     use crate::analysis::validation::Validator;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
+
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
 
     // Add a function with invalid type_idx (no types defined)
-    let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
+    let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], body);
     func.type_idx = Some(99.into());
     module.add_function(func);
 
@@ -2889,14 +2793,18 @@ fn test_validation_type_index_out_of_bounds() {
 fn test_validation_type_signature_mismatch() {
     use crate::analysis::validation::Validator;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Add a type
     module.add_type(Type::I32, Type::I64);
 
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
+
     // Add function with mismatched signature
-    let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
+    let mut func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], body);
     func.type_idx = Some(0.into());
     module.add_function(func);
 
@@ -2911,14 +2819,18 @@ fn test_validation_type_signature_mismatch() {
 fn test_validation_valid_type_idx() {
     use crate::analysis::validation::Validator;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Add a type
-    module.add_type(Type::I32, Type::I64);
+    module.add_type(Type::NONE, Type::NONE);
+
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
 
     // Add function with valid type_idx and matching signature
-    let func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], None);
+    let func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], body);
     module.add_function(func);
 
     let validator = Validator::new(&module);
@@ -2933,8 +2845,7 @@ fn test_roundtrip_maximum_types() {
     use crate::wasm::binary_writer::BinaryWriter;
 
     // Test with maximum reasonable number of types (1000)
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     for i in 0..1000 {
         let params = if i % 2 == 0 { Type::I32 } else { Type::I64 };
         let results = if i % 3 == 0 { Type::F32 } else { Type::F64 };
@@ -2944,8 +2855,8 @@ fn test_roundtrip_maximum_types() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.types.len(), 1000);
 }
@@ -2956,18 +2867,21 @@ fn test_roundtrip_maximum_functions() {
     use crate::wasm::binary_writer::BinaryWriter;
 
     // Test with many functions (500)
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     for i in 0..500 {
-        let func = Function::new(format!("func_{}", i), Type::NONE, Type::I32, vec![], None);
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.nop()
+        };
+        let func = Function::new(format!("func_{}", i), Type::NONE, Type::I32, vec![], body);
         module.add_function(func);
     }
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 500);
 }
@@ -2978,8 +2892,7 @@ fn test_roundtrip_various_type_signatures() {
     use crate::wasm::binary_writer::BinaryWriter;
 
     // Test with various single-param single-result types
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // i32 -> i64
     module.add_type(Type::I32, Type::I64);
@@ -2993,8 +2906,8 @@ fn test_roundtrip_various_type_signatures() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.types.len(), 3);
 }
@@ -3005,16 +2918,17 @@ fn test_roundtrip_empty_module() {
     use crate::wasm::binary_writer::BinaryWriter;
 
     // Test completely empty module
-    let bump = bumpalo::Bump::new();
-    let module = Module::new(&bump);
+    let module = Module::new();
 
     let mut writer = BinaryWriter::new();
     let bytes = writer
         .write_module(&module)
         .expect("Failed to write empty module");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse empty module");
+    let mut reader = BinaryReader::new();
+    let parsed = reader
+        .parse_module(&bytes)
+        .expect("Failed to parse empty module");
 
     assert_eq!(parsed.types.len(), 0);
     assert_eq!(parsed.functions.len(), 0);
@@ -3028,8 +2942,7 @@ fn test_roundtrip_mixed_function_types() {
     use crate::wasm::binary_writer::BinaryWriter;
 
     // Test functions with and without type_idx
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Add a type
     module.add_type(Type::I32, Type::I64);
@@ -3044,24 +2957,28 @@ fn test_roundtrip_mixed_function_types() {
             locals: IdArena::new(),
             param_ids: Vec::new(),
             var_ids: Vec::new(),
-            body: crate::ir::expression::ExprRef::new_null(),
+            body: crate::ir::expression::ExpressionId::new_null(),
         },
     }));
 
     // Function without type_idx (will be inferred)
+    let untyped_body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
     module.add_function(Function::new(
         "untyped".to_string(),
         Type::F32,
         Type::F64,
         vec![],
-        None,
+        untyped_body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 2);
     // Both functions should have type_idx after parsing
@@ -3074,33 +2991,26 @@ fn test_code_section_many_locals() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test function with many local variables (100)
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let body = builder.const_(Literal::I32(42));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(42))
+    };
     let mut vars = Vec::new();
     for i in 0..100 {
         vars.push(if i % 2 == 0 { Type::I32 } else { Type::I64 });
     }
 
-    let func = Function::new(
-        "many_locals".to_string(),
-        Type::NONE,
-        Type::I32,
-        vars,
-        Some(body),
-    );
+    let func = Function::new("many_locals".to_string(), Type::NONE, Type::I32, vars, body);
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
     assert_eq!(
@@ -3114,28 +3024,27 @@ fn test_code_section_function_with_params_and_locals() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test function with parameters and local variables
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let body = builder.const_(Literal::I32(1));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(1))
+    };
     let func = Function::new(
         "params_and_locals".to_string(),
         Type::I32, // 1 param
         Type::I32,
         vec![Type::F32, Type::F64], // 2 locals
-        Some(body),
+        body,
     );
     module.add_function(func);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
     assert_eq!(
@@ -3146,16 +3055,12 @@ fn test_code_section_function_with_params_and_locals() {
 
 #[test]
 fn test_roundtrip_all_sections_together() {
-    use crate::ir::module::{Global, Import};
+    use crate::ir::module::{Global, GlobalKind, Import};
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-
     // Test module with all major sections
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Types
     module.add_type(Type::I32, Type::I64);
@@ -3169,22 +3074,28 @@ fn test_roundtrip_all_sections_together() {
     });
 
     // Functions
-    let body = builder.const_(Literal::I32(42));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(42))
+    };
     let local_func_id = module.add_function(Function::new(
         "local_func".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     // Globals
-    let init = builder.const_(Literal::I32(100));
+    let init = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(100))
+    };
     module.add_global(Global {
         name: "g0".to_string(),
         type_: Type::I32,
         mutable: false,
-        kind: crate::ir::module::GlobalKind::Local { init },
+        kind: GlobalKind::Local { init },
     });
 
     // Table
@@ -3209,9 +3120,9 @@ fn test_roundtrip_all_sections_together() {
         .write_module(&module)
         .expect("Failed to write complete module");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
+    let mut reader = BinaryReader::new();
     let parsed = reader
-        .parse_module()
+        .parse_module(&bytes)
         .expect("Failed to parse complete module");
 
     // Types may include inferred types from functions
@@ -3230,8 +3141,7 @@ fn test_import_function() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.add_import(Import {
         module: "env".to_string(),
@@ -3242,8 +3152,8 @@ fn test_import_function() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
     let func = &parsed.functions[parsed.functions.ids().next().unwrap()];
@@ -3262,8 +3172,7 @@ fn test_import_memory() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.add_import(Import {
         module: "js".to_string(),
@@ -3277,8 +3186,8 @@ fn test_import_memory() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.memories.len(), 1);
 }
@@ -3289,8 +3198,7 @@ fn test_import_global() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.add_global(Global {
         name: "global_val".to_string(),
@@ -3305,20 +3213,19 @@ fn test_import_global() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.globals.len(), 1);
 }
 
 #[test]
 fn test_multiple_imports_mixed() {
-    use crate::ir::module::{Import, ImportKind, MemoryLimits};
+    use crate::ir::module::{Global, GlobalKind, Import, ImportKind, MemoryLimits};
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Function import
     module.add_import(Import {
@@ -3339,7 +3246,7 @@ fn test_multiple_imports_mixed() {
         name: "g".to_string(),
         type_: Type::F32,
         mutable: true,
-        kind: crate::ir::module::GlobalKind::Import {
+        kind: GlobalKind::Import {
             module: "js".to_string(),
             field: "g".to_string(),
         },
@@ -3358,8 +3265,8 @@ fn test_multiple_imports_mixed() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 2);
     assert_eq!(parsed.globals.len(), 1);
@@ -3372,8 +3279,7 @@ fn test_import_many_functions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     for i in 0..50 {
         module.add_import(Import {
@@ -3386,8 +3292,8 @@ fn test_import_many_functions() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 50);
 }
@@ -3400,29 +3306,29 @@ fn test_export_function() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Add a function
-    module.add_function(Function::new(
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
+    let func_id = module.add_function(Function::new(
         "my_func".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        None,
+        body,
     ));
 
     // Export it
-    module.add_export(
-        "exported".to_string(),
-        ExportKind::Function(FuncId::from_raw_parts(0, 0)),
-    );
+    module.add_export("exported".to_string(), ExportKind::Function(func_id));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.exports.len(), 1);
     assert_eq!(parsed.exports[0].name, "exported");
@@ -3434,28 +3340,28 @@ fn test_export_multiple_functions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     for i in 0..10 {
-        module.add_function(Function::new(
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.nop()
+        };
+        let func_id = module.add_function(Function::new(
             format!("func_{}", i),
             Type::NONE,
             Type::I32,
             vec![],
-            None,
+            body,
         ));
-        module.add_export(
-            format!("export_{}", i),
-            ExportKind::Function(FuncId::from_raw_parts(0, 0)),
-        );
+        module.add_export(format!("export_{}", i), ExportKind::Function(func_id));
     }
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.exports.len(), 10);
     assert_eq!(parsed.functions.len(), 10);
@@ -3467,8 +3373,7 @@ fn test_export_memory() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.set_memory(1, Some(100));
     module.add_export(
@@ -3479,8 +3384,8 @@ fn test_export_memory() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.exports.len(), 1);
     assert!(!parsed.memories.is_empty());
@@ -3488,16 +3393,16 @@ fn test_export_memory() {
 
 #[test]
 fn test_export_global() {
-    use crate::ir::module::{ExportKind, Global};
+    use crate::ir::module::{ExportKind, Global, GlobalKind};
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let init = builder.const_(Literal::I32(42));
+    let init = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(42))
+    };
     let g0_id = module.add_global(Global {
         name: "g0".to_string(),
         type_: Type::I32,
@@ -3510,8 +3415,8 @@ fn test_export_global() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.exports.len(), 1);
     assert_eq!(parsed.globals.len(), 1);
@@ -3523,8 +3428,7 @@ fn test_export_table() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.add_table(Table {
         name: "".to_string(),
@@ -3544,8 +3448,8 @@ fn test_export_table() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.exports.len(), 1);
     assert!(!parsed.tables.is_empty());
@@ -3558,16 +3462,15 @@ fn test_memory_basic() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.set_memory(1, Some(10));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert!(!parsed.memories.is_empty());
     let mem = parsed.memories.unwrap_first();
@@ -3580,16 +3483,15 @@ fn test_memory_no_maximum() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.set_memory(5, None);
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert!(!parsed.memories.is_empty());
     let mem = parsed.memories.unwrap_first();
@@ -3602,16 +3504,15 @@ fn test_memory_large_limits() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.set_memory(100, Some(1000));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert!(!parsed.memories.is_empty());
     let mem = parsed.memories.unwrap_first();
@@ -3623,16 +3524,16 @@ fn test_memory_large_limits() {
 
 #[test]
 fn test_global_immutable_i32() {
-    use crate::ir::module::Global;
+    use crate::ir::module::{Global, GlobalKind};
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let init = builder.const_(Literal::I32(123));
+    let init = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(123))
+    };
     module.add_global(Global {
         name: "g0".to_string(),
         type_: Type::I32,
@@ -3643,8 +3544,8 @@ fn test_global_immutable_i32() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.globals.len(), 1);
     let g0_id = parsed.globals.ids().next().unwrap();
@@ -3654,16 +3555,16 @@ fn test_global_immutable_i32() {
 
 #[test]
 fn test_global_mutable_i64() {
-    use crate::ir::module::Global;
+    use crate::ir::module::{Global, GlobalKind};
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let init = builder.const_(Literal::I64(999));
+    let init = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I64(999))
+    };
     module.add_global(Global {
         name: "g0".to_string(),
         type_: Type::I64,
@@ -3674,8 +3575,8 @@ fn test_global_mutable_i64() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.globals.len(), 1);
     let g0_id = parsed.globals.ids().next().unwrap();
@@ -3689,12 +3590,13 @@ fn test_global_all_types() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // i32 global
-    let init1 = builder.const_(Literal::I32(1));
+    let init1 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(1))
+    };
     module.add_global(Global {
         name: "g1".to_string(),
         type_: Type::I32,
@@ -3703,7 +3605,10 @@ fn test_global_all_types() {
     });
 
     // i64 global
-    let init2 = builder.const_(Literal::I64(2));
+    let init2 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I64(2))
+    };
     module.add_global(Global {
         name: "g2".to_string(),
         type_: Type::I64,
@@ -3712,7 +3617,10 @@ fn test_global_all_types() {
     });
 
     // f32 global
-    let init3 = builder.const_(Literal::F32(std::f32::consts::PI));
+    let init3 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::F32(std::f32::consts::PI))
+    };
     module.add_global(Global {
         name: "g3".to_string(),
         type_: Type::F32,
@@ -3721,7 +3629,10 @@ fn test_global_all_types() {
     });
 
     // f64 global
-    let init4 = builder.const_(Literal::F64(std::f64::consts::E));
+    let init4 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::F64(std::f64::consts::E))
+    };
     module.add_global(Global {
         name: "g4".to_string(),
         type_: Type::F64,
@@ -3732,8 +3643,8 @@ fn test_global_all_types() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.globals.len(), 4);
 }
@@ -3744,12 +3655,13 @@ fn test_global_many() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     for i in 0..100 {
-        let init = builder.const_(Literal::I32(i));
+        let init = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(i))
+        };
         module.add_global(Global {
             name: format!("g{}", i),
             type_: Type::I32,
@@ -3761,8 +3673,8 @@ fn test_global_many() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.globals.len(), 100);
 }
@@ -3775,10 +3687,7 @@ fn test_element_basic() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Need a table
     module.add_table(Table {
@@ -3792,34 +3701,45 @@ fn test_element_basic() {
     });
 
     // Need functions to reference
+    let body0 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
     module.add_function(Function::new(
         "f0".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        None,
+        body0,
     ));
+    let body1 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
     module.add_function(Function::new(
         "f1".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        None,
+        body1,
     ));
 
     // Element segment
-    let offset = builder.const_(Literal::I32(0));
+    let offset = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(0))
+    };
     module.elements.push(ElementSegment {
         table_index: TableId::from_raw_parts(0, 0),
         offset,
-        func_indices: vec![FuncId::from_raw_parts(0, 0), 1.into()],
+        func_indices: vec![FuncId::from_raw_parts(0, 0), FuncId::from_raw_parts(1, 0)],
     });
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.elements.len(), 1);
     assert_eq!(parsed.elements[0].func_indices.len(), 2);
@@ -3831,10 +3751,7 @@ fn test_element_multiple_segments() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.add_table(Table {
         name: "".to_string(),
@@ -3847,30 +3764,37 @@ fn test_element_multiple_segments() {
     });
 
     for _ in 0..5 {
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.nop()
+        };
         module.add_function(Function::new(
             "f".to_string(),
             Type::NONE,
             Type::I32,
             vec![],
-            None,
+            body,
         ));
     }
 
     // Multiple segments at different offsets
     for i in 0..3 {
-        let offset = builder.const_(Literal::I32(i * 5));
+        let offset = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(i * 5))
+        };
         module.elements.push(ElementSegment {
             table_index: TableId::from_raw_parts(0, 0),
             offset,
-            func_indices: vec![FuncId::from_raw_parts(0, 0), 1.into()],
+            func_indices: vec![FuncId::from_raw_parts(0, 0), FuncId::from_raw_parts(1, 0)],
         });
     }
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.elements.len(), 3);
 }
@@ -3881,10 +3805,7 @@ fn test_element_many_functions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.add_table(Table {
         name: "".to_string(),
@@ -3897,28 +3818,38 @@ fn test_element_many_functions() {
     });
 
     for _ in 0..50 {
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.nop()
+        };
         module.add_function(Function::new(
             "f".to_string(),
             Type::NONE,
             Type::I32,
             vec![],
-            None,
+            body,
         ));
     }
 
-    let offset = builder.const_(Literal::I32(0));
+    let offset = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(0))
+    };
     let indices: Vec<u32> = (0..50).collect();
     module.elements.push(ElementSegment {
         table_index: TableId::from_raw_parts(0, 0),
         offset,
-        func_indices: indices.into_iter().map(|i| i.into()).collect(),
+        func_indices: indices
+            .into_iter()
+            .map(|i| FuncId::from_raw_parts(i, 0))
+            .collect(),
     });
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.elements.len(), 1);
     assert_eq!(parsed.elements[0].func_indices.len(), 50);
@@ -3932,14 +3863,14 @@ fn test_data_basic() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.set_memory(1, None);
 
-    let offset = builder.const_(Literal::I32(0));
+    let offset = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(0))
+    };
     module.data.push(DataSegment {
         memory_index: MemoryId::from_raw_parts(0, 0),
         offset,
@@ -3949,8 +3880,8 @@ fn test_data_basic() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.data.len(), 1);
     assert_eq!(parsed.data[0].data, vec![1, 2, 3, 4, 5]);
@@ -3962,15 +3893,15 @@ fn test_data_multiple_segments() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.set_memory(1, None);
 
     // Segment 1 at offset 0
-    let offset1 = builder.const_(Literal::I32(0));
+    let offset1 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(0))
+    };
     module.data.push(DataSegment {
         memory_index: MemoryId::from_raw_parts(0, 0),
         offset: offset1,
@@ -3978,7 +3909,10 @@ fn test_data_multiple_segments() {
     });
 
     // Segment 2 at offset 100
-    let offset2 = builder.const_(Literal::I32(100));
+    let offset2 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(100))
+    };
     module.data.push(DataSegment {
         memory_index: MemoryId::from_raw_parts(0, 0),
         offset: offset2,
@@ -3986,7 +3920,10 @@ fn test_data_multiple_segments() {
     });
 
     // Segment 3 at offset 200
-    let offset3 = builder.const_(Literal::I32(200));
+    let offset3 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(200))
+    };
     module.data.push(DataSegment {
         memory_index: MemoryId::from_raw_parts(0, 0),
         offset: offset3,
@@ -3996,8 +3933,8 @@ fn test_data_multiple_segments() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.data.len(), 3);
 }
@@ -4008,14 +3945,14 @@ fn test_data_large() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.set_memory(10, None);
 
-    let offset = builder.const_(Literal::I32(0));
+    let offset = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(0))
+    };
     let large_data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
     module.data.push(DataSegment {
         memory_index: MemoryId::from_raw_parts(0, 0),
@@ -4026,8 +3963,8 @@ fn test_data_large() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.data.len(), 1);
     assert_eq!(parsed.data[0].data.len(), 10000);
@@ -4040,14 +3977,14 @@ fn test_data_empty() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.set_memory(1, None);
 
-    let offset = builder.const_(Literal::I32(0));
+    let offset = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(0))
+    };
     module.data.push(DataSegment {
         memory_index: MemoryId::from_raw_parts(0, 0),
         offset,
@@ -4057,8 +3994,8 @@ fn test_data_empty() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.data.len(), 1);
     assert_eq!(parsed.data[0].data.len(), 0);
@@ -4071,23 +4008,26 @@ fn test_start_function() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
     module.add_function(Function::new(
         "start".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        None,
+        body,
     ));
     module.start = Some(FuncId::from_raw_parts(0, 0));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.start, Some(FuncId::from_raw_parts(0, 0)));
 }
@@ -4097,28 +4037,37 @@ fn test_start_with_multiple_functions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
+    let mut start_id = None;
     for i in 0..10 {
-        module.add_function(Function::new(
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.nop()
+        };
+        let id = module.add_function(Function::new(
             format!("func_{}", i),
             Type::NONE,
             Type::NONE,
             vec![],
-            None,
+            body,
         ));
+        if i == 5 {
+            start_id = Some(id);
+        }
     }
 
-    module.start = Some(FuncId::from_raw_parts(0, 0)); // Start at function 5
+    module.start = start_id; // Start at function 5
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
-    assert_eq!(parsed.start, Some(FuncId::from_raw_parts(0, 0)));
+    assert!(parsed.start.is_some());
+    let parsed_start = parsed.start.unwrap();
+    assert_eq!(parsed.functions[parsed_start].name, "func_5");
     assert_eq!(parsed.functions.len(), 10);
 }
 
@@ -4127,23 +4076,26 @@ fn test_no_start_function() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.nop()
+    };
     module.add_function(Function::new(
         "f".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        None,
+        body,
     ));
     // No start set
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.start, None);
 }
@@ -4156,8 +4108,7 @@ fn test_table_basic() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.add_table(Table {
         name: "".to_string(),
@@ -4172,8 +4123,8 @@ fn test_table_basic() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert!(!parsed.tables.is_empty());
     let table = parsed.tables.unwrap_first();
@@ -4187,8 +4138,7 @@ fn test_table_no_maximum() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.add_table(Table {
         name: "".to_string(),
@@ -4203,8 +4153,8 @@ fn test_table_no_maximum() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert!(!parsed.tables.is_empty());
     let table = parsed.tables.unwrap_first();
@@ -4218,8 +4168,7 @@ fn test_table_large_limits() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     module.add_table(Table {
         name: "".to_string(),
@@ -4234,8 +4183,8 @@ fn test_table_large_limits() {
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert!(!parsed.tables.is_empty());
     let table = parsed.tables.unwrap_first();
@@ -4250,25 +4199,25 @@ fn test_unreachable_instruction() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let body = builder.unreachable();
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.unreachable()
+    };
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
     assert!(parsed.functions[FuncId::from_raw_parts(0, 0)]
@@ -4281,25 +4230,25 @@ fn test_return_void() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let body = builder.return_(None);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.return_(None)
+    };
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4309,26 +4258,26 @@ fn test_return_with_value() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let value = builder.const_(Literal::I32(42));
-    let body = builder.return_(Some(value));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let value = builder.const_(Literal::I32(42));
+        builder.return_(Some(value))
+    };
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4338,30 +4287,30 @@ fn test_br_unconditional() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // block with unconditional break
-    let br = builder.break_("label", None, None, Type::NONE);
-    let mut block_list = BumpVec::new_in(&bump);
-    block_list.push(br);
-    let body = builder.block(Some("label"), block_list, Type::NONE);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let br = builder.break_("label", None, None, Type::NONE);
+        let mut block_list = vec![];
+        block_list.push(br);
+        builder.block(Some("label"), block_list, Type::NONE)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4371,31 +4320,31 @@ fn test_br_if_conditional() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // block with conditional break
-    let condition = builder.const_(Literal::I32(1));
-    let br_if = builder.break_("label", Some(condition), None, Type::NONE);
-    let mut block_list = BumpVec::new_in(&bump);
-    block_list.push(br_if);
-    let body = builder.block(Some("label"), block_list, Type::NONE);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let condition = builder.const_(Literal::I32(1));
+        let br_if = builder.break_("label", Some(condition), None, Type::NONE);
+        let mut block_list = vec![];
+        block_list.push(br_if);
+        builder.block(Some("label"), block_list, Type::NONE)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4405,31 +4354,31 @@ fn test_br_with_value() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // block that returns a value via break
-    let value = builder.const_(Literal::I32(42));
-    let br = builder.break_("label", None, Some(value), Type::I32);
-    let mut block_list = BumpVec::new_in(&bump);
-    block_list.push(br);
-    let body = builder.block(Some("label"), block_list, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let value = builder.const_(Literal::I32(42));
+        let br = builder.break_("label", None, Some(value), Type::I32);
+        let mut block_list = vec![];
+        block_list.push(br);
+        builder.block(Some("label"), block_list, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4439,36 +4388,36 @@ fn test_nested_blocks_with_breaks() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // outer block
-    let br_inner = builder.break_("inner", None, None, Type::NONE);
-    let mut inner_list = BumpVec::new_in(&bump);
-    inner_list.push(br_inner);
-    let inner = builder.block(Some("inner"), inner_list, Type::NONE);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let br_inner = builder.break_("inner", None, None, Type::NONE);
+        let mut inner_list = vec![];
+        inner_list.push(br_inner);
+        let inner = builder.block(Some("inner"), inner_list, Type::NONE);
 
-    let br_outer = builder.break_("outer", None, None, Type::NONE);
-    let mut outer_list = BumpVec::new_in(&bump);
-    outer_list.push(inner);
-    outer_list.push(br_outer);
-    let body = builder.block(Some("outer"), outer_list, Type::NONE);
+        let br_outer = builder.break_("outer", None, None, Type::NONE);
+        let mut outer_list = vec![];
+        outer_list.push(inner);
+        outer_list.push(br_outer);
+        builder.block(Some("outer"), outer_list, Type::NONE)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4478,27 +4427,27 @@ fn test_loop_basic() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let loop_body = builder.nop();
-    let body = builder.loop_(Some("loop"), loop_body, Type::NONE);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let loop_body = builder.nop();
+        builder.loop_(Some("loop"), loop_body, Type::NONE)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4508,28 +4457,28 @@ fn test_loop_with_break_to_continue() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // break to loop label continues the loop
-    let br = builder.break_("loop", None, None, Type::NONE);
-    let body = builder.loop_(Some("loop"), br, Type::NONE);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let br = builder.break_("loop", None, None, Type::NONE);
+        builder.loop_(Some("loop"), br, Type::NONE)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4539,31 +4488,31 @@ fn test_loop_with_exit_block() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // break to outer block exits the loop
-    let br = builder.break_("exit", None, None, Type::NONE);
-    let loop_body = builder.loop_(Some("loop"), br, Type::NONE);
-    let mut block_list = BumpVec::new_in(&bump);
-    block_list.push(loop_body);
-    let body = builder.block(Some("exit"), block_list, Type::NONE);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let br = builder.break_("exit", None, None, Type::NONE);
+        let loop_body = builder.loop_(Some("loop"), br, Type::NONE);
+        let mut block_list = vec![];
+        block_list.push(loop_body);
+        builder.block(Some("exit"), block_list, Type::NONE)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4573,36 +4522,40 @@ fn test_call_function() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Function to be called
+    let callee_body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(42))
+    };
     module.add_function(Function::new(
         "callee".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(builder.const_(Literal::I32(42))),
+        callee_body,
     ));
 
     // Caller function
-    let operands = BumpVec::new_in(&bump);
-    let body = builder.call("callee", operands, Type::I32, false);
+    let caller_body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let operands = vec![];
+        builder.call("callee", operands, Type::I32, false)
+    };
     module.add_function(Function::new(
         "caller".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        caller_body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 2);
 }
@@ -4612,41 +4565,44 @@ fn test_call_with_arguments() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Callee: takes two i32, returns i32
-    let param1 = builder.local_get(0, Type::I32);
-    let param2 = builder.local_get(1, Type::I32);
-    let callee_body = builder.binary(BinaryOp::AddInt32, param1, param2, Type::I32);
+    let callee_body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let param1 = builder.local_get(0, Type::I32);
+        let param2 = builder.local_get(1, Type::I32);
+        builder.binary(BinaryOp::AddInt32, param1, param2, Type::I32)
+    };
     module.add_function(Function::new(
         "add".to_string(),
         Type::NONE, // params handled via add_type
         Type::I32,
         vec![Type::I32, Type::I32],
-        Some(callee_body),
+        callee_body,
     ));
 
     // Caller: passes two constants
-    let mut operands = BumpVec::new_in(&bump);
-    operands.push(builder.const_(Literal::I32(10)));
-    operands.push(builder.const_(Literal::I32(20)));
-    let body = builder.call("add", operands, Type::I32, false);
+    let caller_body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let mut operands = vec![];
+        operands.push(builder.const_(Literal::I32(10)));
+        operands.push(builder.const_(Literal::I32(20)));
+        builder.call("add", operands, Type::I32, false)
+    };
     module.add_function(Function::new(
         "caller".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        caller_body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 2);
 }
@@ -4656,36 +4612,40 @@ fn test_tail_call() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Callee
+    let callee_body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(42))
+    };
     module.add_function(Function::new(
         "callee".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(builder.const_(Literal::I32(42))),
+        callee_body,
     ));
 
     // Caller with tail call (is_return=true)
-    let operands = BumpVec::new_in(&bump);
-    let body = builder.call("callee", operands, Type::I32, true);
+    let caller_body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let operands = vec![];
+        builder.call("callee", operands, Type::I32, true)
+    };
     module.add_function(Function::new(
         "caller".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        caller_body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 2);
 }
@@ -4695,30 +4655,30 @@ fn test_complex_control_flow() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // if (param0) { return 1; } else { return 0; }
-    let condition = builder.local_get(0, Type::I32);
-    let true_val = builder.const_(Literal::I32(1));
-    let false_val = builder.const_(Literal::I32(0));
-    let body = builder.if_(condition, true_val, Some(false_val), Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let condition = builder.local_get(0, Type::I32);
+        let true_val = builder.const_(Literal::I32(1));
+        let false_val = builder.const_(Literal::I32(0));
+        builder.if_("", condition, true_val, Some(false_val), Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![Type::I32],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4728,40 +4688,41 @@ fn test_deeply_nested_control_flow() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Nest 10 levels deep: block -> loop -> if -> block -> ...
-    let mut expr = builder.const_(Literal::I32(42));
-    for i in 0..10 {
-        let name = bump.alloc_str(&format!("level{}", i));
-        if i % 3 == 0 {
-            let mut list = BumpVec::new_in(&bump);
-            list.push(expr);
-            expr = builder.block(Some(name), list, Type::I32);
-        } else if i % 3 == 1 {
-            expr = builder.loop_(Some(name), expr, Type::I32);
-        } else {
-            let condition = builder.const_(Literal::I32(1));
-            expr = builder.if_(condition, expr, None, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let mut expr = builder.const_(Literal::I32(42));
+        for i in 0..10 {
+            let name = format!("level{}", i);
+            if i % 3 == 0 {
+                let mut list = vec![];
+                list.push(expr);
+                expr = builder.block(Some(name.as_str()), list, Type::I32);
+            } else if i % 3 == 1 {
+                expr = builder.loop_(Some(name.as_str()), expr, Type::I32);
+            } else {
+                let condition = builder.const_(Literal::I32(1));
+                expr = builder.if_(None::<String>, condition, expr, None, Type::I32);
+            }
         }
-    }
+        expr
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(expr),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4771,29 +4732,29 @@ fn test_select_instruction() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let condition = builder.const_(Literal::I32(1));
-    let if_true = builder.const_(Literal::I32(10));
-    let if_false = builder.const_(Literal::I32(20));
-    let body = builder.select(condition, if_true, if_false, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let condition = builder.const_(Literal::I32(1));
+        let if_true = builder.const_(Literal::I32(10));
+        let if_false = builder.const_(Literal::I32(20));
+        builder.select(condition, if_true, if_false, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4803,27 +4764,27 @@ fn test_drop_instruction() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let value = builder.const_(Literal::I32(42));
-    let body = builder.drop(value);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let value = builder.const_(Literal::I32(42));
+        builder.drop(value)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4833,29 +4794,28 @@ fn test_local_tee_instruction() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // local.tee sets a local and leaves value on stack
-    let value = builder.const_(Literal::I32(42));
-    let tee = builder.local_tee(0, value, Type::I32);
-    let body = tee; // Return the tee'd value
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let value = builder.const_(Literal::I32(42));
+        builder.local_tee(0, value, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![Type::I32], // One local
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4867,37 +4827,39 @@ fn test_multiple_local_operations() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // local[0] = 10; local[1] = 20; return local[0] + local[1]
-    let set0 = builder.local_set(0, builder.const_(Literal::I32(10)));
-    let set1 = builder.local_set(1, builder.const_(Literal::I32(20)));
-    let get0 = builder.local_get(0, Type::I32);
-    let get1 = builder.local_get(1, Type::I32);
-    let add = builder.binary(BinaryOp::AddInt32, get0, get1, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let c1 = builder.const_(Literal::I32(10));
+        let set0 = builder.local_set(LocalId::from(0), c1);
+        let c2 = builder.const_(Literal::I32(20));
+        let set1 = builder.local_set(LocalId::from(1), c2);
+        let get0 = builder.local_get(LocalId::from(0), Type::I32);
+        let get1 = builder.local_get(LocalId::from(1), Type::I32);
+        let add = builder.binary(BinaryOp::AddInt32, get0, get1, Type::I32);
 
-    let mut list = BumpVec::new_in(&bump);
-    list.push(set0);
-    list.push(set1);
-    list.push(add);
-    let body = builder.block(None, list, Type::I32);
+        let mut list = vec![];
+        list.push(set0);
+        list.push(set1);
+        list.push(add);
+        builder.block(None::<&str>, list, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![Type::I32, Type::I32],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4907,29 +4869,29 @@ fn test_local_tee_chaining() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // local.tee 0 (local.tee 1 (const 42)) - sets both locals to 42
-    let const_val = builder.const_(Literal::I32(42));
-    let tee1 = builder.local_tee(1, const_val, Type::I32);
-    let tee0 = builder.local_tee(0, tee1, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let const_val = builder.const_(Literal::I32(42));
+        let tee1 = builder.local_tee(1, const_val, Type::I32);
+        builder.local_tee(0, tee1, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![Type::I32, Type::I32],
-        Some(tee0),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4939,41 +4901,41 @@ fn test_local_swap_pattern() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Swap locals: temp = local[0]; local[0] = local[1]; local[1] = temp
-    let get0 = builder.local_get(0, Type::I32);
-    let tee_temp = builder.local_tee(2, get0, Type::I32);
-    let drop_temp = builder.drop(tee_temp);
-    let get1 = builder.local_get(1, Type::I32);
-    let set0 = builder.local_set(0, get1);
-    let get_temp = builder.local_get(2, Type::I32);
-    let set1 = builder.local_set(1, get_temp);
-    let result = builder.local_get(0, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let get0 = builder.local_get(0, Type::I32);
+        let tee_temp = builder.local_tee(2, get0, Type::I32);
+        let drop_temp = builder.drop(tee_temp);
+        let get1 = builder.local_get(1, Type::I32);
+        let set0 = builder.local_set(0, get1);
+        let get_temp = builder.local_get(2, Type::I32);
+        let set1 = builder.local_set(1, get_temp);
+        let result = builder.local_get(0, Type::I32);
 
-    let mut list = BumpVec::new_in(&bump);
-    list.push(drop_temp);
-    list.push(set0);
-    list.push(set1);
-    list.push(result);
-    let body = builder.block(None, list, Type::I32);
+        let mut list = vec![];
+        list.push(drop_temp);
+        list.push(set0);
+        list.push(set1);
+        list.push(result);
+        builder.block("", list, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![Type::I32, Type::I32, Type::I32], // params + temp
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -4983,29 +4945,29 @@ fn test_select_with_f32() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let condition = builder.const_(Literal::I32(0));
-    let if_true = builder.const_(Literal::F32(1.5));
-    let if_false = builder.const_(Literal::F32(2.5));
-    let body = builder.select(condition, if_true, if_false, Type::F32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let condition = builder.const_(Literal::I32(0));
+        let if_true = builder.const_(Literal::F32(1.5));
+        let if_false = builder.const_(Literal::F32(2.5));
+        builder.select(condition, if_true, if_false, Type::F32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5015,29 +4977,29 @@ fn test_select_with_i64() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let condition = builder.const_(Literal::I32(1));
-    let if_true = builder.const_(Literal::I64(100));
-    let if_false = builder.const_(Literal::I64(200));
-    let body = builder.select(condition, if_true, if_false, Type::I64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let condition = builder.const_(Literal::I32(1));
+        let if_true = builder.const_(Literal::I64(100));
+        let if_false = builder.const_(Literal::I64(200));
+        builder.select(condition, if_true, if_false, Type::I64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5047,34 +5009,34 @@ fn test_select_nested() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // select(c1, select(c2, a, b), c)
-    let c2 = builder.const_(Literal::I32(1));
-    let a = builder.const_(Literal::I32(10));
-    let b = builder.const_(Literal::I32(20));
-    let inner = builder.select(c2, a, b, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let c2 = builder.const_(Literal::I32(1));
+        let a = builder.const_(Literal::I32(10));
+        let b = builder.const_(Literal::I32(20));
+        let inner = builder.select(c2, a, b, Type::I32);
 
-    let c1 = builder.const_(Literal::I32(0));
-    let c = builder.const_(Literal::I32(30));
-    let body = builder.select(c1, inner, c, Type::I32);
+        let c1 = builder.const_(Literal::I32(0));
+        let c = builder.const_(Literal::I32(30));
+        builder.select(c1, inner, c, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5084,41 +5046,41 @@ fn test_drop_multiple_values() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Drop multiple computed values
-    let v1 = builder.const_(Literal::I32(10));
-    let v2 = builder.const_(Literal::I32(20));
-    let sum = builder.binary(BinaryOp::AddInt32, v1, v2, Type::I32);
-    let drop1 = builder.drop(sum);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let v1 = builder.const_(Literal::I32(10));
+        let v2 = builder.const_(Literal::I32(20));
+        let sum = builder.binary(BinaryOp::AddInt32, v1, v2, Type::I32);
+        let drop1 = builder.drop(sum);
 
-    let v3 = builder.const_(Literal::I64(100));
-    let drop2 = builder.drop(v3);
+        let v3 = builder.const_(Literal::I64(100));
+        let drop2 = builder.drop(v3);
 
-    let result = builder.const_(Literal::I32(42));
+        let result = builder.const_(Literal::I32(42));
 
-    let mut list = BumpVec::new_in(&bump);
-    list.push(drop1);
-    list.push(drop2);
-    list.push(result);
-    let body = builder.block(None, list, Type::I32);
+        let mut list = vec![];
+        list.push(drop1);
+        list.push(drop2);
+        list.push(result);
+        builder.block("", list, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5129,13 +5091,13 @@ fn test_global_operations_complex() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Add two globals
-    let init1 = builder.const_(Literal::I32(100));
+    let init1 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(100))
+    };
     let g0_id = module.add_global(Global {
         name: "g0".to_string(),
         type_: Type::I32,
@@ -5143,7 +5105,10 @@ fn test_global_operations_complex() {
         kind: GlobalKind::Local { init: init1 },
     });
 
-    let init2 = builder.const_(Literal::I32(200));
+    let init2 = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        builder.const_(Literal::I32(200))
+    };
     let g1_id = module.add_global(Global {
         name: "g1".to_string(),
         type_: Type::I32,
@@ -5152,33 +5117,36 @@ fn test_global_operations_complex() {
     });
 
     // Function: swap globals and return their sum
-    let get0 = builder.global_get(g0_id, Type::I32);
-    let get1 = builder.global_get(g1_id, Type::I32);
-    let set0 = builder.global_set(g0_id, get1);
-    let set1 = builder.global_set(g1_id, get0);
-    let get0_new = builder.global_get(g0_id, Type::I32);
-    let get1_new = builder.global_get(g1_id, Type::I32);
-    let result = builder.binary(BinaryOp::AddInt32, get0_new, get1_new, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let get0 = builder.global_get(g0_id, Type::I32);
+        let get1 = builder.global_get(g1_id, Type::I32);
+        let set0 = builder.global_set(g0_id, get1);
+        let set1 = builder.global_set(g1_id, get0);
+        let get0_new = builder.global_get(g0_id, Type::I32);
+        let get1_new = builder.global_get(g1_id, Type::I32);
+        let result = builder.binary(BinaryOp::AddInt32, get0_new, get1_new, Type::I32);
 
-    let mut list = BumpVec::new_in(&bump);
-    list.push(set0);
-    list.push(set1);
-    list.push(result);
-    let body = builder.block(None, list, Type::I32);
+        let mut list = vec![];
+        list.push(set0);
+        list.push(set1);
+        list.push(result);
+        builder.block("", list, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
     assert_eq!(parsed.globals.len(), 2);
@@ -5189,29 +5157,30 @@ fn test_many_locals_access() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Sum 10 locals
-    let mut list = BumpVec::new_in(&bump);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let mut list = vec![];
 
-    // Initialize locals
-    for i in 0..10 {
-        let set = builder.local_set(i, builder.const_(Literal::I32(i as i32)));
-        list.push(set);
-    }
+        // Initialize locals
+        for i in 0..10 {
+            let val = builder.const_(Literal::I32(i as i32));
+            let set = builder.local_set(i, val);
+            list.push(set);
+        }
 
-    // Sum them all
-    let mut sum = builder.local_get(0, Type::I32);
-    for i in 1..10 {
-        let get = builder.local_get(i, Type::I32);
-        sum = builder.binary(BinaryOp::AddInt32, sum, get, Type::I32);
-    }
-    list.push(sum);
+        // Sum them all
+        let mut sum = builder.local_get(0, Type::I32);
+        for i in 1..10 {
+            let get = builder.local_get(i, Type::I32);
+            sum = builder.binary(BinaryOp::AddInt32, sum, get, Type::I32);
+        }
+        list.push(sum);
 
-    let body = builder.block(None, list, Type::I32);
+        builder.block("", list, Type::I32)
+    };
 
     let locals = vec![Type::I32; 10];
     module.add_function(Function::new(
@@ -5219,14 +5188,14 @@ fn test_many_locals_access() {
         Type::NONE,
         Type::I32,
         locals,
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5239,38 +5208,38 @@ fn test_i32_arithmetic() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Test arithmetic chain: (10 + 20) * 3 / 2 - 1
-    let a = builder.const_(Literal::I32(10));
-    let b = builder.const_(Literal::I32(20));
-    let add = builder.binary(BinaryOp::AddInt32, a, b, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::I32(10));
+        let b = builder.const_(Literal::I32(20));
+        let add = builder.binary(BinaryOp::AddInt32, a, b, Type::I32);
 
-    let c = builder.const_(Literal::I32(3));
-    let mul = builder.binary(BinaryOp::MulInt32, add, c, Type::I32);
+        let c = builder.const_(Literal::I32(3));
+        let mul = builder.binary(BinaryOp::MulInt32, add, c, Type::I32);
 
-    let d = builder.const_(Literal::I32(2));
-    let div = builder.binary(BinaryOp::DivSInt32, mul, d, Type::I32);
+        let d = builder.const_(Literal::I32(2));
+        let div = builder.binary(BinaryOp::DivSInt32, mul, d, Type::I32);
 
-    let e = builder.const_(Literal::I32(1));
-    let body = builder.binary(BinaryOp::SubInt32, div, e, Type::I32);
+        let e = builder.const_(Literal::I32(1));
+        builder.binary(BinaryOp::SubInt32, div, e, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5280,34 +5249,34 @@ fn test_i32_division_signed_unsigned() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::I32(100));
-    let b = builder.const_(Literal::I32(3));
-    let div_s = builder.binary(BinaryOp::DivSInt32, a, b, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::I32(100));
+        let b = builder.const_(Literal::I32(3));
+        let div_s = builder.binary(BinaryOp::DivSInt32, a, b, Type::I32);
 
-    let c = builder.const_(Literal::I32(100));
-    let d = builder.const_(Literal::I32(3));
-    let div_u = builder.binary(BinaryOp::DivUInt32, c, d, Type::I32);
+        let c = builder.const_(Literal::I32(100));
+        let d = builder.const_(Literal::I32(3));
+        let div_u = builder.binary(BinaryOp::DivUInt32, c, d, Type::I32);
 
-    let body = builder.binary(BinaryOp::AddInt32, div_s, div_u, Type::I32);
+        builder.binary(BinaryOp::AddInt32, div_s, div_u, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5317,34 +5286,34 @@ fn test_i32_remainder() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::I32(17));
-    let b = builder.const_(Literal::I32(5));
-    let rem_s = builder.binary(BinaryOp::RemSInt32, a, b, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::I32(17));
+        let b = builder.const_(Literal::I32(5));
+        let rem_s = builder.binary(BinaryOp::RemSInt32, a, b, Type::I32);
 
-    let c = builder.const_(Literal::I32(17));
-    let d = builder.const_(Literal::I32(5));
-    let rem_u = builder.binary(BinaryOp::RemUInt32, c, d, Type::I32);
+        let c = builder.const_(Literal::I32(17));
+        let d = builder.const_(Literal::I32(5));
+        let rem_u = builder.binary(BinaryOp::RemUInt32, c, d, Type::I32);
 
-    let body = builder.binary(BinaryOp::MulInt32, rem_s, rem_u, Type::I32);
+        builder.binary(BinaryOp::MulInt32, rem_s, rem_u, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5354,39 +5323,39 @@ fn test_i32_bitwise() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::I32(0xFF00));
-    let b = builder.const_(Literal::I32(0x0FF0));
-    let and = builder.binary(BinaryOp::AndInt32, a, b, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::I32(0xFF00));
+        let b = builder.const_(Literal::I32(0x0FF0));
+        let and = builder.binary(BinaryOp::AndInt32, a, b, Type::I32);
 
-    let c = builder.const_(Literal::I32(0xFF00));
-    let d = builder.const_(Literal::I32(0x0FF0));
-    let or = builder.binary(BinaryOp::OrInt32, c, d, Type::I32);
+        let c = builder.const_(Literal::I32(0xFF00));
+        let d = builder.const_(Literal::I32(0x0FF0));
+        let or = builder.binary(BinaryOp::OrInt32, c, d, Type::I32);
 
-    let e = builder.const_(Literal::I32(0xFF00));
-    let f = builder.const_(Literal::I32(0x0FF0));
-    let xor = builder.binary(BinaryOp::XorInt32, e, f, Type::I32);
+        let e = builder.const_(Literal::I32(0xFF00));
+        let f = builder.const_(Literal::I32(0x0FF0));
+        let xor = builder.binary(BinaryOp::XorInt32, e, f, Type::I32);
 
-    let r1 = builder.binary(BinaryOp::OrInt32, and, or, Type::I32);
-    let body = builder.binary(BinaryOp::XorInt32, r1, xor, Type::I32);
+        let r1 = builder.binary(BinaryOp::OrInt32, and, or, Type::I32);
+        builder.binary(BinaryOp::XorInt32, r1, xor, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5396,39 +5365,39 @@ fn test_i32_shifts() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let value = builder.const_(Literal::I32(0x12345678));
-    let amt = builder.const_(Literal::I32(4));
-    let shl = builder.binary(BinaryOp::ShlInt32, value, amt, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let value = builder.const_(Literal::I32(0x12345678));
+        let amt = builder.const_(Literal::I32(4));
+        let shl = builder.binary(BinaryOp::ShlInt32, value, amt, Type::I32);
 
-    let value2 = builder.const_(Literal::I32(0x12345678));
-    let amt2 = builder.const_(Literal::I32(4));
-    let shr_s = builder.binary(BinaryOp::ShrSInt32, value2, amt2, Type::I32);
+        let value2 = builder.const_(Literal::I32(0x12345678));
+        let amt2 = builder.const_(Literal::I32(4));
+        let shr_s = builder.binary(BinaryOp::ShrSInt32, value2, amt2, Type::I32);
 
-    let value3 = builder.const_(Literal::I32(0x12345678));
-    let amt3 = builder.const_(Literal::I32(4));
-    let shr_u = builder.binary(BinaryOp::ShrUInt32, value3, amt3, Type::I32);
+        let value3 = builder.const_(Literal::I32(0x12345678));
+        let amt3 = builder.const_(Literal::I32(4));
+        let shr_u = builder.binary(BinaryOp::ShrUInt32, value3, amt3, Type::I32);
 
-    let r1 = builder.binary(BinaryOp::XorInt32, shl, shr_s, Type::I32);
-    let body = builder.binary(BinaryOp::XorInt32, r1, shr_u, Type::I32);
+        let r1 = builder.binary(BinaryOp::XorInt32, shl, shr_s, Type::I32);
+        builder.binary(BinaryOp::XorInt32, r1, shr_u, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5438,34 +5407,34 @@ fn test_i32_rotates() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let value = builder.const_(Literal::I32(0xABCD1234u32 as i32));
-    let amt = builder.const_(Literal::I32(8));
-    let rotl = builder.binary(BinaryOp::RotLInt32, value, amt, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let value = builder.const_(Literal::I32(0xABCD1234u32 as i32));
+        let amt = builder.const_(Literal::I32(8));
+        let rotl = builder.binary(BinaryOp::RotLInt32, value, amt, Type::I32);
 
-    let value2 = builder.const_(Literal::I32(0xABCD1234u32 as i32));
-    let amt2 = builder.const_(Literal::I32(8));
-    let rotr = builder.binary(BinaryOp::RotRInt32, value2, amt2, Type::I32);
+        let value2 = builder.const_(Literal::I32(0xABCD1234u32 as i32));
+        let amt2 = builder.const_(Literal::I32(8));
+        let rotr = builder.binary(BinaryOp::RotRInt32, value2, amt2, Type::I32);
 
-    let body = builder.binary(BinaryOp::XorInt32, rotl, rotr, Type::I32);
+        builder.binary(BinaryOp::XorInt32, rotl, rotr, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5475,44 +5444,44 @@ fn test_i32_comparisons() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::I32(10));
-    let b = builder.const_(Literal::I32(20));
-    let eq = builder.binary(BinaryOp::EqInt32, a, b, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::I32(10));
+        let b = builder.const_(Literal::I32(20));
+        let eq = builder.binary(BinaryOp::EqInt32, a, b, Type::I32);
 
-    let c = builder.const_(Literal::I32(10));
-    let d = builder.const_(Literal::I32(20));
-    let ne = builder.binary(BinaryOp::NeInt32, c, d, Type::I32);
+        let c = builder.const_(Literal::I32(10));
+        let d = builder.const_(Literal::I32(20));
+        let ne = builder.binary(BinaryOp::NeInt32, c, d, Type::I32);
 
-    let e = builder.const_(Literal::I32(10));
-    let f = builder.const_(Literal::I32(20));
-    let lt_s = builder.binary(BinaryOp::LtSInt32, e, f, Type::I32);
+        let e = builder.const_(Literal::I32(10));
+        let f = builder.const_(Literal::I32(20));
+        let lt_s = builder.binary(BinaryOp::LtSInt32, e, f, Type::I32);
 
-    let g = builder.const_(Literal::I32(10));
-    let h = builder.const_(Literal::I32(20));
-    let le_u = builder.binary(BinaryOp::LeUInt32, g, h, Type::I32);
+        let g = builder.const_(Literal::I32(10));
+        let h = builder.const_(Literal::I32(20));
+        let le_u = builder.binary(BinaryOp::LeUInt32, g, h, Type::I32);
 
-    let r1 = builder.binary(BinaryOp::AndInt32, eq, ne, Type::I32);
-    let r2 = builder.binary(BinaryOp::AndInt32, lt_s, le_u, Type::I32);
-    let body = builder.binary(BinaryOp::OrInt32, r1, r2, Type::I32);
+        let r1 = builder.binary(BinaryOp::AndInt32, eq, ne, Type::I32);
+        let r2 = builder.binary(BinaryOp::AndInt32, lt_s, le_u, Type::I32);
+        builder.binary(BinaryOp::OrInt32, r1, r2, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5522,44 +5491,44 @@ fn test_i32_comparison_variants() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::I32(10));
-    let b = builder.const_(Literal::I32(20));
-    let gt_s = builder.binary(BinaryOp::GtSInt32, a, b, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::I32(10));
+        let b = builder.const_(Literal::I32(20));
+        let gt_s = builder.binary(BinaryOp::GtSInt32, a, b, Type::I32);
 
-    let c = builder.const_(Literal::I32(10));
-    let d = builder.const_(Literal::I32(20));
-    let gt_u = builder.binary(BinaryOp::GtUInt32, c, d, Type::I32);
+        let c = builder.const_(Literal::I32(10));
+        let d = builder.const_(Literal::I32(20));
+        let gt_u = builder.binary(BinaryOp::GtUInt32, c, d, Type::I32);
 
-    let e = builder.const_(Literal::I32(10));
-    let f = builder.const_(Literal::I32(20));
-    let ge_s = builder.binary(BinaryOp::GeSInt32, e, f, Type::I32);
+        let e = builder.const_(Literal::I32(10));
+        let f = builder.const_(Literal::I32(20));
+        let ge_s = builder.binary(BinaryOp::GeSInt32, e, f, Type::I32);
 
-    let g = builder.const_(Literal::I32(10));
-    let h = builder.const_(Literal::I32(20));
-    let ge_u = builder.binary(BinaryOp::GeUInt32, g, h, Type::I32);
+        let g = builder.const_(Literal::I32(10));
+        let h = builder.const_(Literal::I32(20));
+        let ge_u = builder.binary(BinaryOp::GeUInt32, g, h, Type::I32);
 
-    let r1 = builder.binary(BinaryOp::AddInt32, gt_s, gt_u, Type::I32);
-    let r2 = builder.binary(BinaryOp::AddInt32, ge_s, ge_u, Type::I32);
-    let body = builder.binary(BinaryOp::AddInt32, r1, r2, Type::I32);
+        let r1 = builder.binary(BinaryOp::AddInt32, gt_s, gt_u, Type::I32);
+        let r2 = builder.binary(BinaryOp::AddInt32, ge_s, ge_u, Type::I32);
+        builder.binary(BinaryOp::AddInt32, r1, r2, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5569,39 +5538,39 @@ fn test_i32_unary_all() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let value1 = builder.const_(Literal::I32(0x12340000));
-    let value2 = builder.const_(Literal::I32(0x12340000));
-    let value3 = builder.const_(Literal::I32(0x12340000));
-    let value4 = builder.const_(Literal::I32(0x12340000));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let value1 = builder.const_(Literal::I32(0x12340000));
+        let value2 = builder.const_(Literal::I32(0x12340000));
+        let value3 = builder.const_(Literal::I32(0x12340000));
+        let value4 = builder.const_(Literal::I32(0x12340000));
 
-    let clz = builder.unary(UnaryOp::ClzInt32, value1, Type::I32);
-    let ctz = builder.unary(UnaryOp::CtzInt32, value2, Type::I32);
-    let popcnt = builder.unary(UnaryOp::PopcntInt32, value3, Type::I32);
-    let eqz = builder.unary(UnaryOp::EqZInt32, value4, Type::I32);
+        let clz = builder.unary(UnaryOp::ClzInt32, value1, Type::I32);
+        let ctz = builder.unary(UnaryOp::CtzInt32, value2, Type::I32);
+        let popcnt = builder.unary(UnaryOp::PopcntInt32, value3, Type::I32);
+        let eqz = builder.unary(UnaryOp::EqZInt32, value4, Type::I32);
 
-    // Combine: clz + ctz + popcnt + eqz
-    let r1 = builder.binary(BinaryOp::AddInt32, clz, ctz, Type::I32);
-    let r2 = builder.binary(BinaryOp::AddInt32, r1, popcnt, Type::I32);
-    let body = builder.binary(BinaryOp::AddInt32, r2, eqz, Type::I32);
+        // Combine: clz + ctz + popcnt + eqz
+        let r1 = builder.binary(BinaryOp::AddInt32, clz, ctz, Type::I32);
+        let r2 = builder.binary(BinaryOp::AddInt32, r1, popcnt, Type::I32);
+        builder.binary(BinaryOp::AddInt32, r2, eqz, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5612,37 +5581,37 @@ fn test_i64_arithmetic() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::I64(1000));
-    let b = builder.const_(Literal::I64(300));
-    let add = builder.binary(BinaryOp::AddInt64, a, b, Type::I64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::I64(1000));
+        let b = builder.const_(Literal::I64(300));
+        let add = builder.binary(BinaryOp::AddInt64, a, b, Type::I64);
 
-    let c = builder.const_(Literal::I64(2000));
-    let d = builder.const_(Literal::I64(500));
-    let sub = builder.binary(BinaryOp::SubInt64, c, d, Type::I64);
+        let c = builder.const_(Literal::I64(2000));
+        let d = builder.const_(Literal::I64(500));
+        let sub = builder.binary(BinaryOp::SubInt64, c, d, Type::I64);
 
-    let mul = builder.binary(BinaryOp::MulInt64, add, sub, Type::I64);
+        let mul = builder.binary(BinaryOp::MulInt64, add, sub, Type::I64);
 
-    let e = builder.const_(Literal::I64(10));
-    let body = builder.binary(BinaryOp::DivSInt64, mul, e, Type::I64);
+        let e = builder.const_(Literal::I64(10));
+        builder.binary(BinaryOp::DivSInt64, mul, e, Type::I64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5652,39 +5621,39 @@ fn test_i64_bitwise() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::I64(0xFFFF0000FFFF0000u64 as i64));
-    let b = builder.const_(Literal::I64(0x0000FFFF0000FFFFu64 as i64));
-    let and = builder.binary(BinaryOp::AndInt64, a, b, Type::I64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::I64(0xFFFF0000FFFF0000u64 as i64));
+        let b = builder.const_(Literal::I64(0x0000FFFF0000FFFFu64 as i64));
+        let and = builder.binary(BinaryOp::AndInt64, a, b, Type::I64);
 
-    let c = builder.const_(Literal::I64(0xFFFF0000FFFF0000u64 as i64));
-    let d = builder.const_(Literal::I64(0x0000FFFF0000FFFFu64 as i64));
-    let or = builder.binary(BinaryOp::OrInt64, c, d, Type::I64);
+        let c = builder.const_(Literal::I64(0xFFFF0000FFFF0000u64 as i64));
+        let d = builder.const_(Literal::I64(0x0000FFFF0000FFFFu64 as i64));
+        let or = builder.binary(BinaryOp::OrInt64, c, d, Type::I64);
 
-    let e = builder.const_(Literal::I64(0xFFFF0000FFFF0000u64 as i64));
-    let f = builder.const_(Literal::I64(0x0000FFFF0000FFFFu64 as i64));
-    let xor = builder.binary(BinaryOp::XorInt64, e, f, Type::I64);
+        let e = builder.const_(Literal::I64(0xFFFF0000FFFF0000u64 as i64));
+        let f = builder.const_(Literal::I64(0x0000FFFF0000FFFFu64 as i64));
+        let xor = builder.binary(BinaryOp::XorInt64, e, f, Type::I64);
 
-    let r1 = builder.binary(BinaryOp::AndInt64, and, or, Type::I64);
-    let body = builder.binary(BinaryOp::XorInt64, r1, xor, Type::I64);
+        let r1 = builder.binary(BinaryOp::AndInt64, and, or, Type::I64);
+        builder.binary(BinaryOp::XorInt64, r1, xor, Type::I64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5694,39 +5663,39 @@ fn test_i64_shifts() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let value = builder.const_(Literal::I64(0x123456789ABCDEF0u64 as i64));
-    let amt = builder.const_(Literal::I64(8));
-    let shl = builder.binary(BinaryOp::ShlInt64, value, amt, Type::I64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let value = builder.const_(Literal::I64(0x123456789ABCDEF0u64 as i64));
+        let amt = builder.const_(Literal::I64(8));
+        let shl = builder.binary(BinaryOp::ShlInt64, value, amt, Type::I64);
 
-    let value2 = builder.const_(Literal::I64(0x123456789ABCDEF0u64 as i64));
-    let amt2 = builder.const_(Literal::I64(8));
-    let shr_s = builder.binary(BinaryOp::ShrSInt64, value2, amt2, Type::I64);
+        let value2 = builder.const_(Literal::I64(0x123456789ABCDEF0u64 as i64));
+        let amt2 = builder.const_(Literal::I64(8));
+        let shr_s = builder.binary(BinaryOp::ShrSInt64, value2, amt2, Type::I64);
 
-    let value3 = builder.const_(Literal::I64(0x123456789ABCDEF0u64 as i64));
-    let amt3 = builder.const_(Literal::I64(8));
-    let shr_u = builder.binary(BinaryOp::ShrUInt64, value3, amt3, Type::I64);
+        let value3 = builder.const_(Literal::I64(0x123456789ABCDEF0u64 as i64));
+        let amt3 = builder.const_(Literal::I64(8));
+        let shr_u = builder.binary(BinaryOp::ShrUInt64, value3, amt3, Type::I64);
 
-    let r1 = builder.binary(BinaryOp::XorInt64, shl, shr_s, Type::I64);
-    let body = builder.binary(BinaryOp::XorInt64, r1, shr_u, Type::I64);
+        let r1 = builder.binary(BinaryOp::XorInt64, shl, shr_s, Type::I64);
+        builder.binary(BinaryOp::XorInt64, r1, shr_u, Type::I64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5736,34 +5705,34 @@ fn test_i64_rotates() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let value = builder.const_(Literal::I64(0xFEDCBA9876543210u64 as i64));
-    let amt = builder.const_(Literal::I64(16));
-    let rotl = builder.binary(BinaryOp::RotLInt64, value, amt, Type::I64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let value = builder.const_(Literal::I64(0xFEDCBA9876543210u64 as i64));
+        let amt = builder.const_(Literal::I64(16));
+        let rotl = builder.binary(BinaryOp::RotLInt64, value, amt, Type::I64);
 
-    let value2 = builder.const_(Literal::I64(0xFEDCBA9876543210u64 as i64));
-    let amt2 = builder.const_(Literal::I64(16));
-    let rotr = builder.binary(BinaryOp::RotRInt64, value2, amt2, Type::I64);
+        let value2 = builder.const_(Literal::I64(0xFEDCBA9876543210u64 as i64));
+        let amt2 = builder.const_(Literal::I64(16));
+        let rotr = builder.binary(BinaryOp::RotRInt64, value2, amt2, Type::I64);
 
-    let body = builder.binary(BinaryOp::XorInt64, rotl, rotr, Type::I64);
+        builder.binary(BinaryOp::XorInt64, rotl, rotr, Type::I64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5773,44 +5742,44 @@ fn test_i64_comparisons() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::I64(1000));
-    let b = builder.const_(Literal::I64(2000));
-    let eq = builder.binary(BinaryOp::EqInt64, a, b, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::I64(1000));
+        let b = builder.const_(Literal::I64(2000));
+        let eq = builder.binary(BinaryOp::EqInt64, a, b, Type::I32);
 
-    let c = builder.const_(Literal::I64(1000));
-    let d = builder.const_(Literal::I64(2000));
-    let ne = builder.binary(BinaryOp::NeInt64, c, d, Type::I32);
+        let c = builder.const_(Literal::I64(1000));
+        let d = builder.const_(Literal::I64(2000));
+        let ne = builder.binary(BinaryOp::NeInt64, c, d, Type::I32);
 
-    let e = builder.const_(Literal::I64(1000));
-    let f = builder.const_(Literal::I64(2000));
-    let lt_s = builder.binary(BinaryOp::LtSInt64, e, f, Type::I32);
+        let e = builder.const_(Literal::I64(1000));
+        let f = builder.const_(Literal::I64(2000));
+        let lt_s = builder.binary(BinaryOp::LtSInt64, e, f, Type::I32);
 
-    let g = builder.const_(Literal::I64(1000));
-    let h = builder.const_(Literal::I64(2000));
-    let ge_u = builder.binary(BinaryOp::GeUInt64, g, h, Type::I32);
+        let g = builder.const_(Literal::I64(1000));
+        let h = builder.const_(Literal::I64(2000));
+        let ge_u = builder.binary(BinaryOp::GeUInt64, g, h, Type::I32);
 
-    let r1 = builder.binary(BinaryOp::AddInt32, eq, ne, Type::I32);
-    let r2 = builder.binary(BinaryOp::AddInt32, lt_s, ge_u, Type::I32);
-    let body = builder.binary(BinaryOp::AddInt32, r1, r2, Type::I32);
+        let r1 = builder.binary(BinaryOp::AddInt32, eq, ne, Type::I32);
+        let r2 = builder.binary(BinaryOp::AddInt32, lt_s, ge_u, Type::I32);
+        builder.binary(BinaryOp::AddInt32, r1, r2, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5820,38 +5789,38 @@ fn test_i64_unary_all() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let value1 = builder.const_(Literal::I64(0x1234000000000000u64 as i64));
-    let value2 = builder.const_(Literal::I64(0x1234000000000000u64 as i64));
-    let value3 = builder.const_(Literal::I64(0x1234000000000000u64 as i64));
-    let value4 = builder.const_(Literal::I64(0x1234000000000000u64 as i64));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let value1 = builder.const_(Literal::I64(0x1234000000000000u64 as i64));
+        let value2 = builder.const_(Literal::I64(0x1234000000000000u64 as i64));
+        let value3 = builder.const_(Literal::I64(0x1234000000000000u64 as i64));
+        let value4 = builder.const_(Literal::I64(0x1234000000000000u64 as i64));
 
-    let clz = builder.unary(UnaryOp::ClzInt64, value1, Type::I64);
-    let ctz = builder.unary(UnaryOp::CtzInt64, value2, Type::I64);
-    let popcnt = builder.unary(UnaryOp::PopcntInt64, value3, Type::I64);
-    let eqz = builder.unary(UnaryOp::EqZInt64, value4, Type::I64);
+        let clz = builder.unary(UnaryOp::ClzInt64, value1, Type::I64);
+        let ctz = builder.unary(UnaryOp::CtzInt64, value2, Type::I64);
+        let popcnt = builder.unary(UnaryOp::PopcntInt64, value3, Type::I64);
+        let eqz = builder.unary(UnaryOp::EqZInt64, value4, Type::I64);
 
-    let r1 = builder.binary(BinaryOp::AddInt64, clz, ctz, Type::I64);
-    let r2 = builder.binary(BinaryOp::AddInt64, r1, popcnt, Type::I64);
-    let body = builder.binary(BinaryOp::AddInt64, r2, eqz, Type::I64);
+        let r1 = builder.binary(BinaryOp::AddInt64, clz, ctz, Type::I64);
+        let r2 = builder.binary(BinaryOp::AddInt64, r1, popcnt, Type::I64);
+        builder.binary(BinaryOp::AddInt64, r2, eqz, Type::I64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5861,36 +5830,36 @@ fn test_mixed_i32_i64_operations() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Use i32 for comparison, i64 for computation
-    let i32_val = builder.const_(Literal::I32(100));
-    let i64_a = builder.const_(Literal::I64(1000));
-    let i64_b = builder.const_(Literal::I64(2000));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let i32_val = builder.const_(Literal::I32(100));
+        let i64_a = builder.const_(Literal::I64(1000));
+        let i64_b = builder.const_(Literal::I64(2000));
 
-    let i64_sum = builder.binary(BinaryOp::AddInt64, i64_a, i64_b, Type::I64);
-    let comparison = builder.unary(UnaryOp::EqZInt32, i32_val, Type::I32);
+        let i64_sum = builder.binary(BinaryOp::AddInt64, i64_a, i64_b, Type::I64);
+        let comparison = builder.unary(UnaryOp::EqZInt32, i32_val, Type::I32);
 
-    // Select between sum and constant based on comparison
-    let fallback = builder.const_(Literal::I64(9999));
-    let body = builder.select(comparison, i64_sum, fallback, Type::I64);
+        // Select between sum and constant based on comparison
+        let fallback = builder.const_(Literal::I64(9999));
+        builder.select(comparison, i64_sum, fallback, Type::I64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5900,43 +5869,44 @@ fn test_extreme_integer_values() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
     // Test with extreme values
-    let i32_max = builder.const_(Literal::I32(i32::MAX));
-    let i32_min = builder.const_(Literal::I32(i32::MIN));
-    let i32_zero = builder.const_(Literal::I32(0));
-    let i32_neg_one = builder.const_(Literal::I32(-1));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let i32_max = builder.const_(Literal::I32(i32::MAX));
+        let i32_min = builder.const_(Literal::I32(i32::MIN));
+        let i32_zero = builder.const_(Literal::I32(0));
+        let i32_neg_one = builder.const_(Literal::I32(-1));
 
-    let i64_max = builder.const_(Literal::I64(i64::MAX));
-    let i64_min = builder.const_(Literal::I64(i64::MIN));
+        let i64_max = builder.const_(Literal::I64(i64::MAX));
+        let i64_min = builder.const_(Literal::I64(i64::MIN));
 
-    // Operations with extreme values
-    let r1 = builder.binary(BinaryOp::AddInt32, i32_max, i32_min, Type::I32);
-    let r2 = builder.binary(BinaryOp::XorInt32, i32_zero, i32_neg_one, Type::I32);
-    let r3 = builder.binary(BinaryOp::AndInt32, r1, r2, Type::I32);
+        // Operations with extreme values
+        let r1 = builder.binary(BinaryOp::AddInt32, i32_max, i32_min, Type::I32);
+        let r2 = builder.binary(BinaryOp::XorInt32, i32_zero, i32_neg_one, Type::I32);
+        let r3 = builder.binary(BinaryOp::AndInt32, r1, r2, Type::I32);
 
-    let r4 = builder.binary(BinaryOp::AddInt64, i64_max, i64_min, Type::I64);
-    let comparison = builder.unary(UnaryOp::EqZInt32, r3, Type::I32);
+        let r4 = builder.binary(BinaryOp::AddInt64, i64_max, i64_min, Type::I64);
+        let comparison = builder.unary(UnaryOp::EqZInt32, r3, Type::I32);
 
-    let body = builder.select(comparison, r4, builder.const_(Literal::I64(0)), Type::I64);
+        let c0 = builder.const_(Literal::I64(0));
+        builder.select(comparison, r4, c0, Type::I64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5950,37 +5920,37 @@ fn test_f32_arithmetic() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::F32(10.5));
-    let b = builder.const_(Literal::F32(20.3));
-    let add = builder.binary(BinaryOp::AddFloat32, a, b, Type::F32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::F32(10.5));
+        let b = builder.const_(Literal::F32(20.3));
+        let add = builder.binary(BinaryOp::AddFloat32, a, b, Type::F32);
 
-    let c = builder.const_(Literal::F32(3.0));
-    let mul = builder.binary(BinaryOp::MulFloat32, add, c, Type::F32);
+        let c = builder.const_(Literal::F32(3.0));
+        let mul = builder.binary(BinaryOp::MulFloat32, add, c, Type::F32);
 
-    let d = builder.const_(Literal::F32(2.0));
-    let div = builder.binary(BinaryOp::DivFloat32, mul, d, Type::F32);
+        let d = builder.const_(Literal::F32(2.0));
+        let div = builder.binary(BinaryOp::DivFloat32, mul, d, Type::F32);
 
-    let e = builder.const_(Literal::F32(1.5));
-    let body = builder.binary(BinaryOp::SubFloat32, div, e, Type::F32);
+        let e = builder.const_(Literal::F32(1.5));
+        builder.binary(BinaryOp::SubFloat32, div, e, Type::F32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -5990,39 +5960,39 @@ fn test_f32_comparisons() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::F32(10.5));
-    let b = builder.const_(Literal::F32(20.3));
-    let eq = builder.binary(BinaryOp::EqFloat32, a, b, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::F32(10.5));
+        let b = builder.const_(Literal::F32(20.3));
+        let eq = builder.binary(BinaryOp::EqFloat32, a, b, Type::I32);
 
-    let c = builder.const_(Literal::F32(5.0));
-    let d = builder.const_(Literal::F32(10.0));
-    let lt = builder.binary(BinaryOp::LtFloat32, c, d, Type::I32);
+        let c = builder.const_(Literal::F32(5.0));
+        let d = builder.const_(Literal::F32(10.0));
+        let lt = builder.binary(BinaryOp::LtFloat32, c, d, Type::I32);
 
-    let e = builder.const_(Literal::F32(15.0));
-    let f = builder.const_(Literal::F32(10.0));
-    let gt = builder.binary(BinaryOp::GtFloat32, e, f, Type::I32);
+        let e = builder.const_(Literal::F32(15.0));
+        let f = builder.const_(Literal::F32(10.0));
+        let gt = builder.binary(BinaryOp::GtFloat32, e, f, Type::I32);
 
-    let r1 = builder.binary(BinaryOp::AddInt32, eq, lt, Type::I32);
-    let body = builder.binary(BinaryOp::AddInt32, r1, gt, Type::I32);
+        let r1 = builder.binary(BinaryOp::AddInt32, eq, lt, Type::I32);
+        builder.binary(BinaryOp::AddInt32, r1, gt, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6032,40 +6002,40 @@ fn test_f32_math_functions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let val1 = builder.const_(Literal::F32(-42.7));
-    let abs_val = builder.unary(UnaryOp::AbsFloat32, val1, Type::F32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let val1 = builder.const_(Literal::F32(-42.7));
+        let abs_val = builder.unary(UnaryOp::AbsFloat32, val1, Type::F32);
 
-    let val2 = builder.const_(Literal::F32(std::f32::consts::PI));
-    let neg_val = builder.unary(UnaryOp::NegFloat32, val2, Type::F32);
+        let val2 = builder.const_(Literal::F32(std::f32::consts::PI));
+        let neg_val = builder.unary(UnaryOp::NegFloat32, val2, Type::F32);
 
-    let val3 = builder.const_(Literal::F32(4.7));
-    let ceil_val = builder.unary(UnaryOp::CeilFloat32, val3, Type::F32);
+        let val3 = builder.const_(Literal::F32(4.7));
+        let ceil_val = builder.unary(UnaryOp::CeilFloat32, val3, Type::F32);
 
-    let val4 = builder.const_(Literal::F32(4.7));
-    let floor_val = builder.unary(UnaryOp::FloorFloat32, val4, Type::F32);
+        let val4 = builder.const_(Literal::F32(4.7));
+        let floor_val = builder.unary(UnaryOp::FloorFloat32, val4, Type::F32);
 
-    let r1 = builder.binary(BinaryOp::AddFloat32, abs_val, neg_val, Type::F32);
-    let r2 = builder.binary(BinaryOp::AddFloat32, ceil_val, floor_val, Type::F32);
-    let body = builder.binary(BinaryOp::AddFloat32, r1, r2, Type::F32);
+        let r1 = builder.binary(BinaryOp::AddFloat32, abs_val, neg_val, Type::F32);
+        let r2 = builder.binary(BinaryOp::AddFloat32, ceil_val, floor_val, Type::F32);
+        builder.binary(BinaryOp::AddFloat32, r1, r2, Type::F32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6075,36 +6045,36 @@ fn test_f32_advanced_math() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let val1 = builder.const_(Literal::F32(4.8));
-    let trunc_val = builder.unary(UnaryOp::TruncFloat32, val1, Type::F32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let val1 = builder.const_(Literal::F32(4.8));
+        let trunc_val = builder.unary(UnaryOp::TruncFloat32, val1, Type::F32);
 
-    let val2 = builder.const_(Literal::F32(4.5));
-    let nearest = builder.unary(UnaryOp::NearestFloat32, val2, Type::F32);
+        let val2 = builder.const_(Literal::F32(4.5));
+        let nearest = builder.unary(UnaryOp::NearestFloat32, val2, Type::F32);
 
-    let val3 = builder.const_(Literal::F32(16.0));
-    let sqrt_val = builder.unary(UnaryOp::SqrtFloat32, val3, Type::F32);
+        let val3 = builder.const_(Literal::F32(16.0));
+        let sqrt_val = builder.unary(UnaryOp::SqrtFloat32, val3, Type::F32);
 
-    let r1 = builder.binary(BinaryOp::AddFloat32, trunc_val, nearest, Type::F32);
-    let body = builder.binary(BinaryOp::AddFloat32, r1, sqrt_val, Type::F32);
+        let r1 = builder.binary(BinaryOp::AddFloat32, trunc_val, nearest, Type::F32);
+        builder.binary(BinaryOp::AddFloat32, r1, sqrt_val, Type::F32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6114,34 +6084,34 @@ fn test_f32_min_max() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::F32(10.5));
-    let b = builder.const_(Literal::F32(20.3));
-    let min_val = builder.binary(BinaryOp::MinFloat32, a, b, Type::F32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::F32(10.5));
+        let b = builder.const_(Literal::F32(20.3));
+        let min_val = builder.binary(BinaryOp::MinFloat32, a, b, Type::F32);
 
-    let c = builder.const_(Literal::F32(5.0));
-    let d = builder.const_(Literal::F32(15.0));
-    let max_val = builder.binary(BinaryOp::MaxFloat32, c, d, Type::F32);
+        let c = builder.const_(Literal::F32(5.0));
+        let d = builder.const_(Literal::F32(15.0));
+        let max_val = builder.binary(BinaryOp::MaxFloat32, c, d, Type::F32);
 
-    let body = builder.binary(BinaryOp::AddFloat32, min_val, max_val, Type::F32);
+        builder.binary(BinaryOp::AddFloat32, min_val, max_val, Type::F32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6151,28 +6121,28 @@ fn test_f32_copysign() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::F32(42.0));
-    let b = builder.const_(Literal::F32(-1.0));
-    let body = builder.binary(BinaryOp::CopySignFloat32, a, b, Type::F32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::F32(42.0));
+        let b = builder.const_(Literal::F32(-1.0));
+        builder.binary(BinaryOp::CopySignFloat32, a, b, Type::F32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6182,37 +6152,37 @@ fn test_f64_arithmetic() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::F64(100.5));
-    let b = builder.const_(Literal::F64(200.3));
-    let add = builder.binary(BinaryOp::AddFloat64, a, b, Type::F64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::F64(100.5));
+        let b = builder.const_(Literal::F64(200.3));
+        let add = builder.binary(BinaryOp::AddFloat64, a, b, Type::F64);
 
-    let c = builder.const_(Literal::F64(3.0));
-    let mul = builder.binary(BinaryOp::MulFloat64, add, c, Type::F64);
+        let c = builder.const_(Literal::F64(3.0));
+        let mul = builder.binary(BinaryOp::MulFloat64, add, c, Type::F64);
 
-    let d = builder.const_(Literal::F64(2.0));
-    let div = builder.binary(BinaryOp::DivFloat64, mul, d, Type::F64);
+        let d = builder.const_(Literal::F64(2.0));
+        let div = builder.binary(BinaryOp::DivFloat64, mul, d, Type::F64);
 
-    let e = builder.const_(Literal::F64(1.5));
-    let body = builder.binary(BinaryOp::SubFloat64, div, e, Type::F64);
+        let e = builder.const_(Literal::F64(1.5));
+        builder.binary(BinaryOp::SubFloat64, div, e, Type::F64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6222,39 +6192,39 @@ fn test_f64_comparisons() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::F64(10.5));
-    let b = builder.const_(Literal::F64(20.3));
-    let ne = builder.binary(BinaryOp::NeFloat64, a, b, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::F64(10.5));
+        let b = builder.const_(Literal::F64(20.3));
+        let ne = builder.binary(BinaryOp::NeFloat64, a, b, Type::I32);
 
-    let c = builder.const_(Literal::F64(5.0));
-    let d = builder.const_(Literal::F64(10.0));
-    let le = builder.binary(BinaryOp::LeFloat64, c, d, Type::I32);
+        let c = builder.const_(Literal::F64(5.0));
+        let d = builder.const_(Literal::F64(10.0));
+        let le = builder.binary(BinaryOp::LeFloat64, c, d, Type::I32);
 
-    let e = builder.const_(Literal::F64(15.0));
-    let f = builder.const_(Literal::F64(10.0));
-    let ge = builder.binary(BinaryOp::GeFloat64, e, f, Type::I32);
+        let e = builder.const_(Literal::F64(15.0));
+        let f = builder.const_(Literal::F64(10.0));
+        let ge = builder.binary(BinaryOp::GeFloat64, e, f, Type::I32);
 
-    let r1 = builder.binary(BinaryOp::AddInt32, ne, le, Type::I32);
-    let body = builder.binary(BinaryOp::AddInt32, r1, ge, Type::I32);
+        let r1 = builder.binary(BinaryOp::AddInt32, ne, le, Type::I32);
+        builder.binary(BinaryOp::AddInt32, r1, ge, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6264,36 +6234,36 @@ fn test_f64_math_functions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let val1 = builder.const_(Literal::F64(-142.7));
-    let abs_val = builder.unary(UnaryOp::AbsFloat64, val1, Type::F64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let val1 = builder.const_(Literal::F64(-142.7));
+        let abs_val = builder.unary(UnaryOp::AbsFloat64, val1, Type::F64);
 
-    let val2 = builder.const_(Literal::F64(std::f64::consts::PI));
-    let neg_val = builder.unary(UnaryOp::NegFloat64, val2, Type::F64);
+        let val2 = builder.const_(Literal::F64(std::f64::consts::PI));
+        let neg_val = builder.unary(UnaryOp::NegFloat64, val2, Type::F64);
 
-    let val3 = builder.const_(Literal::F64(64.0));
-    let sqrt_val = builder.unary(UnaryOp::SqrtFloat64, val3, Type::F64);
+        let val3 = builder.const_(Literal::F64(64.0));
+        let sqrt_val = builder.unary(UnaryOp::SqrtFloat64, val3, Type::F64);
 
-    let r1 = builder.binary(BinaryOp::AddFloat64, abs_val, neg_val, Type::F64);
-    let body = builder.binary(BinaryOp::AddFloat64, r1, sqrt_val, Type::F64);
+        let r1 = builder.binary(BinaryOp::AddFloat64, abs_val, neg_val, Type::F64);
+        builder.binary(BinaryOp::AddFloat64, r1, sqrt_val, Type::F64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6303,40 +6273,40 @@ fn test_f64_rounding() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let val1 = builder.const_(Literal::F64(4.8));
-    let ceil_val = builder.unary(UnaryOp::CeilFloat64, val1, Type::F64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let val1 = builder.const_(Literal::F64(4.8));
+        let ceil_val = builder.unary(UnaryOp::CeilFloat64, val1, Type::F64);
 
-    let val2 = builder.const_(Literal::F64(4.8));
-    let floor_val = builder.unary(UnaryOp::FloorFloat64, val2, Type::F64);
+        let val2 = builder.const_(Literal::F64(4.8));
+        let floor_val = builder.unary(UnaryOp::FloorFloat64, val2, Type::F64);
 
-    let val3 = builder.const_(Literal::F64(4.8));
-    let trunc_val = builder.unary(UnaryOp::TruncFloat64, val3, Type::F64);
+        let val3 = builder.const_(Literal::F64(4.8));
+        let trunc_val = builder.unary(UnaryOp::TruncFloat64, val3, Type::F64);
 
-    let val4 = builder.const_(Literal::F64(4.5));
-    let nearest = builder.unary(UnaryOp::NearestFloat64, val4, Type::F64);
+        let val4 = builder.const_(Literal::F64(4.5));
+        let nearest = builder.unary(UnaryOp::NearestFloat64, val4, Type::F64);
 
-    let r1 = builder.binary(BinaryOp::AddFloat64, ceil_val, floor_val, Type::F64);
-    let r2 = builder.binary(BinaryOp::AddFloat64, trunc_val, nearest, Type::F64);
-    let body = builder.binary(BinaryOp::AddFloat64, r1, r2, Type::F64);
+        let r1 = builder.binary(BinaryOp::AddFloat64, ceil_val, floor_val, Type::F64);
+        let r2 = builder.binary(BinaryOp::AddFloat64, trunc_val, nearest, Type::F64);
+        builder.binary(BinaryOp::AddFloat64, r1, r2, Type::F64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6346,34 +6316,34 @@ fn test_f64_min_max() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let a = builder.const_(Literal::F64(100.5));
-    let b = builder.const_(Literal::F64(200.3));
-    let min_val = builder.binary(BinaryOp::MinFloat64, a, b, Type::F64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let a = builder.const_(Literal::F64(100.5));
+        let b = builder.const_(Literal::F64(200.3));
+        let min_val = builder.binary(BinaryOp::MinFloat64, a, b, Type::F64);
 
-    let c = builder.const_(Literal::F64(50.0));
-    let d = builder.const_(Literal::F64(150.0));
-    let max_val = builder.binary(BinaryOp::MaxFloat64, c, d, Type::F64);
+        let c = builder.const_(Literal::F64(50.0));
+        let d = builder.const_(Literal::F64(150.0));
+        let max_val = builder.binary(BinaryOp::MaxFloat64, c, d, Type::F64);
 
-    let body = builder.binary(BinaryOp::AddFloat64, min_val, max_val, Type::F64);
+        builder.binary(BinaryOp::AddFloat64, min_val, max_val, Type::F64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6383,40 +6353,40 @@ fn test_mixed_f32_f64_operations() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let f32_a = builder.const_(Literal::F32(10.5));
-    let f32_b = builder.const_(Literal::F32(5.0));
-    let f32_result = builder.binary(BinaryOp::MulFloat32, f32_a, f32_b, Type::F32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let f32_a = builder.const_(Literal::F32(10.5));
+        let f32_b = builder.const_(Literal::F32(5.0));
+        let f32_result = builder.binary(BinaryOp::MulFloat32, f32_a, f32_b, Type::F32);
 
-    let f64_a = builder.const_(Literal::F64(100.0));
-    let f64_b = builder.const_(Literal::F64(50.0));
-    let f64_result = builder.binary(BinaryOp::DivFloat64, f64_a, f64_b, Type::F64);
+        let f64_a = builder.const_(Literal::F64(100.0));
+        let f64_b = builder.const_(Literal::F64(50.0));
+        let f64_result = builder.binary(BinaryOp::DivFloat64, f64_a, f64_b, Type::F64);
 
-    // Compare f32 result with constant
-    let f32_compare = builder.const_(Literal::F32(50.0));
-    let cmp = builder.binary(BinaryOp::GtFloat32, f32_result, f32_compare, Type::I32);
+        // Compare f32 result with constant
+        let f32_compare = builder.const_(Literal::F32(50.0));
+        let cmp = builder.binary(BinaryOp::GtFloat32, f32_result, f32_compare, Type::I32);
 
-    // Select between f64_result and a constant based on comparison
-    let alt = builder.const_(Literal::F64(999.0));
-    let body = builder.select(cmp, f64_result, alt, Type::F64);
+        // Select between f64_result and a constant based on comparison
+        let alt = builder.const_(Literal::F64(999.0));
+        builder.select(cmp, f64_result, alt, Type::F64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6430,32 +6400,32 @@ fn test_i32_to_f32_conversions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let signed = builder.const_(Literal::I32(-42));
-    let s_to_f = builder.unary(UnaryOp::ConvertSInt32ToFloat32, signed, Type::F32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let signed = builder.const_(Literal::I32(-42));
+        let s_to_f = builder.unary(UnaryOp::ConvertSInt32ToFloat32, signed, Type::F32);
 
-    let unsigned = builder.const_(Literal::I32(100));
-    let u_to_f = builder.unary(UnaryOp::ConvertUInt32ToFloat32, unsigned, Type::F32);
+        let unsigned = builder.const_(Literal::I32(100));
+        let u_to_f = builder.unary(UnaryOp::ConvertUInt32ToFloat32, unsigned, Type::F32);
 
-    let body = builder.binary(BinaryOp::AddFloat32, s_to_f, u_to_f, Type::F32);
+        builder.binary(BinaryOp::AddFloat32, s_to_f, u_to_f, Type::F32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6465,32 +6435,32 @@ fn test_i64_to_f32_conversions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let signed = builder.const_(Literal::I64(-1000));
-    let s_to_f = builder.unary(UnaryOp::ConvertSInt64ToFloat32, signed, Type::F32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let signed = builder.const_(Literal::I64(-1000));
+        let s_to_f = builder.unary(UnaryOp::ConvertSInt64ToFloat32, signed, Type::F32);
 
-    let unsigned = builder.const_(Literal::I64(2000));
-    let u_to_f = builder.unary(UnaryOp::ConvertUInt64ToFloat32, unsigned, Type::F32);
+        let unsigned = builder.const_(Literal::I64(2000));
+        let u_to_f = builder.unary(UnaryOp::ConvertUInt64ToFloat32, unsigned, Type::F32);
 
-    let body = builder.binary(BinaryOp::AddFloat32, s_to_f, u_to_f, Type::F32);
+        builder.binary(BinaryOp::AddFloat32, s_to_f, u_to_f, Type::F32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6500,32 +6470,32 @@ fn test_i32_to_f64_conversions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let signed = builder.const_(Literal::I32(-42));
-    let s_to_f = builder.unary(UnaryOp::ConvertSInt32ToFloat64, signed, Type::F64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let signed = builder.const_(Literal::I32(-42));
+        let s_to_f = builder.unary(UnaryOp::ConvertSInt32ToFloat64, signed, Type::F64);
 
-    let unsigned = builder.const_(Literal::I32(100));
-    let u_to_f = builder.unary(UnaryOp::ConvertUInt32ToFloat64, unsigned, Type::F64);
+        let unsigned = builder.const_(Literal::I32(100));
+        let u_to_f = builder.unary(UnaryOp::ConvertUInt32ToFloat64, unsigned, Type::F64);
 
-    let body = builder.binary(BinaryOp::AddFloat64, s_to_f, u_to_f, Type::F64);
+        builder.binary(BinaryOp::AddFloat64, s_to_f, u_to_f, Type::F64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6535,32 +6505,32 @@ fn test_i64_to_f64_conversions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let signed = builder.const_(Literal::I64(-1000));
-    let s_to_f = builder.unary(UnaryOp::ConvertSInt64ToFloat64, signed, Type::F64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let signed = builder.const_(Literal::I64(-1000));
+        let s_to_f = builder.unary(UnaryOp::ConvertSInt64ToFloat64, signed, Type::F64);
 
-    let unsigned = builder.const_(Literal::I64(2000));
-    let u_to_f = builder.unary(UnaryOp::ConvertUInt64ToFloat64, unsigned, Type::F64);
+        let unsigned = builder.const_(Literal::I64(2000));
+        let u_to_f = builder.unary(UnaryOp::ConvertUInt64ToFloat64, unsigned, Type::F64);
 
-    let body = builder.binary(BinaryOp::AddFloat64, s_to_f, u_to_f, Type::F64);
+        builder.binary(BinaryOp::AddFloat64, s_to_f, u_to_f, Type::F64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6570,32 +6540,32 @@ fn test_f32_to_i32_conversions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let float_val = builder.const_(Literal::F32(42.7));
-    let trunc_s = builder.unary(UnaryOp::TruncSFloat32ToInt32, float_val, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let float_val = builder.const_(Literal::F32(42.7));
+        let trunc_s = builder.unary(UnaryOp::TruncSFloat32ToInt32, float_val, Type::I32);
 
-    let float_val2 = builder.const_(Literal::F32(100.3));
-    let trunc_u = builder.unary(UnaryOp::TruncUFloat32ToInt32, float_val2, Type::I32);
+        let float_val2 = builder.const_(Literal::F32(100.3));
+        let trunc_u = builder.unary(UnaryOp::TruncUFloat32ToInt32, float_val2, Type::I32);
 
-    let body = builder.binary(BinaryOp::AddInt32, trunc_s, trunc_u, Type::I32);
+        builder.binary(BinaryOp::AddInt32, trunc_s, trunc_u, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6605,32 +6575,32 @@ fn test_f64_to_i32_conversions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let float_val = builder.const_(Literal::F64(42.7));
-    let trunc_s = builder.unary(UnaryOp::TruncSFloat64ToInt32, float_val, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let float_val = builder.const_(Literal::F64(42.7));
+        let trunc_s = builder.unary(UnaryOp::TruncSFloat64ToInt32, float_val, Type::I32);
 
-    let float_val2 = builder.const_(Literal::F64(100.3));
-    let trunc_u = builder.unary(UnaryOp::TruncUFloat64ToInt32, float_val2, Type::I32);
+        let float_val2 = builder.const_(Literal::F64(100.3));
+        let trunc_u = builder.unary(UnaryOp::TruncUFloat64ToInt32, float_val2, Type::I32);
 
-    let body = builder.binary(BinaryOp::AddInt32, trunc_s, trunc_u, Type::I32);
+        builder.binary(BinaryOp::AddInt32, trunc_s, trunc_u, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6640,32 +6610,32 @@ fn test_f32_to_i64_conversions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let float_val = builder.const_(Literal::F32(142.7));
-    let trunc_s = builder.unary(UnaryOp::TruncSFloat32ToInt64, float_val, Type::I64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let float_val = builder.const_(Literal::F32(142.7));
+        let trunc_s = builder.unary(UnaryOp::TruncSFloat32ToInt64, float_val, Type::I64);
 
-    let float_val2 = builder.const_(Literal::F32(200.3));
-    let trunc_u = builder.unary(UnaryOp::TruncUFloat32ToInt64, float_val2, Type::I64);
+        let float_val2 = builder.const_(Literal::F32(200.3));
+        let trunc_u = builder.unary(UnaryOp::TruncUFloat32ToInt64, float_val2, Type::I64);
 
-    let body = builder.binary(BinaryOp::AddInt64, trunc_s, trunc_u, Type::I64);
+        builder.binary(BinaryOp::AddInt64, trunc_s, trunc_u, Type::I64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6675,32 +6645,32 @@ fn test_f64_to_i64_conversions() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    let float_val = builder.const_(Literal::F64(142.7));
-    let trunc_s = builder.unary(UnaryOp::TruncSFloat64ToInt64, float_val, Type::I64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let float_val = builder.const_(Literal::F64(142.7));
+        let trunc_s = builder.unary(UnaryOp::TruncSFloat64ToInt64, float_val, Type::I64);
 
-    let float_val2 = builder.const_(Literal::F64(200.3));
-    let trunc_u = builder.unary(UnaryOp::TruncUFloat64ToInt64, float_val2, Type::I64);
+        let float_val2 = builder.const_(Literal::F64(200.3));
+        let trunc_u = builder.unary(UnaryOp::TruncUFloat64ToInt64, float_val2, Type::I64);
 
-    let body = builder.binary(BinaryOp::AddInt64, trunc_s, trunc_u, Type::I64);
+        builder.binary(BinaryOp::AddInt64, trunc_s, trunc_u, Type::I64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6714,10 +6684,7 @@ fn test_i32_load_store() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -6727,29 +6694,32 @@ fn test_i32_load_store() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    // Load from address 0, add 10, store back
-    let addr = builder.const_(Literal::I32(0));
-    let loaded = builder.load(0, 4, false, 0, 2, addr, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        // Load from address 0, add 10, store back
+        let addr = builder.const_(Literal::I32(0));
+        let loaded = builder.load(0, 4, false, 0, 2, addr, Type::I32);
 
-    let ten = builder.const_(Literal::I32(10));
-    let added = builder.binary(BinaryOp::AddInt32, loaded, ten, Type::I32);
+        let ten = builder.const_(Literal::I32(10));
+        let added = builder.binary(BinaryOp::AddInt32, loaded, ten, Type::I32);
 
-    let store_addr = builder.const_(Literal::I32(0));
-    let body = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, store_addr, added);
+        let store_addr = builder.const_(Literal::I32(0));
+        builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, store_addr, added)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6759,10 +6729,7 @@ fn test_i64_load_store() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -6772,28 +6739,31 @@ fn test_i64_load_store() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let addr = builder.const_(Literal::I32(8));
-    let loaded = builder.load(0, 8, false, 0, 3, addr, Type::I64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let addr = builder.const_(Literal::I32(8));
+        let loaded = builder.load(0, 8, false, 0, 3, addr, Type::I64);
 
-    let multiplier = builder.const_(Literal::I64(2));
-    let result = builder.binary(BinaryOp::MulInt64, loaded, multiplier, Type::I64);
+        let multiplier = builder.const_(Literal::I64(2));
+        let result = builder.binary(BinaryOp::MulInt64, loaded, multiplier, Type::I64);
 
-    let store_addr = builder.const_(Literal::I32(16));
-    let body = builder.store(MemoryId::from_raw_parts(0, 0), 8, 8, 0, store_addr, result);
+        let store_addr = builder.const_(Literal::I32(16));
+        builder.store(MemoryId::from_raw_parts(0, 0), 8, 8, 0, store_addr, result)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6803,10 +6773,7 @@ fn test_i32_load8_signed_unsigned() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -6816,27 +6783,30 @@ fn test_i32_load8_signed_unsigned() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let addr1 = builder.const_(Literal::I32(0));
-    let load_s = builder.load(0, 1, true, 0, 0, addr1, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let addr1 = builder.const_(Literal::I32(0));
+        let load_s = builder.load(0, 1, true, 0, 0, addr1, Type::I32);
 
-    let addr2 = builder.const_(Literal::I32(1));
-    let load_u = builder.load(0, 1, false, 0, 0, addr2, Type::I32);
+        let addr2 = builder.const_(Literal::I32(1));
+        let load_u = builder.load(0, 1, false, 0, 0, addr2, Type::I32);
 
-    let body = builder.binary(BinaryOp::AddInt32, load_s, load_u, Type::I32);
+        builder.binary(BinaryOp::AddInt32, load_s, load_u, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6846,10 +6816,7 @@ fn test_i32_load16_signed_unsigned() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -6859,27 +6826,30 @@ fn test_i32_load16_signed_unsigned() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let addr1 = builder.const_(Literal::I32(0));
-    let load_s = builder.load(0, 2, true, 0, 1, addr1, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let addr1 = builder.const_(Literal::I32(0));
+        let load_s = builder.load(0, 2, true, 0, 1, addr1, Type::I32);
 
-    let addr2 = builder.const_(Literal::I32(2));
-    let load_u = builder.load(0, 2, false, 0, 1, addr2, Type::I32);
+        let addr2 = builder.const_(Literal::I32(2));
+        let load_u = builder.load(0, 2, false, 0, 1, addr2, Type::I32);
 
-    let body = builder.binary(BinaryOp::SubInt32, load_s, load_u, Type::I32);
+        builder.binary(BinaryOp::SubInt32, load_s, load_u, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6889,10 +6859,7 @@ fn test_i64_load8_signed_unsigned() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -6902,27 +6869,30 @@ fn test_i64_load8_signed_unsigned() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let addr1 = builder.const_(Literal::I32(0));
-    let load_s = builder.load(0, 1, true, 0, 0, addr1, Type::I64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let addr1 = builder.const_(Literal::I32(0));
+        let load_s = builder.load(0, 1, true, 0, 0, addr1, Type::I64);
 
-    let addr2 = builder.const_(Literal::I32(1));
-    let load_u = builder.load(0, 1, false, 0, 0, addr2, Type::I64);
+        let addr2 = builder.const_(Literal::I32(1));
+        let load_u = builder.load(0, 1, false, 0, 0, addr2, Type::I64);
 
-    let body = builder.binary(BinaryOp::AddInt64, load_s, load_u, Type::I64);
+        builder.binary(BinaryOp::AddInt64, load_s, load_u, Type::I64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6932,10 +6902,7 @@ fn test_i64_load16_signed_unsigned() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -6945,27 +6912,30 @@ fn test_i64_load16_signed_unsigned() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let addr1 = builder.const_(Literal::I32(0));
-    let load_s = builder.load(0, 2, true, 0, 1, addr1, Type::I64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let addr1 = builder.const_(Literal::I32(0));
+        let load_s = builder.load(0, 2, true, 0, 1, addr1, Type::I64);
 
-    let addr2 = builder.const_(Literal::I32(2));
-    let load_u = builder.load(0, 2, false, 0, 1, addr2, Type::I64);
+        let addr2 = builder.const_(Literal::I32(2));
+        let load_u = builder.load(0, 2, false, 0, 1, addr2, Type::I64);
 
-    let body = builder.binary(BinaryOp::SubInt64, load_s, load_u, Type::I64);
+        builder.binary(BinaryOp::SubInt64, load_s, load_u, Type::I64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -6975,10 +6945,7 @@ fn test_i64_load32_signed_unsigned() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -6988,27 +6955,30 @@ fn test_i64_load32_signed_unsigned() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let addr1 = builder.const_(Literal::I32(0));
-    let load_s = builder.load(0, 4, true, 0, 2, addr1, Type::I64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let addr1 = builder.const_(Literal::I32(0));
+        let load_s = builder.load(0, 4, true, 0, 2, addr1, Type::I64);
 
-    let addr2 = builder.const_(Literal::I32(4));
-    let load_u = builder.load(0, 4, false, 0, 2, addr2, Type::I64);
+        let addr2 = builder.const_(Literal::I32(4));
+        let load_u = builder.load(0, 4, false, 0, 2, addr2, Type::I64);
 
-    let body = builder.binary(BinaryOp::MulInt64, load_s, load_u, Type::I64);
+        builder.binary(BinaryOp::MulInt64, load_s, load_u, Type::I64)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7018,10 +6988,7 @@ fn test_f32_load_store() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -7031,28 +6998,31 @@ fn test_f32_load_store() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let addr = builder.const_(Literal::I32(0));
-    let loaded = builder.load(0, 4, false, 0, 2, addr, Type::F32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let addr = builder.const_(Literal::I32(0));
+        let loaded = builder.load(0, 4, false, 0, 2, addr, Type::F32);
 
-    let multiplier = builder.const_(Literal::F32(2.0));
-    let result = builder.binary(BinaryOp::MulFloat32, loaded, multiplier, Type::F32);
+        let multiplier = builder.const_(Literal::F32(2.0));
+        let result = builder.binary(BinaryOp::MulFloat32, loaded, multiplier, Type::F32);
 
-    let store_addr = builder.const_(Literal::I32(4));
-    let body = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, store_addr, result);
+        let store_addr = builder.const_(Literal::I32(4));
+        builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, store_addr, result)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7062,10 +7032,7 @@ fn test_f64_load_store() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -7075,28 +7042,31 @@ fn test_f64_load_store() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let addr = builder.const_(Literal::I32(0));
-    let loaded = builder.load(0, 8, false, 0, 3, addr, Type::F64);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let addr = builder.const_(Literal::I32(0));
+        let loaded = builder.load(0, 8, false, 0, 3, addr, Type::F64);
 
-    let divisor = builder.const_(Literal::F64(2.0));
-    let result = builder.binary(BinaryOp::DivFloat64, loaded, divisor, Type::F64);
+        let divisor = builder.const_(Literal::F64(2.0));
+        let result = builder.binary(BinaryOp::DivFloat64, loaded, divisor, Type::F64);
 
-    let store_addr = builder.const_(Literal::I32(8));
-    let body = builder.store(MemoryId::from_raw_parts(0, 0), 8, 8, 0, store_addr, result);
+        let store_addr = builder.const_(Literal::I32(8));
+        builder.store(MemoryId::from_raw_parts(0, 0), 8, 8, 0, store_addr, result)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7106,10 +7076,7 @@ fn test_i32_store8_store16() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -7119,33 +7086,32 @@ fn test_i32_store8_store16() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let value8 = builder.const_(Literal::I32(255));
-    let addr8 = builder.const_(Literal::I32(0));
-    let store8 = builder.store(MemoryId::from_raw_parts(0, 0), 1, 1, 0, addr8, value8);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let value8 = builder.const_(Literal::I32(255));
+        let addr8 = builder.const_(Literal::I32(0));
+        let store8 = builder.store(MemoryId::from_raw_parts(0, 0), 1, 1, 0, addr8, value8);
 
-    let value16 = builder.const_(Literal::I32(65535));
-    let addr16 = builder.const_(Literal::I32(4));
-    let store16 = builder.store(MemoryId::from_raw_parts(0, 0), 2, 2, 0, addr16, value16);
+        let value16 = builder.const_(Literal::I32(65535));
+        let addr16 = builder.const_(Literal::I32(4));
+        let store16 = builder.store(MemoryId::from_raw_parts(0, 0), 2, 2, 0, addr16, value16);
 
-    let body = builder.block(
-        None,
-        BumpVec::from_iter_in([store8, store16], builder.bump),
-        Type::NONE,
-    );
+        builder.block("", vec![store8, store16], Type::NONE)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7155,10 +7121,7 @@ fn test_i64_store8_store16_store32() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -7168,37 +7131,36 @@ fn test_i64_store8_store16_store32() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let value8 = builder.const_(Literal::I64(255));
-    let addr8 = builder.const_(Literal::I32(0));
-    let store8 = builder.store(MemoryId::from_raw_parts(0, 0), 1, 1, 0, addr8, value8);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let value8 = builder.const_(Literal::I64(255));
+        let addr8 = builder.const_(Literal::I32(0));
+        let store8 = builder.store(MemoryId::from_raw_parts(0, 0), 1, 1, 0, addr8, value8);
 
-    let value16 = builder.const_(Literal::I64(65535));
-    let addr16 = builder.const_(Literal::I32(8));
-    let store16 = builder.store(MemoryId::from_raw_parts(0, 0), 2, 2, 0, addr16, value16);
+        let value16 = builder.const_(Literal::I64(65535));
+        let addr16 = builder.const_(Literal::I32(8));
+        let store16 = builder.store(MemoryId::from_raw_parts(0, 0), 2, 2, 0, addr16, value16);
 
-    let value32 = builder.const_(Literal::I64(0xFFFFFFFF));
-    let addr32 = builder.const_(Literal::I32(16));
-    let store32 = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, addr32, value32);
+        let value32 = builder.const_(Literal::I64(0xFFFFFFFF));
+        let addr32 = builder.const_(Literal::I32(16));
+        let store32 = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, addr32, value32);
 
-    let body = builder.block(
-        None,
-        BumpVec::from_iter_in([store8, store16, store32], builder.bump),
-        Type::NONE,
-    );
+        builder.block("", vec![store8, store16, store32], Type::NONE)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7208,10 +7170,7 @@ fn test_load_with_offset() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -7221,27 +7180,30 @@ fn test_load_with_offset() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let base = builder.const_(Literal::I32(100));
-    let loaded1 = builder.load(0, 4, false, 0, 2, base, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let base = builder.const_(Literal::I32(100));
+        let loaded1 = builder.load(0, 4, false, 0, 2, base, Type::I32);
 
-    let base2 = builder.const_(Literal::I32(100));
-    let loaded2 = builder.load(0, 4, false, 16, 2, base2, Type::I32);
+        let base2 = builder.const_(Literal::I32(100));
+        let loaded2 = builder.load(0, 4, false, 16, 2, base2, Type::I32);
 
-    let body = builder.binary(BinaryOp::AddInt32, loaded1, loaded2, Type::I32);
+        builder.binary(BinaryOp::AddInt32, loaded1, loaded2, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7251,10 +7213,7 @@ fn test_store_with_offset() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -7264,23 +7223,26 @@ fn test_store_with_offset() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let value = builder.const_(Literal::I32(42));
-    let base = builder.const_(Literal::I32(1000));
-    let body = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 100, base, value);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let value = builder.const_(Literal::I32(42));
+        let base = builder.const_(Literal::I32(1000));
+        builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 100, base, value)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7290,10 +7252,7 @@ fn test_memory_size() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -7303,23 +7262,26 @@ fn test_memory_size() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let size = builder.memory_size(0);
-    let multiplier = builder.const_(Literal::I32(65536));
-    let body = builder.binary(BinaryOp::MulInt32, size, multiplier, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let size = builder.memory_size(0);
+        let multiplier = builder.const_(Literal::I32(65536));
+        builder.binary(BinaryOp::MulInt32, size, multiplier, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7329,10 +7291,7 @@ fn test_memory_grow() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -7342,25 +7301,28 @@ fn test_memory_grow() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    let pages = builder.const_(Literal::I32(1));
-    let old_size = builder.memory_grow(0, pages);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        let pages = builder.const_(Literal::I32(1));
+        let old_size = builder.memory_grow(0, pages);
 
-    let new_size = builder.memory_size(0);
-    let body = builder.binary(BinaryOp::AddInt32, old_size, new_size, Type::I32);
+        let new_size = builder.memory_size(0);
+        builder.binary(BinaryOp::AddInt32, old_size, new_size, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7370,10 +7332,7 @@ fn test_complex_memory_operations() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -7383,37 +7342,40 @@ fn test_complex_memory_operations() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    // Load i32, i64, f32, f64 from different addresses
-    let addr1 = builder.const_(Literal::I32(0));
-    let i32_val = builder.load(0, 4, false, 0, 2, addr1, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        // Load i32, i64, f32, f64 from different addresses
+        let addr1 = builder.const_(Literal::I32(0));
+        let i32_val = builder.load(0, 4, false, 0, 2, addr1, Type::I32);
 
-    let addr2 = builder.const_(Literal::I32(8));
-    let _i64_val = builder.load(0, 8, false, 0, 3, addr2, Type::I64);
+        let addr2 = builder.const_(Literal::I32(8));
+        let _i64_val = builder.load(0, 8, false, 0, 3, addr2, Type::I64);
 
-    let addr3 = builder.const_(Literal::I32(16));
-    let f32_val = builder.load(0, 4, false, 0, 2, addr3, Type::F32);
+        let addr3 = builder.const_(Literal::I32(16));
+        let f32_val = builder.load(0, 4, false, 0, 2, addr3, Type::F32);
 
-    // Do some operations
-    let i32_converted = builder.unary(UnaryOp::ConvertSInt32ToFloat32, i32_val, Type::F32);
-    let sum = builder.binary(BinaryOp::AddFloat32, i32_converted, f32_val, Type::F32);
+        // Do some operations
+        let i32_converted = builder.unary(UnaryOp::ConvertSInt32ToFloat32, i32_val, Type::F32);
+        let sum = builder.binary(BinaryOp::AddFloat32, i32_converted, f32_val, Type::F32);
 
-    // Store result
-    let store_addr = builder.const_(Literal::I32(32));
-    let body = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, store_addr, sum);
+        // Store result
+        let store_addr = builder.const_(Literal::I32(32));
+        builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, store_addr, sum)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::NONE,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7427,38 +7389,34 @@ fn test_deeply_nested_blocks() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    // Create 20 levels of nested blocks
-    let value = builder.const_(Literal::I32(42));
-    let mut current = value;
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        // Create 20 levels of nested blocks
+        let value = builder.const_(Literal::I32(42));
+        let mut current = value;
 
-    for i in 0..20 {
-        let label = format!("block_{}", i);
-        let label_str = bumpalo::collections::String::from_str_in(&label, &bump).into_bump_str();
-        current = builder.block(
-            Some(label_str),
-            BumpVec::from_iter_in([current], &bump),
-            Type::I32,
-        );
-    }
+        for i in 0..20 {
+            let label = format!("block_{}", i);
+            current = builder.block(Some(label.as_str()), vec![current], Type::I32);
+        }
+        current
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(current),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7468,33 +7426,34 @@ fn test_deeply_nested_ifs() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    // Create 15 levels of nested if statements
-    let mut current = builder.const_(Literal::I32(1));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        // Create 15 levels of nested if statements
+        let mut current = builder.const_(Literal::I32(1));
 
-    for _ in 0..15 {
-        let condition = builder.const_(Literal::I32(1));
-        let false_branch = builder.const_(Literal::I32(0));
-        current = builder.if_(condition, current, Some(false_branch), Type::I32);
-    }
+        for _ in 0..15 {
+            let condition = builder.const_(Literal::I32(1));
+            let false_branch = builder.const_(Literal::I32(0));
+            current = builder.if_("", condition, current, Some(false_branch), Type::I32);
+        }
+        current
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(current),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7504,10 +7463,7 @@ fn test_all_operations_combined() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -7517,73 +7473,64 @@ fn test_all_operations_combined() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    // Integer operations
-    let i32_a = builder.const_(Literal::I32(10));
-    let i32_b = builder.const_(Literal::I32(20));
-    let i32_sum = builder.binary(BinaryOp::AddInt32, i32_a, i32_b, Type::I32);
-    let i32_mul = builder.binary(
-        BinaryOp::MulInt32,
-        i32_sum,
-        builder.const_(Literal::I32(2)),
-        Type::I32,
-    );
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        // Integer operations
+        let i32_a = builder.const_(Literal::I32(10));
+        let i32_b = builder.const_(Literal::I32(20));
+        let i32_sum = builder.binary(BinaryOp::AddInt32, i32_a, i32_b, Type::I32);
+        let c2 = builder.const_(Literal::I32(2));
+        let i32_mul = builder.binary(BinaryOp::MulInt32, i32_sum, c2, Type::I32);
 
-    // Float operations
-    let f32_a = builder.const_(Literal::F32(std::f32::consts::PI));
-    let f32_b = builder.const_(Literal::F32(2.0));
-    let f32_div = builder.binary(BinaryOp::DivFloat32, f32_a, f32_b, Type::F32);
-    let f32_sqrt = builder.unary(UnaryOp::SqrtFloat32, f32_div, Type::F32);
+        // Float operations
+        let f32_a = builder.const_(Literal::F32(std::f32::consts::PI));
+        let f32_b = builder.const_(Literal::F32(2.0));
+        let f32_div = builder.binary(BinaryOp::DivFloat32, f32_a, f32_b, Type::F32);
+        let f32_sqrt = builder.unary(UnaryOp::SqrtFloat32, f32_div, Type::F32);
 
-    // Conversions
-    let i32_to_f32 = builder.unary(UnaryOp::ConvertSInt32ToFloat32, i32_mul, Type::F32);
-    let f32_combined = builder.binary(BinaryOp::AddFloat32, i32_to_f32, f32_sqrt, Type::F32);
-    let f32_to_i32 = builder.unary(UnaryOp::TruncSFloat32ToInt32, f32_combined, Type::I32);
+        // Conversions
+        let i32_to_f32 = builder.unary(UnaryOp::ConvertSInt32ToFloat32, i32_mul, Type::F32);
+        let f32_combined = builder.binary(BinaryOp::AddFloat32, i32_to_f32, f32_sqrt, Type::F32);
+        let f32_to_i32 = builder.unary(UnaryOp::TruncSFloat32ToInt32, f32_combined, Type::I32);
 
-    // Memory operations
-    let store_addr = builder.const_(Literal::I32(0));
-    let store_op = builder.store(
-        MemoryId::from_raw_parts(0, 0),
-        4,
-        4,
-        0,
-        store_addr,
-        f32_to_i32,
-    );
+        // Memory operations
+        let store_addr = builder.const_(Literal::I32(0));
+        let store_op = builder.store(
+            MemoryId::from_raw_parts(0, 0),
+            4,
+            4,
+            0,
+            store_addr,
+            f32_to_i32,
+        );
 
-    let load_addr = builder.const_(Literal::I32(0));
-    let loaded = builder.load(0, 4, false, 0, 2, load_addr, Type::I32);
+        let load_addr = builder.const_(Literal::I32(0));
+        let loaded = builder.load(0, 4, false, 0, 2, load_addr, Type::I32);
 
-    // Control flow
-    let condition = builder.binary(
-        BinaryOp::GtSInt32,
-        loaded,
-        builder.const_(Literal::I32(50)),
-        Type::I32,
-    );
-    let if_true = builder.const_(Literal::I32(100));
-    let if_false = builder.const_(Literal::I32(200));
-    let selected = builder.if_(condition, if_true, Some(if_false), Type::I32);
+        // Control flow
+        let c50 = builder.const_(Literal::I32(50));
+        let condition = builder.binary(BinaryOp::GtSInt32, loaded, c50, Type::I32);
+        let if_true = builder.const_(Literal::I32(100));
+        let if_false = builder.const_(Literal::I32(200));
+        let selected = builder.if_("", condition, if_true, Some(if_false), Type::I32);
 
-    // Combine everything in a block
-    let body = builder.block(
-        None,
-        BumpVec::from_iter_in([store_op, selected], &bump),
-        Type::I32,
-    );
+        // Combine everything in a block
+        builder.block("", vec![store_op, selected], Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7593,35 +7540,36 @@ fn test_complex_expression_chain() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    // Build a complex expression chain with 50+ operations
-    let mut result = builder.const_(Literal::I32(1));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
+        // Build a complex expression chain with 50+ operations
+        let mut result = builder.const_(Literal::I32(1));
 
-    for i in 1..=25 {
-        let next_val = builder.const_(Literal::I32(i));
-        result = builder.binary(BinaryOp::AddInt32, result, next_val, Type::I32);
+        for i in 1..=25 {
+            let next_val = builder.const_(Literal::I32(i));
+            result = builder.binary(BinaryOp::AddInt32, result, next_val, Type::I32);
 
-        let multiplier = builder.const_(Literal::I32(2));
-        result = builder.binary(BinaryOp::MulInt32, result, multiplier, Type::I32);
-    }
+            let multiplier = builder.const_(Literal::I32(2));
+            result = builder.binary(BinaryOp::MulInt32, result, multiplier, Type::I32);
+        }
+        result
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(result),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7631,51 +7579,37 @@ fn test_mixed_type_operations_i32_i64() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
+    let mut builder = IrBuilder::new(&mut module.expressions);
 
     // Mix i32 and i64 operations with proper type handling
     let i32_val = builder.const_(Literal::I32(42));
-    let i32_doubled = builder.binary(
-        BinaryOp::MulInt32,
-        i32_val,
-        builder.const_(Literal::I32(2)),
-        Type::I32,
-    );
+    let c2 = builder.const_(Literal::I32(2));
+    let i32_doubled = builder.binary(BinaryOp::MulInt32, i32_val, c2, Type::I32);
 
     let i64_val1 = builder.const_(Literal::I64(1000));
     let i64_val2 = builder.const_(Literal::I64(1000));
     let i64_squared = builder.binary(BinaryOp::MulInt64, i64_val1, i64_val2, Type::I64);
 
     // Use select to choose between the results (need same type)
-    let i32_compare = builder.binary(
-        BinaryOp::GtSInt32,
-        i32_doubled,
-        builder.const_(Literal::I32(50)),
-        Type::I32,
-    );
-    let body = builder.select(
-        i32_compare,
-        i64_squared,
-        builder.const_(Literal::I64(999)),
-        Type::I64,
-    );
+    let c50 = builder.const_(Literal::I32(50));
+    let i32_compare = builder.binary(BinaryOp::GtSInt32, i32_doubled, c50, Type::I32);
+    let c999 = builder.const_(Literal::I64(999));
+    let body = builder.select(i32_compare, i64_squared, c999, Type::I64);
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7685,10 +7619,8 @@ fn test_mixed_type_operations_floats() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
+    let mut builder = IrBuilder::new(&mut module.expressions);
 
     // Mix f32 and f64 operations
     let f32_val = builder.const_(Literal::F32(std::f32::consts::PI));
@@ -7699,32 +7631,24 @@ fn test_mixed_type_operations_floats() {
     let f64_result = builder.binary(BinaryOp::MulFloat64, f64_val1, f64_val2, Type::F64);
 
     // Compare f32 value
-    let f32_cmp = builder.binary(
-        BinaryOp::GtFloat32,
-        f32_result,
-        builder.const_(Literal::F32(1.0)),
-        Type::I32,
-    );
-    let body = builder.select(
-        f32_cmp,
-        f64_result,
-        builder.const_(Literal::F64(1.0)),
-        Type::F64,
-    );
+    let c1f32 = builder.const_(Literal::F32(1.0));
+    let f32_cmp = builder.binary(BinaryOp::GtFloat32, f32_result, c1f32, Type::I32);
+    let c1f64 = builder.const_(Literal::F64(1.0));
+    let body = builder.select(f32_cmp, f64_result, c1f64, Type::F64);
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::F64,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7734,10 +7658,8 @@ fn test_all_unary_operations_combined() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
+    let mut builder = IrBuilder::new(&mut module.expressions);
 
     // i32 unary ops
     let i32_val = builder.const_(Literal::I32(0xFF00FF00u32 as i32));
@@ -7761,14 +7683,14 @@ fn test_all_unary_operations_combined() {
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7778,10 +7700,8 @@ fn test_all_comparison_operations() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
+    let mut builder = IrBuilder::new(&mut module.expressions);
 
     // i32 comparisons
     let a1 = builder.const_(Literal::I32(10));
@@ -7832,14 +7752,14 @@ fn test_all_comparison_operations() {
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7849,10 +7769,7 @@ fn test_memory_operations_sequence() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -7862,40 +7779,48 @@ fn test_memory_operations_sequence() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    // Complex memory operation sequence
-    let addr1 = builder.const_(Literal::I32(0));
-    let val1 = builder.load(0, 4, false, 0, 2, addr1, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
-    let addr2 = builder.const_(Literal::I32(4));
-    let val2 = builder.load(0, 4, false, 0, 2, addr2, Type::I32);
+        // Complex memory operation sequence
+        let addr1 = builder.const_(Literal::I32(0));
+        let val1 = builder.load(MemoryId::from_u32(0), 4, false, 0, 2, addr1, Type::I32);
 
-    let sum = builder.binary(BinaryOp::AddInt32, val1, val2, Type::I32);
+        let addr2 = builder.const_(Literal::I32(4));
+        let val2 = builder.load(MemoryId::from_u32(0), 4, false, 0, 2, addr2, Type::I32);
 
-    let store_addr = builder.const_(Literal::I32(8));
-    let store1 = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, store_addr, sum);
+        let sum = builder.binary(BinaryOp::AddInt32, val1, val2, Type::I32);
 
-    let load_back_addr = builder.const_(Literal::I32(8));
-    let loaded_back = builder.load(0, 4, false, 0, 2, load_back_addr, Type::I32);
+        let store_addr = builder.const_(Literal::I32(8));
+        let store1 = builder.store(MemoryId::from_u32(0), 4, 0, 4, store_addr, sum);
 
-    let body = builder.block(
-        None,
-        BumpVec::from_iter_in([store1, loaded_back], &bump),
-        Type::I32,
-    );
+        let load_back_addr = builder.const_(Literal::I32(8));
+        let loaded_back = builder.load(
+            MemoryId::from_u32(0),
+            4,
+            false,
+            0,
+            2,
+            load_back_addr,
+            Type::I32,
+        );
+
+        builder.block(None::<&str>, vec![store1, loaded_back], Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7905,46 +7830,43 @@ fn test_all_conversion_paths() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    // Test all conversion paths in one function
-    let i32_val = builder.const_(Literal::I32(42));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
-    // i32 -> f32 -> f64 -> i64 -> i32
-    let i32_to_f32 = builder.unary(UnaryOp::ConvertSInt32ToFloat32, i32_val, Type::F32);
-    let f32_val = builder.const_(Literal::F32(std::f32::consts::PI));
-    let f32_sum = builder.binary(BinaryOp::AddFloat32, i32_to_f32, f32_val, Type::F32);
+        // Test all conversion paths in one function
+        let i32_val = builder.const_(Literal::I32(42));
 
-    let f32_to_i64 = builder.unary(UnaryOp::TruncSFloat32ToInt64, f32_sum, Type::I64);
-    let i64_doubled = builder.binary(
-        BinaryOp::MulInt64,
-        f32_to_i64,
-        builder.const_(Literal::I64(2)),
-        Type::I64,
-    );
+        // i32 -> f32 -> f64 -> i64 -> i32
+        let i32_to_f32 = builder.unary(UnaryOp::ConvertSInt32ToFloat32, i32_val, Type::F32);
+        let f32_val = builder.const_(Literal::F32(std::f32::consts::PI));
+        let f32_sum = builder.binary(BinaryOp::AddFloat32, i32_to_f32, f32_val, Type::F32);
 
-    let i64_to_f64 = builder.unary(UnaryOp::ConvertSInt64ToFloat64, i64_doubled, Type::F64);
-    let f64_val = builder.const_(Literal::F64(1.5));
-    let f64_div = builder.binary(BinaryOp::DivFloat64, i64_to_f64, f64_val, Type::F64);
+        let f32_to_i64 = builder.unary(UnaryOp::TruncSFloat32ToInt64, f32_sum, Type::I64);
+        let c2_i64 = builder.const_(Literal::I64(2));
+        let i64_doubled = builder.binary(BinaryOp::MulInt64, f32_to_i64, c2_i64, Type::I64);
 
-    let body = builder.unary(UnaryOp::TruncSFloat64ToInt32, f64_div, Type::I32);
+        let i64_to_f64 = builder.unary(UnaryOp::ConvertSInt64ToFloat64, i64_doubled, Type::F64);
+        let f64_val = builder.const_(Literal::F64(1.5));
+        let f64_div = builder.binary(BinaryOp::DivFloat64, i64_to_f64, f64_val, Type::F64);
+
+        builder.unary(UnaryOp::TruncSFloat64ToInt32, f64_div, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7954,41 +7876,38 @@ fn test_loop_with_complex_body() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    // Create a loop with complex operations inside
-    let i32_val = builder.const_(Literal::I32(10));
-    let i32_mul = builder.binary(
-        BinaryOp::MulInt32,
-        i32_val,
-        builder.const_(Literal::I32(2)),
-        Type::I32,
-    );
+    let loop_body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
-    let f32_val = builder.const_(Literal::F32(std::f32::consts::PI));
-    let f32_sqrt = builder.unary(UnaryOp::SqrtFloat32, f32_val, Type::F32);
-    let f32_to_i32 = builder.unary(UnaryOp::TruncSFloat32ToInt32, f32_sqrt, Type::I32);
+        // Create a loop with complex operations inside
+        let i32_val = builder.const_(Literal::I32(10));
+        let c2_i32 = builder.const_(Literal::I32(2));
+        let i32_mul = builder.binary(BinaryOp::MulInt32, i32_val, c2_i32, Type::I32);
 
-    let combined = builder.binary(BinaryOp::AddInt32, i32_mul, f32_to_i32, Type::I32);
+        let f32_val = builder.const_(Literal::F32(std::f32::consts::PI));
+        let f32_sqrt = builder.unary(UnaryOp::SqrtFloat32, f32_val, Type::F32);
+        let f32_to_i32 = builder.unary(UnaryOp::TruncSFloat32ToInt32, f32_sqrt, Type::I32);
 
-    let loop_body = builder.loop_(Some("loop"), combined, Type::I32);
+        let combined = builder.binary(BinaryOp::AddInt32, i32_mul, f32_to_i32, Type::I32);
+
+        builder.loop_(Some("loop"), combined, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(loop_body),
+        loop_body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -7998,55 +7917,48 @@ fn test_select_with_all_types() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    // Test select with i32
-    let cond1 = builder.const_(Literal::I32(1));
-    let i32_true = builder.const_(Literal::I32(100));
-    let i32_false = builder.const_(Literal::I32(200));
-    let select_i32 = builder.select(cond1, i32_true, i32_false, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
-    // Test select with i64
-    let cond2 = builder.binary(
-        BinaryOp::GtSInt32,
-        select_i32,
-        builder.const_(Literal::I32(150)),
-        Type::I32,
-    );
-    let i64_true = builder.const_(Literal::I64(1000));
-    let i64_false = builder.const_(Literal::I64(2000));
-    let select_i64 = builder.select(cond2, i64_true, i64_false, Type::I64);
+        // Test select with i32
+        let cond1 = builder.const_(Literal::I32(1));
+        let i32_true = builder.const_(Literal::I32(100));
+        let i32_false = builder.const_(Literal::I32(200));
+        let select_i32 = builder.select(cond1, i32_true, i32_false, Type::I32);
 
-    // Test select with f32
-    let cond3 = builder.binary(
-        BinaryOp::LtSInt64,
-        select_i64,
-        builder.const_(Literal::I64(1500)),
-        Type::I32,
-    );
-    let f32_true = builder.const_(Literal::F32(std::f32::consts::PI));
-    let f32_false = builder.const_(Literal::F32(2.71));
-    let select_f32 = builder.select(cond3, f32_true, f32_false, Type::F32);
+        // Test select with i64
+        let c150 = builder.const_(Literal::I32(150));
+        let cond2 = builder.binary(BinaryOp::GtSInt32, select_i32, c150, Type::I32);
+        let i64_true = builder.const_(Literal::I64(1000));
+        let i64_false = builder.const_(Literal::I64(2000));
+        let select_i64 = builder.select(cond2, i64_true, i64_false, Type::I64);
 
-    // Convert back to i32
-    let body = builder.unary(UnaryOp::TruncSFloat32ToInt32, select_f32, Type::I32);
+        // Test select with f32
+        let c1500 = builder.const_(Literal::I64(1500));
+        let cond3 = builder.binary(BinaryOp::LtSInt64, select_i64, c1500, Type::I32);
+        let f32_true = builder.const_(Literal::F32(std::f32::consts::PI));
+        let f32_false = builder.const_(Literal::F32(2.71));
+        let select_f32 = builder.select(cond3, f32_true, f32_false, Type::F32);
+
+        // Convert back to i32
+        builder.unary(UnaryOp::TruncSFloat32ToInt32, select_f32, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -8056,55 +7968,56 @@ fn test_stress_all_bitwise_operations() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
 
-    // All i32 bitwise ops
-    let a1 = builder.const_(Literal::I32(0xAAAA5555u32 as i32));
-    let b1 = builder.const_(Literal::I32(0x5555AAAAu32 as i32));
-    let and = builder.binary(BinaryOp::AndInt32, a1, b1, Type::I32);
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
-    let a2 = builder.const_(Literal::I32(0xAAAA5555u32 as i32));
-    let b2 = builder.const_(Literal::I32(0x5555AAAAu32 as i32));
-    let or = builder.binary(BinaryOp::OrInt32, a2, b2, Type::I32);
+        // All i32 bitwise ops
+        let a1 = builder.const_(Literal::I32(0xAAAA5555u32 as i32));
+        let b1 = builder.const_(Literal::I32(0x5555AAAAu32 as i32));
+        let and = builder.binary(BinaryOp::AndInt32, a1, b1, Type::I32);
 
-    let a3 = builder.const_(Literal::I32(0xAAAA5555u32 as i32));
-    let b3 = builder.const_(Literal::I32(0x5555AAAAu32 as i32));
-    let xor = builder.binary(BinaryOp::XorInt32, a3, b3, Type::I32);
+        let a2 = builder.const_(Literal::I32(0xAAAA5555u32 as i32));
+        let b2 = builder.const_(Literal::I32(0x5555AAAAu32 as i32));
+        let or = builder.binary(BinaryOp::OrInt32, a2, b2, Type::I32);
 
-    let shift_val1 = builder.const_(Literal::I32(4));
-    let shl = builder.binary(BinaryOp::ShlInt32, and, shift_val1, Type::I32);
+        let a3 = builder.const_(Literal::I32(0xAAAA5555u32 as i32));
+        let b3 = builder.const_(Literal::I32(0x5555AAAAu32 as i32));
+        let xor = builder.binary(BinaryOp::XorInt32, a3, b3, Type::I32);
 
-    let shift_val2 = builder.const_(Literal::I32(4));
-    let shr_s = builder.binary(BinaryOp::ShrSInt32, or, shift_val2, Type::I32);
+        let shift_val1 = builder.const_(Literal::I32(4));
+        let shl = builder.binary(BinaryOp::ShlInt32, and, shift_val1, Type::I32);
 
-    let shift_val3 = builder.const_(Literal::I32(4));
-    let shr_u = builder.binary(BinaryOp::ShrUInt32, xor, shift_val3, Type::I32);
+        let shift_val2 = builder.const_(Literal::I32(4));
+        let shr_s = builder.binary(BinaryOp::ShrSInt32, or, shift_val2, Type::I32);
 
-    let rot_val1 = builder.const_(Literal::I32(8));
-    let rotl = builder.binary(BinaryOp::RotLInt32, shl, rot_val1, Type::I32);
+        let shift_val3 = builder.const_(Literal::I32(4));
+        let shr_u = builder.binary(BinaryOp::ShrUInt32, xor, shift_val3, Type::I32);
 
-    let rot_val2 = builder.const_(Literal::I32(8));
-    let rotr = builder.binary(BinaryOp::RotRInt32, shr_s, rot_val2, Type::I32);
+        let rot_val1 = builder.const_(Literal::I32(8));
+        let rotl = builder.binary(BinaryOp::RotLInt32, shl, rot_val1, Type::I32);
 
-    let r1 = builder.binary(BinaryOp::XorInt32, rotl, rotr, Type::I32);
-    let body = builder.binary(BinaryOp::XorInt32, r1, shr_u, Type::I32);
+        let rot_val2 = builder.const_(Literal::I32(8));
+        let rotr = builder.binary(BinaryOp::RotRInt32, shr_s, rot_val2, Type::I32);
+
+        let r1 = builder.binary(BinaryOp::XorInt32, rotl, rotr, Type::I32);
+        builder.binary(BinaryOp::XorInt32, r1, shr_u, Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }
@@ -8114,10 +8027,7 @@ fn test_maximum_expression_complexity() {
     use crate::wasm::binary_reader::BinaryReader;
     use crate::wasm::binary_writer::BinaryWriter;
 
-    let bump = Bump::new();
-    let builder = IrBuilder::new(&bump);
-    let bump = bumpalo::Bump::new();
-    let mut module = Module::new(&bump);
+    let mut module = Module::new();
     module.add_memory(crate::ir::module::Memory {
         name: "mem".to_string(),
         limits: crate::ir::module::MemoryLimits {
@@ -8127,76 +8037,57 @@ fn test_maximum_expression_complexity() {
         kind: crate::ir::module::MemoryKind::Local,
     });
 
-    // Combine: nested blocks + loops + ifs + all operation types + memory ops + conversions
-    let i32_start = builder.const_(Literal::I32(1));
-    let i64_val = builder.const_(Literal::I64(100));
+    let body = {
+        let mut builder = IrBuilder::new(&mut module.expressions);
 
-    // Memory operation
-    let addr = builder.const_(Literal::I32(0));
-    let stored_val = builder.binary(
-        BinaryOp::AddInt32,
-        i32_start,
-        builder.const_(Literal::I32(10)),
-        Type::I32,
-    );
-    let store_op = builder.store(MemoryId::from_raw_parts(0, 0), 4, 4, 0, addr, stored_val);
+        // Combine: nested blocks + loops + ifs + all operation types + memory ops + conversions
+        let i32_start = builder.const_(Literal::I32(1));
+        let i64_val = builder.const_(Literal::I64(100));
 
-    // Load and process
-    let load_addr = builder.const_(Literal::I32(0));
-    let loaded = builder.load(0, 4, false, 0, 2, load_addr, Type::I32);
+        // Memory operation
+        let addr = builder.const_(Literal::I32(0));
+        let c10 = builder.const_(Literal::I32(10));
+        let stored_val = builder.binary(BinaryOp::AddInt32, i32_start, c10, Type::I32);
+        let store_op = builder.store(MemoryId::from_u32(0), 4, 0, 4, addr, stored_val);
 
-    // Float operations
-    let loaded_f32 = builder.unary(UnaryOp::ConvertSInt32ToFloat32, loaded, Type::F32);
-    let f32_processed = builder.unary(UnaryOp::SqrtFloat32, loaded_f32, Type::F32);
-    let back_to_i32 = builder.unary(UnaryOp::TruncSFloat32ToInt32, f32_processed, Type::I32);
+        // Load and process
+        let load_addr = builder.const_(Literal::I32(0));
+        let loaded = builder.load(MemoryId::from_u32(0), 4, false, 0, 2, load_addr, Type::I32);
 
-    // Comparison and select
-    let condition = builder.binary(
-        BinaryOp::GtSInt32,
-        back_to_i32,
-        builder.const_(Literal::I32(5)),
-        Type::I32,
-    );
-    let selected = builder.select(
-        condition,
-        i64_val,
-        builder.const_(Literal::I64(999)),
-        Type::I64,
-    );
+        // Float operations
+        let loaded_f32 = builder.unary(UnaryOp::ConvertSInt32ToFloat32, loaded, Type::F32);
+        let f32_processed = builder.unary(UnaryOp::SqrtFloat32, loaded_f32, Type::F32);
+        let back_to_i32 = builder.unary(UnaryOp::TruncSFloat32ToInt32, f32_processed, Type::I32);
 
-    // Bitwise operations
-    let i64_as_i32 = builder.unary(
-        UnaryOp::TruncSFloat64ToInt32,
-        builder.unary(UnaryOp::ConvertSInt64ToFloat64, selected, Type::F64),
-        Type::I32,
-    );
-    let rotated = builder.binary(
-        BinaryOp::RotLInt32,
-        i64_as_i32,
-        builder.const_(Literal::I32(4)),
-        Type::I32,
-    );
+        // Comparison and select
+        let c5 = builder.const_(Literal::I32(5));
+        let condition = builder.binary(BinaryOp::GtSInt32, back_to_i32, c5, Type::I32);
+        let c999 = builder.const_(Literal::I64(999));
+        let selected = builder.select(condition, i64_val, c999, Type::I64);
 
-    // Final block
-    let body = builder.block(
-        None,
-        BumpVec::from_iter_in([store_op, rotated], &bump),
-        Type::I32,
-    );
+        // Bitwise operations
+        let conv_f64 = builder.unary(UnaryOp::ConvertSInt64ToFloat64, selected, Type::F64);
+        let i64_as_i32 = builder.unary(UnaryOp::TruncSFloat64ToInt32, conv_f64, Type::I32);
+        let c4 = builder.const_(Literal::I32(4));
+        let rotated = builder.binary(BinaryOp::RotLInt32, i64_as_i32, c4, Type::I32);
+
+        // Final block
+        builder.block(None::<&str>, vec![store_op, rotated], Type::I32)
+    };
 
     module.add_function(Function::new(
         "test".to_string(),
         Type::NONE,
         Type::I32,
         vec![],
-        Some(body),
+        body,
     ));
 
     let mut writer = BinaryWriter::new();
     let bytes = writer.write_module(&module).expect("Failed to write");
 
-    let mut reader = BinaryReader::new(&bump, bytes);
-    let parsed = reader.parse_module().expect("Failed to parse");
+    let mut reader = BinaryReader::new();
+    let parsed = reader.parse_module(&bytes).expect("Failed to parse");
 
     assert_eq!(parsed.functions.len(), 1);
 }

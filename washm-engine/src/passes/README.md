@@ -1,22 +1,21 @@
 # Writing Optimization Passes
 
-This guide explains how to write optimization passes for the Binaryen Rust IR.
+This guide explains how to write optimization passes for the WASHM IR.
 
 ## Overview
 
 Passes transform WebAssembly IR to optimize code. The infrastructure provides:
-- Arena-based memory allocation (Bump allocator)
-- Expression creation helpers
-- Visitor pattern for tree traversal
-- Safe lifetime management
+- Generational ID-based arena memory allocation (`IdArena`)
+- `IrBuilder` for easy expression creation
+- Visitor pattern for tree traversal (ReadOnly and Mutable)
+- Modular pass execution via `PassRunner`
 
 ## Basic Pass Structure
 
 ```rust
-use crate::expression::{ExprRef, Expression, ExpressionKind};
-use crate::module::Module;
-use crate::pass::Pass;
-use crate::visitor::Visitor;
+use crate::ir::module::Module;
+use crate::passes::Pass;
+use crate::ir::visitor::Visitor;
 
 pub struct MyPass;
 
@@ -25,149 +24,65 @@ impl Pass for MyPass {
         "my-pass"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
-        // Access allocator
-        let allocator = module.allocator();
-        
+    fn run(&mut self, module: &mut Module) {
         // Transform each function
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
-                let mut transformer = MyTransformer { allocator };
-                transformer.visit(body);
+        for (_, func) in &mut module.functions {
+            if let Some(mut body) = func.body() {
+                let mut transformer = MyTransformer { 
+                    arena: &mut module.expressions 
+                };
+                transformer.visit(&mut body, &mut module.expressions);
+                // Optionally update function body if the root changed
+                func.set_body(body);
             }
         }
     }
 }
 ```
 
-## Accessing the Allocator
-
-Every `Module` provides access to its bump allocator:
-
-```rust
-let allocator = module.allocator();
-```
-
-This allocator has the same lifetime as the module and can be used to create new expressions.
-
 ## Creating New Expressions
 
-Use the static helper methods on `Expression`:
-
-### Basic Operations
+Use `IrBuilder` with the module's expression arena:
 
 ```rust
+let mut builder = IrBuilder::new(&mut module.expressions);
+
 // Create a nop
-let nop = Expression::nop(allocator);
+let nop = builder.nop();
 
 // Create a constant
-let const_val = Expression::const_expr(allocator, Literal::I32(42), Type::I32);
+let const_val = builder.const_(Literal::I32(42));
 
 // Create a block
-let mut list = BumpVec::new_in(allocator);
-list.push(expr1);
-list.push(expr2);
-let block = Expression::block(allocator, None, list, Type::I32);
-```
-
-### Local Operations
-
-```rust
-// local.get
-let get = Expression::local_get(allocator, 0, Type::I32);
-
-// local.set
-let set = Expression::local_set(allocator, 0, value);
-
-// local.tee
-let tee = Expression::local_tee(allocator, 0, value, Type::I32);
+let list = vec![expr1, expr2];
+let block = builder.block(None::<String>, list, Type::I32);
 ```
 
 ## Pattern: Transforming Expressions
 
-The Visitor pattern is used for tree traversal. Here's how to replace an expression:
+The `Visitor` trait allows you to traverse the IR. To modify expressions in place, implement `Visitor` for your struct.
 
 ```rust
 struct MyTransformer<'a> {
-    allocator: &'a bumpalo::Bump,
+    arena: &'a mut IdArena<ExpressionMarker, Expression>,
 }
 
-impl<'a> Visitor<'a> for MyTransformer<'a> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
+impl<'a> Visitor for MyTransformer<'a> {
+    fn visit(&mut self, expr_id: &mut ExpressionId, arena: &mut IdArena<ExpressionMarker, Expression>) {
+        // First, visit children (Bottom-up transformation)
+        self.super_visit(expr_id, arena);
+
         // Check if this is the pattern we want to transform
-        if let ExpressionKind::SomePattern { field1, field2 } = &expr.kind {
-            // Extract data we need
-            let data1 = *field1;
-            let data2 = *field2;
-            let expr_type = expr.type_;
-            
-            // Create new expression(s)
-            let new_expr1 = Expression::something(self.allocator, data1);
-            let new_expr2 = Expression::something_else(self.allocator, data2);
-            
-            // Build replacement
-            let mut list = BumpVec::new_in(self.allocator);
-            list.push(new_expr1);
-            list.push(new_expr2);
-            
-            // Replace the expression
-            *expr = Expression::block(self.allocator, None, list, expr_type);
-        }
-    }
-}
-```
-
-## Example: The untee Pass
-
-Here's a complete example that converts `local.tee` to `local.set` + `local.get`:
-
-```rust
-use crate::expression::{ExprRef, Expression, ExpressionKind};
-use crate::module::Module;
-use crate::pass::Pass;
-use crate::visitor::Visitor;
-use bumpalo::collections::Vec as BumpVec;
-
-pub struct Untee;
-
-impl Pass for Untee {
-    fn name(&self) -> &str {
-        "untee"
-    }
-
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
-        let allocator = module.allocator();
-        
-        for func in &mut module.functions {
-            if let Some(body) = &mut func.body {
-                let mut transformer = UnteeTransformer { allocator };
-                transformer.visit(body);
+        match &arena[*expr_id].kind {
+            ExpressionKind::Binary { op: BinaryOp::AddI32, left, right } => {
+                // Example: x + 0 => x
+                if let ExpressionKind::Const(Literal::I32(0)) = arena[*right].kind {
+                    *expr_id = *left;
+                } else if let ExpressionKind::Const(Literal::I32(0)) = arena[*left].kind {
+                    *expr_id = *right;
+                }
             }
-        }
-    }
-}
-
-struct UnteeTransformer<'a> {
-    allocator: &'a bumpalo::Bump,
-}
-
-impl<'a> Visitor<'a> for UnteeTransformer<'a> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
-        if let ExpressionKind::LocalTee { index, value } = &expr.kind {
-            let local_index = *index;
-            let tee_value = *value;
-            let tee_type = expr.type_;
-            
-            // Transform: (local.tee $x value) 
-            //         => (block (local.set $x value) (local.get $x))
-            let set = Expression::local_set(self.allocator, local_index, tee_value);
-            let get = Expression::local_get(self.allocator, local_index, tee_type);
-            
-            let mut list = BumpVec::new_in(self.allocator);
-            list.push(set);
-            list.push(get);
-            
-            *expr = Expression::block(self.allocator, None, list, tee_type);
+            _ => {}
         }
     }
 }
@@ -175,29 +90,35 @@ impl<'a> Visitor<'a> for UnteeTransformer<'a> {
 
 ## Testing Passes
 
-Always add comprehensive tests:
+Always add comprehensive tests within your pass module:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expression::{Expression, ExpressionKind};
-    use crate::module::Function;
-    use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
+    use crate::ir::module::Module;
+    use crate::ir::expression::IrBuilder;
 
     #[test]
     fn test_my_pass_transforms_correctly() {
-        let bump = Bump::new();
+        let mut module = Module::new();
+        let mut builder = IrBuilder::new(&mut module.expressions);
         
-        // Create input expression
-        let input = create_test_expression(&bump);
+        let expr = builder.binary(
+            BinaryOp::AddI32,
+            builder.local_get(0, Type::I32),
+            builder.const_(Literal::I32(0))
+        );
         
-        // Create function and module
-        let func = Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::I32,
+        // Run pass
+        let mut pass = MyPass;
+        pass.run_on_expression(&mut expr, &mut module.expressions);
+        
+        // Assert result
+        assert!(matches!(module.expressions[expr].kind, ExpressionKind::LocalGet { .. }));
+    }
+}
+```
             vec![],
             Some(input),
         );

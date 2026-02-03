@@ -6,6 +6,21 @@ use std::fmt;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct Type(u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlockType {
+    Empty,
+    Type(Type),
+}
+
+impl From<Type> for BlockType {
+    fn from(ty: Type) -> Self {
+        if ty == Type::NONE {
+            BlockType::Empty
+        } else {
+            BlockType::Type(ty)
+        }
+    }
+}
 
 impl Type {
     // Basic types
@@ -111,6 +126,10 @@ impl Type {
     /// Create a Type handle from an interned tuple ID.
     pub(crate) fn from_tuple_id(id: u32) -> Self {
         Type(Self::TUPLE_FLAG | (id as u64))
+    }
+
+    pub fn tuple(types: Vec<Type>) -> Self {
+        crate::ir::type_store::intern_tuple(types)
     }
 
     pub fn tuple_len(&self) -> usize {

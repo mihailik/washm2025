@@ -1,13 +1,13 @@
-use bumpalo::Bump;
 use washm::passes::asyncify::{Asyncify, AsyncifyConfig};
 use washm::passes::Pass;
 
 fn run_asyncify(wat: &str, imports: Vec<&str>) -> String {
-    let allocator = Bump::new();
     let wasm_bytes = wat::parse_str(wat).expect("failed to parse wat");
 
-    let mut reader = washm::wasm::binary_reader::BinaryReader::new(&allocator, wasm_bytes);
-    let mut module = reader.parse_module().expect("failed to read module");
+    let mut reader = washm::wasm::binary_reader::BinaryReader::new();
+    let mut module = reader
+        .parse_module(&wasm_bytes)
+        .expect("failed to read module");
 
     let mut config = AsyncifyConfig::default();
     for import in imports {
@@ -236,11 +236,12 @@ fn test_asyncify_ignore_imports() {
     "#;
 
     // Custom run logic to set ignore_imports
-    let allocator = Bump::new();
     let wasm_bytes = wat::parse_str(wat).expect("failed to parse wat");
 
-    let mut reader = washm::wasm::binary_reader::BinaryReader::new(&allocator, wasm_bytes);
-    let mut module = reader.parse_module().expect("failed to read module");
+    let mut reader = washm::wasm::binary_reader::BinaryReader::new();
+    let mut module = reader
+        .parse_module(&wasm_bytes)
+        .expect("failed to read module");
 
     let mut config = AsyncifyConfig::default();
     config.ignore_imports = true;

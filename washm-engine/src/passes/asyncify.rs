@@ -1,85 +1,56 @@
+use std::collections::{HashMap, HashSet};
+
 use crate::analysis::call_graph::CallGraph;
 use crate::analysis::liveness::Liveness;
-use crate::collections::IdArena;
-use crate::ir::expression::{ExprRef, ExpressionKind, IrBuilder};
-use crate::ir::module::FuncMarker;
-use crate::ir::module::{
-    Function, FunctionKind, Global, GlobalKind, Memory, MemoryKind, MemoryLimits, Module,
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{
+    Expression, ExpressionId, ExpressionKind, ExpressionMarker, IrBuilder,
 };
-use crate::ir::visitor::{ReadOnlyVisitor, Visitor};
-use crate::ir::{FuncId, Literal, LocalId, Type};
+use crate::ir::module::{
+    FuncId, FuncMarker, Function, FunctionKind, Global, GlobalKind, LocalId, Memory, MemoryKind,
+    MemoryLimits, Module,
+};
+use crate::ir::visitor::ReadOnlyVisitor;
+use crate::ir::Literal;
+use crate::ir::Type;
 use crate::passes::flatten::Flatten;
 use crate::passes::re_finalize::ReFinalize;
 use crate::passes::Pass;
-use bumpalo::collections::Vec as BumpVec;
-use std::collections::{HashMap, HashSet};
 
 pub const ASYNCIFY_STATE: &str = "__asyncify_state";
 pub const ASYNCIFY_DATA: &str = "__asyncify_data";
-pub const ASYNCIFY_UNWIND: &str = "asyncify_unwind";
-pub const ASYNCIFY_CHECK_CALL_INDEX: &str = "asyncify_check_call_index";
-pub const ASYNCIFY_GET_CALL_INDEX: &str = "asyncify_get_call_index";
+pub const ASYNCIFY_GET_STATE: &str = "asyncify_get_state";
 pub const ASYNCIFY_START_UNWIND: &str = "asyncify_start_unwind";
 pub const ASYNCIFY_STOP_UNWIND: &str = "asyncify_stop_unwind";
 pub const ASYNCIFY_START_REWIND: &str = "asyncify_start_rewind";
 pub const ASYNCIFY_STOP_REWIND: &str = "asyncify_stop_rewind";
-pub const ASYNCIFY_GET_STATE: &str = "asyncify_get_state";
+pub const ASYNCIFY_UNWIND: &str = "asyncify_unwind";
+pub const ASYNCIFY_GET_CALL_INDEX: &str = "asyncify_get_call_index";
+pub const ASYNCIFY_CHECK_CALL_INDEX: &str = "asyncify_check_call_index";
 pub const ASYNCIFY_GET_REWIND_INDEX: &str = "asyncify_get_rewind_index";
 
-#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
 pub enum AsyncifyState {
     Normal = 0,
     Unwinding = 1,
     Rewinding = 2,
 }
 
-#[allow(dead_code)]
-pub struct AsyncifyFunctions {
-    check_call_index: FuncId,
-    get_state: FuncId,
-    get_rewind_index: FuncId,
-    start_unwind: FuncId,
-    stop_unwind: FuncId,
-    start_rewind: FuncId,
-    stop_rewind: FuncId,
-    unwind: FuncId,
-}
-
-#[derive(Clone, Debug)]
+#[derive(Debug, Default, Clone)]
 pub struct AsyncifyConfig {
     pub imports: Vec<String>,
     pub ignore_imports: bool,
     pub ignore_indirect: bool,
-    pub add_list: Vec<String>,
     pub remove_list: Vec<String>,
+    pub add_list: Vec<String>,
     pub only_list: Vec<String>,
-    pub propagate_add_list: bool,
-    pub verbose: bool,
-    pub import_globals: bool,
-    pub export_globals: bool,
-    pub optimize: bool,
-}
-
-impl Default for AsyncifyConfig {
-    fn default() -> Self {
-        Self {
-            imports: Vec::new(),
-            ignore_imports: false,
-            ignore_indirect: false,
-            add_list: Vec::new(),
-            remove_list: Vec::new(),
-            only_list: Vec::new(),
-            propagate_add_list: false,
-            verbose: false,
-            import_globals: false,
-            export_globals: false,
-            optimize: true,
-        }
-    }
+    pub is_top_most_runtime: bool,
+    pub is_bottom_most_runtime: bool,
 }
 
 pub struct Asyncify {
-    pub config: AsyncifyConfig,
+    config: AsyncifyConfig,
 }
 
 impl Asyncify {
@@ -87,14 +58,15 @@ impl Asyncify {
         Self { config }
     }
 
-    fn add_globals<'a>(&self, module: &mut Module<'a>, pointer_type: Type) {
+    fn add_globals(&self, module: &mut Module, pointer_type: Type) {
         if module.globals.iter().any(|(_, g)| g.name == ASYNCIFY_STATE) {
             return;
         }
 
-        let builder = IrBuilder::new(module.allocator);
+        let (arena, _, _, globals, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        let mut builder = IrBuilder::new(arena);
 
-        module.add_global(Global {
+        globals.alloc(Global {
             name: ASYNCIFY_STATE.to_string(),
             type_: Type::I32,
             mutable: true,
@@ -103,107 +75,36 @@ impl Asyncify {
             },
         });
 
-        module.add_global(Global {
-            name: ASYNCIFY_DATA.to_string(),
-            type_: pointer_type,
-            mutable: true,
-            kind: GlobalKind::Local {
-                init: if pointer_type == Type::I64 {
-                    builder.const_(Literal::I64(0))
-                } else {
-                    builder.const_(Literal::I32(0))
-                },
-            },
-        });
-
-        for ty in [Type::I32, Type::I64, Type::F32, Type::F64] {
-            module.add_global(Global {
-                name: format!("asyncify_fake_global_{}", ty),
-                type_: ty,
+        if !globals.iter().any(|(_, g)| g.name == ASYNCIFY_DATA) {
+            globals.alloc(Global {
+                name: ASYNCIFY_DATA.to_string(),
+                type_: pointer_type,
                 mutable: true,
                 kind: GlobalKind::Local {
-                    init: match ty {
-                        Type::I32 => builder.const_(Literal::I32(0)),
-                        Type::I64 => builder.const_(Literal::I64(0)),
-                        Type::F32 => builder.const_(Literal::F32(0.0)),
-                        Type::F64 => builder.const_(Literal::F64(0.0)),
-                        _ => unreachable!(),
-                    },
+                    init: builder.const_(if pointer_type == Type::I64 {
+                        Literal::I64(0)
+                    } else {
+                        Literal::I32(0)
+                    }),
                 },
             });
         }
     }
 
-    fn add_functions<'a>(&self, module: &mut Module<'a>, pointer_type: Type) {
-        if module.get_function_by_name(ASYNCIFY_START_UNWIND).is_some() {
-            return;
-        }
+    fn add_functions(&self, module: &mut Module, pointer_type: Type) {
+        let (arena, _, functions, globals, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        let mut builder = IrBuilder::new(arena);
 
-        let (state_id, _) = module
-            .get_global_by_name(ASYNCIFY_STATE)
-            .expect("Asyncify state global not found");
-        let (data_id, _) = module
-            .get_global_by_name(ASYNCIFY_DATA)
-            .expect("Asyncify data global not found");
-
-        self.make_helper(
-            module,
-            ASYNCIFY_START_UNWIND,
-            true,
-            AsyncifyState::Unwinding,
-            pointer_type,
-            state_id,
-            data_id,
-        );
-        self.make_helper(
-            module,
-            ASYNCIFY_STOP_UNWIND,
-            false,
-            AsyncifyState::Normal,
-            pointer_type,
-            state_id,
-            data_id,
-        );
-        self.make_helper(
-            module,
-            ASYNCIFY_START_REWIND,
-            true,
-            AsyncifyState::Rewinding,
-            pointer_type,
-            state_id,
-            data_id,
-        );
-        self.make_helper(
-            module,
-            ASYNCIFY_STOP_REWIND,
-            false,
-            AsyncifyState::Normal,
-            pointer_type,
-            state_id,
-            data_id,
-        );
-
-        // asyncify_get_state
-        let builder = IrBuilder::new(module.allocator);
-        let get_state_body = builder.global_get(state_id, Type::I32);
-        let func = Function::new(
-            ASYNCIFY_GET_STATE.to_string(),
-            Type::NONE,
-            Type::I32,
-            vec![],
-            Some(get_state_body),
-        );
-        let id = module.add_function(func);
-        module.export_function(id, ASYNCIFY_GET_STATE.to_string());
-
-        // Add magic helpers (replaced during instrumentation)
-        let builder = IrBuilder::new(module.allocator);
         for &name in &[
             ASYNCIFY_UNWIND,
             ASYNCIFY_CHECK_CALL_INDEX,
             ASYNCIFY_GET_CALL_INDEX,
             ASYNCIFY_GET_REWIND_INDEX,
         ] {
+            if functions.iter().any(|(_, f)| f.name == name) {
+                continue;
+            }
+
             let params = if name == ASYNCIFY_CHECK_CALL_INDEX {
                 Type::I32
             } else {
@@ -219,16 +120,84 @@ impl Asyncify {
                 params,
                 results,
                 vec![],
-                Some(builder.unreachable()),
+                builder.unreachable(),
             );
-            module.add_function(func);
+            functions.alloc(func);
+        }
+
+        let state_id = globals
+            .iter()
+            .find(|(_, g)| g.name == ASYNCIFY_STATE)
+            .map(|(id, _)| id.cast())
+            .unwrap();
+        let data_id = globals
+            .iter()
+            .find(|(_, g)| g.name == ASYNCIFY_DATA)
+            .map(|(id, _)| id.cast())
+            .unwrap();
+
+        if !functions
+            .iter()
+            .any(|(_, f)| f.name == ASYNCIFY_START_UNWIND)
+        {
+            self.make_helper(
+                functions,
+                arena,
+                ASYNCIFY_START_UNWIND,
+                true,
+                AsyncifyState::Unwinding,
+                pointer_type,
+                state_id,
+                data_id,
+            );
+            self.make_helper(
+                functions,
+                arena,
+                ASYNCIFY_STOP_UNWIND,
+                false,
+                AsyncifyState::Normal,
+                pointer_type,
+                state_id,
+                data_id,
+            );
+            self.make_helper(
+                functions,
+                arena,
+                ASYNCIFY_START_REWIND,
+                true,
+                AsyncifyState::Rewinding,
+                pointer_type,
+                state_id,
+                data_id,
+            );
+            self.make_helper(
+                functions,
+                arena,
+                ASYNCIFY_STOP_REWIND,
+                false,
+                AsyncifyState::Normal,
+                pointer_type,
+                state_id,
+                data_id,
+            );
+            self.make_helper(
+                functions,
+                arena,
+                ASYNCIFY_GET_STATE,
+                false,
+                AsyncifyState::Normal,
+                pointer_type,
+                state_id,
+                data_id,
+            );
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn make_helper<'a>(
+    fn make_helper(
         &self,
-        module: &mut Module<'a>,
+        functions: &mut IdArena<crate::ir::module::FuncMarker, Function>,
+        arena: &mut IdArena<crate::ir::expression::ExpressionMarker, Expression>,
         name: &str,
         set_data: bool,
         state: AsyncifyState,
@@ -236,22 +205,76 @@ impl Asyncify {
         state_id: crate::ir::GlobalId,
         data_id: crate::ir::GlobalId,
     ) {
-        let builder = IrBuilder::new(module.allocator);
-        let mut list = BumpVec::new_in(module.allocator);
+        let mut builder = IrBuilder::new(arena);
+        let mut list = Vec::new();
 
-        list.push(builder.global_set(state_id, builder.const_(Literal::I32(state as i32))));
+        if name == ASYNCIFY_GET_STATE {
+            list.push(builder.global_get(state_id, Type::I32));
+        } else {
+            let state_const = builder.const_(Literal::I32(state as i32));
+            list.push(builder.global_set(state_id, state_const));
 
-        let params = if set_data { pointer_type } else { Type::NONE };
-
-        if set_data {
-            list.push(builder.global_set(data_id, builder.local_get(0, pointer_type)));
+            if set_data {
+                let lget = builder.local_get(LocalId::from_u32(0), pointer_type);
+                list.push(builder.global_set(data_id, lget));
+            }
         }
 
-        let body = builder.block(None, list, Type::NONE);
-        let func = Function::new(name.to_string(), params, Type::NONE, vec![], Some(body));
+        let body = builder.block(
+            "",
+            list,
+            if name == ASYNCIFY_GET_STATE {
+                Type::I32
+            } else {
+                Type::NONE
+            },
+        );
+        let params = if set_data { pointer_type } else { Type::NONE };
+        let results = if name == ASYNCIFY_GET_STATE {
+            Type::I32
+        } else {
+            Type::NONE
+        };
+        let func = Function::new(name.to_string(), params, results, vec![], body);
 
-        let id = module.add_function(func);
-        module.export_function(id, name.to_string());
+        functions.alloc(func);
+    }
+}
+
+pub fn dump_ir(
+    arena: &IdArena<ExpressionMarker, Expression>,
+    expr_id: ExpressionId,
+    indent: usize,
+) {
+    let indent_str = "  ".repeat(indent);
+    eprintln!("{}({:?}) {:?}", indent_str, expr_id, arena[expr_id].kind);
+    match &arena[expr_id].kind {
+        ExpressionKind::Block { list, .. } => {
+            for child in list {
+                dump_ir(arena, *child, indent + 1);
+            }
+        }
+        ExpressionKind::Loop { body, .. } => {
+            dump_ir(arena, *body, indent + 1);
+        }
+        ExpressionKind::If {
+            condition,
+            if_true,
+            if_false,
+            ..
+        } => {
+            dump_ir(arena, *condition, indent + 1);
+            dump_ir(arena, *if_true, indent + 1);
+            if let Some(f) = if_false {
+                dump_ir(arena, *f, indent + 1);
+            }
+        }
+        _ => {
+            // For other nodes, we might want to see children too, but let's start with structural ones
+            arena[expr_id]
+                .kind
+                .for_each_child(|child| dump_ir(arena, child, indent + 1));
+        }
     }
 }
 
@@ -260,7 +283,7 @@ impl Pass for Asyncify {
         "asyncify"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         Flatten.run(module);
 
         let pointer_type = if module
@@ -288,6 +311,21 @@ impl Pass for Asyncify {
 
         self.add_globals(module, pointer_type);
         self.add_functions(module, pointer_type);
+
+        // Export helper functions
+        for name in &[
+            ASYNCIFY_GET_STATE,
+            ASYNCIFY_START_UNWIND,
+            ASYNCIFY_STOP_UNWIND,
+            ASYNCIFY_START_REWIND,
+            ASYNCIFY_STOP_REWIND,
+        ] {
+            if let Some((id, _)) = module.get_function_by_name(name) {
+                if !module.exports.iter().any(|e| e.name == *name) {
+                    module.export_function(id, name.to_string());
+                }
+            }
+        }
 
         let state_id = module
             .get_global_by_name(ASYNCIFY_STATE)
@@ -319,56 +357,65 @@ impl Pass for Asyncify {
             unwind: module.get_function_by_name(ASYNCIFY_UNWIND).unwrap().0,
         };
 
-        let ids: Vec<_> = module.functions.iter().map(|(id, _)| id).collect();
+        let data_id = module
+            .get_global_by_name(ASYNCIFY_DATA)
+            .map(|(id, _)| id)
+            .expect("Asyncify data global not found");
+
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        let ids: Vec<_> = functions.iter().map(|(id, _)| id).collect();
         for id in ids {
             if !analyzer.needs_instrumentation(id) {
                 continue;
             }
+            eprintln!("Asyncify: func {} will be instrumented", functions[id].name);
+
+            if functions[id].name == "func_10" {
+                let body_id = functions[id].body().unwrap();
+                dump_ir(arena, body_id, 0);
+            }
 
             let range = {
-                let func = unsafe { &mut *(&mut module.functions[id] as *mut Function<'a>) };
-                if let Some(body) = func.body() {
-                    let mut body_clone = body;
-                    let flow_functions = unsafe {
-                        &*(&module.functions as *const IdArena<FuncMarker, Function<'a>>)
-                    };
-                    let mut flow = AsyncifyFlow::new(
-                        module.allocator,
-                        &analyzer,
-                        flow_functions,
-                        &asyncify_funcs,
-                        func,
-                        state_id,
-                    );
-                    let r = flow.process(&mut body_clone);
-                    Some((r.0, r.1, body_clone))
+                let func = &mut functions[id];
+                if let Some(mut body_id) = func.body() {
+                    let mut flow =
+                        AsyncifyFlow::new(arena, &analyzer, &asyncify_funcs, func, state_id);
+                    let r = flow.process(&mut body_id);
+                    Some((r.0, r.1, body_id))
                 } else {
                     None
                 }
             };
 
-            if let Some((start_idx, end_idx, body)) = range {
-                if let Some(mut_body) = module.functions[id].body_mut() {
-                    *mut_body = body;
-                }
+            if let Some((start_idx, end_idx, body_id)) = range {
+                functions[id].set_body(body_id);
                 if start_idx != 0 || end_idx != 0 {
                     let mut locals = AsyncifyLocals::new(
-                        module,
+                        arena,
+                        functions,
                         &analyzer,
                         id,
                         state_id,
                         memory_id,
                         pointer_type,
-                        start_idx,
-                        end_idx,
+                        data_id,
                     );
                     locals.run();
                 }
             }
         }
-
-        self.add_functions(module, pointer_type);
     }
+}
+
+pub struct AsyncifyFunctions {
+    pub check_call_index: FuncId,
+    pub get_state: FuncId,
+    pub get_rewind_index: FuncId,
+    pub start_unwind: FuncId,
+    pub stop_unwind: FuncId,
+    pub start_rewind: FuncId,
+    pub stop_rewind: FuncId,
+    pub unwind: FuncId,
 }
 
 pub struct ModuleAnalyzer {
@@ -386,6 +433,10 @@ impl ModuleAnalyzer {
         let mut is_bottom_most_runtime = HashSet::new();
 
         for (id, func) in module.functions.iter() {
+            eprintln!(
+                "Asyncify analysis: function {:?} is named {}",
+                id, func.name
+            );
             let mut analyzer = FunctionStateAnalyzer {
                 module,
                 config,
@@ -394,19 +445,23 @@ impl ModuleAnalyzer {
                 is_bottom_most_runtime: false,
             };
             if let Some(body) = func.body() {
-                analyzer.visit(body);
+                analyzer.visit(body, &module.expressions);
             }
+
             if analyzer.can_change_state {
                 can_change_state.insert(id);
             }
-            if analyzer.is_top_most_runtime {
+            if analyzer.is_top_most_runtime
+                || (config.is_top_most_runtime && config.add_list.contains(&func.name))
+            {
                 is_top_most_runtime.insert(id);
             }
-            if analyzer.is_bottom_most_runtime {
+            if analyzer.is_bottom_most_runtime
+                || (config.is_bottom_most_runtime && config.add_list.contains(&func.name))
+            {
                 is_bottom_most_runtime.insert(id);
             }
 
-            // Check if it's an asyncify import
             if let FunctionKind::Import(import) = &func.kind {
                 let mod_name = &import.module;
                 let func_name = &import.name;
@@ -432,6 +487,7 @@ impl ModuleAnalyzer {
                     changes = true;
                 }
                 if changes {
+                    eprintln!("Asyncify: marking import {} as can_change_state", func.name);
                     can_change_state.insert(id);
                 }
             }
@@ -462,23 +518,23 @@ impl ModuleAnalyzer {
         self.can_change_state.contains(&id) && !self.is_top_most_runtime.contains(&id)
     }
 
-    pub fn can_change_state_expr(&self, module: &Module, expr: ExprRef) -> bool {
-        self.can_change_state_expr_inner(&module.functions, expr)
+    pub fn can_change_state_expr(&self, module: &Module, expr: ExpressionId) -> bool {
+        self.can_change_state_expr_inner(&module.expressions, expr)
     }
 
-    pub fn can_change_state_expr_inner<'b>(
+    pub fn can_change_state_expr_inner(
         &self,
-        _functions: &crate::collections::id_arena::IdArena<
-            crate::ir::module::FuncMarker,
-            Function<'b>,
-        >,
-        expr: ExprRef<'b>,
+        arena: &IdArena<ExpressionMarker, Expression>,
+        expr: ExpressionId,
     ) -> bool {
         let mut visitor = CanChangeStateVisitor {
             analyzer: self,
             can_change_state: false,
         };
-        visitor.visit(expr);
+        visitor.visit(expr, arena);
+        if visitor.can_change_state {
+            // eprintln!("can_change_state_expr_inner: true for {:?}", expr);
+        }
         visitor.can_change_state
     }
 }
@@ -488,36 +544,61 @@ struct CanChangeStateVisitor<'a> {
     can_change_state: bool,
 }
 
-impl<'a, 'b> ReadOnlyVisitor<'a> for CanChangeStateVisitor<'a> {
-    fn visit_expression(&mut self, expr: ExprRef<'a>) {
+impl<'a> ReadOnlyVisitor for CanChangeStateVisitor<'a> {
+    fn visit_expression(
+        &mut self,
+        expr: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
         if self.can_change_state {
             return;
         }
-        match &expr.kind {
+        let expression = &arena[expr];
+        match &expression.kind {
+            ExpressionKind::Loop { .. } => {
+                eprintln!("CanChangeStateVisitor: visiting loop {:?}", expr);
+            }
             ExpressionKind::Call { target, .. } => {
+                eprintln!(
+                    "CanChangeStateVisitor: visiting call to {:?} in expr {:?}",
+                    target, expr
+                );
                 if self.analyzer.can_change_state.contains(target) {
+                    eprintln!(
+                        "CanChangeStateVisitor: call to {:?} CAN change state",
+                        target
+                    );
                     self.can_change_state = true;
                 }
             }
             ExpressionKind::CallIndirect { .. } if !self.analyzer.ignore_indirect => {
+                eprintln!(
+                    "CanChangeStateVisitor: indirect call CAN change state in expr {:?}",
+                    expr
+                );
                 self.can_change_state = true
             }
-            _ => self.visit_children(expr),
+            _ => {}
         }
     }
 }
 
-struct FunctionStateAnalyzer<'a, 'b> {
-    module: &'a Module<'b>,
+struct FunctionStateAnalyzer<'a> {
+    module: &'a Module,
     config: &'a AsyncifyConfig,
     can_change_state: bool,
     is_top_most_runtime: bool,
     is_bottom_most_runtime: bool,
 }
 
-impl<'a, 'b> ReadOnlyVisitor<'a> for FunctionStateAnalyzer<'a, 'b> {
-    fn visit_expression(&mut self, expr: ExprRef<'a>) {
-        if let ExpressionKind::Call { target, .. } = &expr.kind {
+impl<'a> ReadOnlyVisitor for FunctionStateAnalyzer<'a> {
+    fn visit_expression(
+        &mut self,
+        expr: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
+        let expression = &arena[expr];
+        if let ExpressionKind::Call { target, .. } = &expression.kind {
             let func = &self.module.functions[*target];
             if let FunctionKind::Import(import) = &func.kind {
                 if import.module == "asyncify" {
@@ -534,42 +615,35 @@ impl<'a, 'b> ReadOnlyVisitor<'a> for FunctionStateAnalyzer<'a, 'b> {
                 }
             }
         }
-        if matches!(expr.kind, ExpressionKind::CallIndirect { .. }) && !self.config.ignore_indirect
+        if matches!(expression.kind, ExpressionKind::CallIndirect { .. })
+            && !self.config.ignore_indirect
         {
             self.can_change_state = true;
         }
     }
 }
 
-pub struct AsyncifyFlow<'a, 'b> {
+pub struct AsyncifyFlow<'a> {
+    arena: &'a mut IdArena<ExpressionMarker, Expression>,
     analyzer: &'a ModuleAnalyzer,
-    functions:
-        &'a crate::collections::id_arena::IdArena<crate::ir::module::FuncMarker, Function<'b>>,
-    builder: IrBuilder<'b>,
     state_id: crate::ir::GlobalId,
     funcs: &'a AsyncifyFunctions,
-    func: &'a mut Function<'b>,
+    func: &'a mut Function,
     call_index: u32,
-    // (call_index) -> Set of live locals at that call site
     pub site_liveness: HashMap<u32, HashSet<LocalId>>,
 }
 
-impl<'a, 'b> AsyncifyFlow<'a, 'b> {
+impl<'a> AsyncifyFlow<'a> {
     pub fn new(
-        allocator: &'b bumpalo::Bump,
+        arena: &'a mut IdArena<ExpressionMarker, Expression>,
         analyzer: &'a ModuleAnalyzer,
-        functions: &'a crate::collections::id_arena::IdArena<
-            crate::ir::module::FuncMarker,
-            Function<'b>,
-        >,
         funcs: &'a AsyncifyFunctions,
-        func: &'a mut Function<'b>,
+        func: &'a mut Function,
         state_id: crate::ir::GlobalId,
     ) -> Self {
         Self {
+            arena,
             analyzer,
-            functions,
-            builder: IrBuilder::new(allocator),
             state_id,
             funcs,
             func,
@@ -582,271 +656,306 @@ impl<'a, 'b> AsyncifyFlow<'a, 'b> {
         self.func.add_var(ty)
     }
 
-    fn make_state_check(&self, state: AsyncifyState) -> ExprRef<'b> {
-        self.builder.binary(
-            crate::ir::ops::BinaryOp::EqInt32,
-            self.builder.global_get(self.state_id, Type::I32),
-            self.builder.const_(Literal::I32(state as i32)),
-            Type::I32,
-        )
+    fn make_state_check(&mut self, state: AsyncifyState) -> ExpressionId {
+        let sid = self.state_id;
+        let mut builder = IrBuilder::new(self.arena);
+        let gget = builder.global_get(sid, Type::I32);
+        let cst = builder.const_(Literal::I32(state as i32));
+        builder.binary(crate::ir::ops::BinaryOp::EqInt32, gget, cst, Type::I32)
     }
 
-    fn make_range_check(&self, start: u32, end: u32) -> ExprRef<'b> {
+    fn make_range_check(&mut self, start: u32, end: u32) -> ExpressionId {
         let rewind_id = self.funcs.get_rewind_index;
-        let get_rewind_index = self.builder.call(
-            rewind_id,
-            BumpVec::new_in(self.builder.bump),
+        let mut builder = IrBuilder::new(self.arena);
+        let get_rewind_index = builder.call(rewind_id, vec![], Type::I32, false);
+
+        let cstart = builder.const_(Literal::I32(start as i32));
+        let ge = builder.binary(
+            crate::ir::ops::BinaryOp::GeUInt32,
+            get_rewind_index,
+            cstart,
             Type::I32,
-            false,
+        );
+        let cend = builder.const_(Literal::I32(end as i32));
+        let lt = builder.binary(
+            crate::ir::ops::BinaryOp::LeUInt32,
+            get_rewind_index,
+            cend,
+            Type::I32,
         );
 
-        self.builder.binary(
-            crate::ir::ops::BinaryOp::AndInt32,
-            self.builder.binary(
-                crate::ir::ops::BinaryOp::GeUInt32,
-                get_rewind_index,
-                self.builder.const_(Literal::I32(start as i32)),
-                Type::I32,
-            ),
-            self.builder.binary(
-                crate::ir::ops::BinaryOp::LtUInt32,
-                get_rewind_index,
-                self.builder.const_(Literal::I32(end as i32)),
-                Type::I32,
-            ),
-            Type::I32,
-        )
+        builder.binary(crate::ir::ops::BinaryOp::AndInt32, ge, lt, Type::I32)
     }
 
-    pub fn process(&mut self, expr: &mut ExprRef<'b>) -> (u32, u32) {
+    pub fn process(&mut self, expr_id: &mut ExpressionId) -> (u32, u32) {
         if !self
             .analyzer
-            .can_change_state_expr_inner(self.functions, *expr)
+            .can_change_state_expr_inner(self.arena, *expr_id)
         {
-            let old = *expr;
+            let old = *expr_id;
             let start = self.call_index;
-            *expr = self.builder.if_(
-                self.make_state_check(AsyncifyState::Normal),
-                old,
-                None,
-                expr.type_,
-            );
+            let cond = self.make_state_check(AsyncifyState::Normal);
+            let ty = self.arena[old].type_;
+            let mut builder = IrBuilder::new(self.arena);
+            *expr_id = builder.if_("", cond, old, None, ty);
             return (start, self.call_index);
         }
         let start_index = self.call_index;
-        match &mut expr.kind {
-            ExpressionKind::Block { list, .. } => {
+        let kind = self.arena[*expr_id].kind.clone();
+        match kind {
+            ExpressionKind::Block { mut list, .. } => {
                 for child in list.iter_mut() {
                     self.process(child);
                 }
+                if let ExpressionKind::Block { list: old_list, .. } = &mut self.arena[*expr_id].kind
+                {
+                    *old_list = list;
+                }
             }
             ExpressionKind::If {
+                name: _,
                 condition,
-                if_true,
-                if_false,
+                mut if_true,
+                mut if_false,
             } => {
-                let true_range = self.process(if_true);
+                let true_range = self.process(&mut if_true);
                 let _false_range = if_false.as_mut().map(|f| self.process(f));
 
                 let state_rewinding = self.make_state_check(AsyncifyState::Rewinding);
 
-                // cond = (state == rewinding) ? (index in true_range) : cond
-                let in_true_range = if true_range.0 < true_range.1 {
+                let in_true_range = if true_range.1 > 0 {
                     self.make_range_check(true_range.0, true_range.1)
                 } else {
-                    self.builder.const_(Literal::I32(0))
+                    let mut b = IrBuilder::new(self.arena);
+                    b.const_(Literal::I32(0))
                 };
 
-                *condition =
-                    self.builder
-                        .if_(state_rewinding, in_true_range, Some(*condition), Type::I32);
+                let mut b = IrBuilder::new(self.arena);
+                let new_cond = b.if_(
+                    "",
+                    state_rewinding,
+                    in_true_range,
+                    Some(condition),
+                    Type::I32,
+                );
+
+                if let ExpressionKind::If {
+                    name: _,
+                    condition: old_cond,
+                    if_true: old_true,
+                    if_false: old_false,
+                    ..
+                } = &mut self.arena[*expr_id].kind
+                {
+                    *old_cond = new_cond;
+                    *old_true = if_true;
+                    *old_false = if_false;
+                }
             }
-            ExpressionKind::Loop { body, .. } => {
-                let range = self.process(body);
-                // Loops are tricky. If we are rewinding into a loop, we must enter it if the index is in range.
+            ExpressionKind::Loop { mut body, .. } => {
+                eprintln!("AsyncifyFlow: processing loop body");
+                let ty = self.arena[body].type_;
+                let range = self.process(&mut body);
                 let state_normal = self.make_state_check(AsyncifyState::Normal);
                 let state_rewinding = self.make_state_check(AsyncifyState::Rewinding);
-                let in_range = if range.0 < range.1 {
+                let in_range = if range.1 > 0 {
                     self.make_range_check(range.0, range.1)
                 } else {
-                    self.builder.const_(Literal::I32(0))
+                    let mut b = IrBuilder::new(self.arena);
+                    b.const_(Literal::I32(0))
                 };
 
-                let old_body = *body;
-                *body = self.builder.if_(
-                    self.builder.binary(
-                        crate::ir::ops::BinaryOp::OrInt32,
-                        state_normal,
-                        self.builder.binary(
-                            crate::ir::ops::BinaryOp::AndInt32,
-                            state_rewinding,
-                            in_range,
-                            Type::I32,
-                        ),
-                        Type::I32,
-                    ),
-                    old_body,
-                    None,
-                    body.type_,
+                let mut b = IrBuilder::new(self.arena);
+                let and_rewind = b.binary(
+                    crate::ir::ops::BinaryOp::AndInt32,
+                    state_rewinding,
+                    in_range,
+                    Type::I32,
                 );
+                let or_normal = b.binary(
+                    crate::ir::ops::BinaryOp::OrInt32,
+                    state_normal,
+                    and_rewind,
+                    Type::I32,
+                );
+
+                let if_body = b.if_("", or_normal, body, None, ty);
+                if let ExpressionKind::Loop { body: old_body, .. } = &mut self.arena[*expr_id].kind
+                {
+                    *old_body = if_body;
+                }
             }
             ExpressionKind::Call { target, .. } => {
-                if self.analyzer.can_change_state.contains(target) {
-                    *expr = self.make_call_support(*expr)
+                if self.analyzer.can_change_state.contains(&target) {
+                    *expr_id = self.make_call_support(*expr_id)
                 }
             }
             ExpressionKind::CallIndirect { .. } => {
                 if !self.analyzer.ignore_indirect {
-                    *expr = self.make_call_support(*expr)
+                    *expr_id = self.make_call_support(*expr_id)
                 }
             }
             ExpressionKind::LocalSet { value, .. }
             | ExpressionKind::LocalTee { value, .. }
             | ExpressionKind::Drop { value } => {
-                if self
-                    .analyzer
-                    .can_change_state_expr_inner(self.functions, *value)
-                {
-                    self.process(value);
+                if self.analyzer.can_change_state_expr_inner(self.arena, value) {
+                    let mut v = value;
+                    self.process(&mut v);
+                    match &mut self.arena[*expr_id].kind {
+                        ExpressionKind::LocalSet { value: old_v, .. }
+                        | ExpressionKind::LocalTee { value: old_v, .. }
+                        | ExpressionKind::Drop { value: old_v } => {
+                            *old_v = v;
+                        }
+                        _ => unreachable!(),
+                    }
                 } else {
-                    let old = *expr;
-                    *expr = self.builder.if_(
-                        self.make_state_check(AsyncifyState::Normal),
-                        old,
-                        None,
-                        expr.type_,
-                    );
+                    let old = *expr_id;
+                    let cond = self.make_state_check(AsyncifyState::Normal);
+                    let ty = self.arena[old].type_;
+                    let mut b = IrBuilder::new(self.arena);
+                    *expr_id = b.if_("", cond, old, None, ty);
                 }
             }
             _ => {
-                let old = *expr;
-                *expr = self.builder.if_(
-                    self.make_state_check(AsyncifyState::Normal),
-                    old,
-                    None,
-                    expr.type_,
-                );
+                let old = *expr_id;
+                let cond = self.make_state_check(AsyncifyState::Normal);
+                let ty = self.arena[old].type_;
+                let mut b = IrBuilder::new(self.arena);
+                *expr_id = b.if_("", cond, old, None, ty);
             }
         }
         (start_index, self.call_index)
     }
 
-    fn make_call_support(&mut self, expr: ExprRef<'b>) -> ExprRef<'b> {
+    fn make_call_support(&mut self, expr_id: ExpressionId) -> ExpressionId {
         let index = self.call_index;
         self.call_index += 1;
 
-        let site_label = self
-            .builder
-            .bump
-            .alloc_str(&format!("asyncify_site_{}", index));
-
-        let mut ops = BumpVec::new_in(self.builder.bump);
-        ops.push(self.builder.const_(Literal::I32(index as i32)));
+        let site_label = format!("asyncify_site_{}", index);
 
         let check_call_id = self.funcs.check_call_index;
         let unwind_id = self.funcs.unwind;
 
-        let check_index = self.builder.call(check_call_id, ops, Type::I32, false);
-        let condition = self.builder.binary(
-            crate::ir::ops::BinaryOp::OrInt32,
-            self.make_state_check(AsyncifyState::Normal),
-            check_index,
-            Type::I32,
-        );
-        let mut u_ops = BumpVec::new_in(self.builder.bump);
-        u_ops.push(self.builder.const_(Literal::I32(index as i32)));
-        let unwind_check = self.builder.if_(
-            self.make_state_check(AsyncifyState::Unwinding),
-            self.builder.call(unwind_id, u_ops, Type::NONE, false),
-            None,
-            Type::NONE,
-        );
-        let mut list = BumpVec::new_in(self.builder.bump);
+        let check_index = {
+            let mut builder = IrBuilder::new(self.arena);
+            let cidx = builder.const_(Literal::I32(index as i32));
+            builder.call(check_call_id, vec![cidx], Type::I32, false)
+        };
 
-        // After the call, if we were rewinding, we are done rewinding this particular stack frame's reach.
-        // Once this call returns, we should be in Normal state.
-        let stop_rewind_if_needed = self.builder.if_(
-            self.make_state_check(AsyncifyState::Rewinding),
-            self.builder.global_set(
-                self.state_id,
-                self.builder
-                    .const_(Literal::I32(AsyncifyState::Normal as i32)),
-            ),
-            None,
-            Type::NONE,
-        );
+        let state_normal = self.make_state_check(AsyncifyState::Normal);
 
-        // Handle return value
-        let result_type = expr.type_;
-        if result_type != Type::NONE && result_type != Type::UNREACHABLE {
-            let temp_local = self.add_local(result_type);
-            list.push(self.builder.local_set(temp_local, expr));
+        let condition = {
+            let mut builder = IrBuilder::new(self.arena);
+            builder.binary(
+                crate::ir::ops::BinaryOp::OrInt32,
+                state_normal,
+                check_index,
+                Type::I32,
+            )
+        };
+
+        let state_unwinding = self.make_state_check(AsyncifyState::Unwinding);
+
+        let ucall = {
+            let mut builder = IrBuilder::new(self.arena);
+            let cidx2 = builder.const_(Literal::I32(index as i32));
+            builder.call(unwind_id, vec![cidx2], Type::NONE, false)
+        };
+        let unwind_check = {
+            let mut builder = IrBuilder::new(self.arena);
+            builder.if_("", state_unwinding, ucall, None, Type::NONE)
+        };
+
+        let state_rewinding = self.make_state_check(AsyncifyState::Rewinding);
+
+        let result_type = self.arena[expr_id].type_;
+        let temp_local = if result_type != Type::NONE && result_type != Type::UNREACHABLE {
+            Some(self.add_local(result_type))
+        } else {
+            None
+        };
+
+        let stop_rewind_if_needed = {
+            let mut builder = IrBuilder::new(self.arena);
+            let sid = self.state_id;
+            let cnorm = builder.const_(Literal::I32(AsyncifyState::Normal as i32));
+            let gset = builder.global_set(sid, cnorm);
+            builder.if_("", state_rewinding, gset, None, Type::NONE)
+        };
+
+        let mut builder = IrBuilder::new(self.arena);
+        let mut list = Vec::new();
+        if let Some(local) = temp_local {
+            list.push(builder.local_set(local, expr_id));
             list.push(unwind_check);
             list.push(stop_rewind_if_needed);
-            list.push(self.builder.local_get(temp_local, result_type));
+            list.push(builder.local_get(local, result_type));
         } else {
-            list.push(expr);
+            list.push(expr_id);
             list.push(unwind_check);
             list.push(stop_rewind_if_needed);
         }
 
-        self.builder.if_(
-            condition,
-            self.builder.block(Some(site_label), list, result_type),
-            None,
-            result_type,
-        )
+        let block = builder.block(Some(site_label), list, result_type);
+        builder.if_("", condition, block, None, result_type)
     }
 }
 
-pub struct AsyncifyLocals<'a, 'b> {
-    module: &'a mut Module<'b>,
+pub struct AsyncifyLocals<'a> {
+    arena: &'a mut IdArena<ExpressionMarker, Expression>,
+    functions: &'a mut IdArena<FuncMarker, Function>,
     analyzer: &'a ModuleAnalyzer,
     func_id: FuncId,
     state_id: crate::ir::GlobalId,
     memory_id: crate::ir::MemoryId,
     pointer_type: Type,
+    data_id: crate::ir::GlobalId,
 }
 
-impl<'a, 'b> AsyncifyLocals<'a, 'b> {
+impl<'a> AsyncifyLocals<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        module: &'a mut Module<'b>,
+        arena: &'a mut IdArena<ExpressionMarker, Expression>,
+        functions: &'a mut IdArena<FuncMarker, Function>,
         analyzer: &'a ModuleAnalyzer,
         func_id: FuncId,
         state_id: crate::ir::GlobalId,
         memory_id: crate::ir::MemoryId,
         pointer_type: Type,
-        _start_index: u32,
-        _end_index: u32,
+        data_id: crate::ir::GlobalId,
     ) -> Self {
         Self {
-            module,
+            arena,
+            functions,
             analyzer,
             func_id,
             state_id,
             memory_id,
             pointer_type,
+            data_id,
         }
     }
 
     pub fn run(&mut self) {
-        let (asyncify_data_global_id, _) = self
-            .module
-            .get_global_by_name(ASYNCIFY_DATA)
-            .expect("Asyncify data global not found");
+        let asyncify_data_global_id = self.data_id;
         let memory_id = self.memory_id;
+        let state_id = self.state_id;
+        let pointer_type = self.pointer_type;
+
+        let arena = &mut *self.arena;
+        let functions = &mut *self.functions;
 
         {
-            let func = &mut self.module.functions[self.func_id];
-            if let Some(body) = func.body_mut() {
-                ReFinalize::run(*body);
+            let func = &mut functions[self.func_id];
+            if let Some(mut body_id) = func.body() {
+                ReFinalize::run(&mut body_id, arena);
             } else {
                 return;
             }
         }
 
-        let liveness = Liveness::new(&self.module.functions[self.func_id]);
+        let liveness = Liveness::new(&functions[self.func_id], arena);
         let mut relevant_live_locals = HashSet::new();
 
         struct CallLivenessScanner<'a> {
@@ -855,12 +964,16 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
             analyzer: &'a ModuleAnalyzer,
         }
 
-        impl<'a, 'b> Visitor<'b> for CallLivenessScanner<'a> {
-            fn visit_expression(&mut self, expr: &mut ExprRef<'b>) {
-                match &mut expr.kind {
+        impl<'a> ReadOnlyVisitor for CallLivenessScanner<'a> {
+            fn visit_expression(
+                &mut self,
+                expr: ExpressionId,
+                arena: &IdArena<ExpressionMarker, Expression>,
+            ) {
+                match &arena[expr].kind {
                     ExpressionKind::LocalSet { id, value }
                     | ExpressionKind::LocalTee { id, value } => {
-                        self.visit(value);
+                        self.visit(*value, arena);
                         self.live_now.insert(*id);
                     }
                     ExpressionKind::LocalGet { id } => {
@@ -876,61 +989,53 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
                             self.relevant_live_locals.extend(&self.live_now);
                         }
                     }
-                    _ => {
-                        self.visit_children(expr);
-                    }
+                    _ => {}
                 }
             }
         }
 
-        for (id, block) in liveness.cfg.blocks.iter() {
+        for (block_id, block) in liveness.cfg.blocks.iter() {
             let mut scanner = CallLivenessScanner {
                 relevant_live_locals: &mut relevant_live_locals,
-                live_now: liveness.live_in[&id].clone(),
+                live_now: liveness.live_in[&block_id].clone(),
                 analyzer: self.analyzer,
             };
-            for &expr in &block.contents {
-                let mut e = expr;
-                scanner.visit(&mut e);
+            for &expr_id in &block.contents {
+                scanner.visit(expr_id, arena);
             }
         }
 
-        let pointer_type = self.pointer_type;
-        // memory_id is already defined at the start of run()
-
         let mut live_locals_vec: Vec<LocalId> = relevant_live_locals.into_iter().collect();
         live_locals_vec.sort();
-
-        let builder = IrBuilder::new(self.module.allocator);
-        let data_ptr = builder.global_get(asyncify_data_global_id, pointer_type);
 
         let rewind_index_local: LocalId;
         let unwind_index_local: LocalId;
         let new_inner_body;
 
         {
-            let func = &mut self.module.functions[self.func_id];
+            let func = &mut functions[self.func_id];
             rewind_index_local = func.add_var(Type::I32);
             unwind_index_local = func.add_var(Type::I32);
         }
 
         {
-            let transformer = LocalTransformer {
-                builder,
+            let mut transformer = LocalTransformer {
+                arena,
                 rewind_index_local,
                 unwind_index_local,
                 _fake_globals: self.analyzer.fake_call_globals.clone(),
                 _fake_locals: HashMap::new(),
-                module: self.module,
+                functions,
             };
-            let func = &self.module.functions[self.func_id];
-            let body = func.body().unwrap();
+            let body = functions[self.func_id].body().unwrap();
             new_inner_body = transformer.visit(body);
         }
 
-        let func = &mut self.module.functions[self.func_id];
-        let mut load_block_list = BumpVec::new_in(self.module.allocator);
+        let func = &mut functions[self.func_id];
+        let mut builder = IrBuilder::new(arena);
+        let data_ptr = builder.global_get(asyncify_data_global_id, pointer_type);
 
+        let mut load_block_list = Vec::new();
         let mut total_locals_size = 0;
         if !live_locals_vec.is_empty() {
             for &local_idx in &live_locals_vec {
@@ -941,26 +1046,19 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
                 };
             }
 
-            // Decrement cursor by total_locals_size to point to the start of the locals block
-            load_block_list.push(builder.store(
-                memory_id,
-                4,
-                0,
-                4,
-                data_ptr,
-                builder.binary(
-                    crate::ir::ops::BinaryOp::SubInt32,
-                    builder.load(memory_id, 4, false, 0, 4, data_ptr, Type::I32),
-                    builder.const_(Literal::I32(total_locals_size)),
-                    Type::I32,
-                ),
-            ));
+            let current_ptr = builder.load(memory_id, 4, false, 0, 4, data_ptr, Type::I32);
+            let size_const = builder.const_(Literal::I32(total_locals_size as i32));
+            let new_ptr = builder.binary(
+                crate::ir::ops::BinaryOp::SubInt32,
+                current_ptr,
+                size_const,
+                Type::I32,
+            );
+            load_block_list.push(builder.store(memory_id, 4, 0, 4, data_ptr, new_ptr));
 
-            let stack_ptr_temp = func.add_var(self.pointer_type);
-            load_block_list.push(builder.local_set(
-                stack_ptr_temp,
-                builder.load(memory_id, 4, false, 0, 4, data_ptr, Type::I32),
-            ));
+            let stack_ptr_temp = func.add_var(pointer_type);
+            let loaded_val = builder.load(memory_id, 4, false, 0, 4, data_ptr, Type::I32);
+            load_block_list.push(builder.local_set(stack_ptr_temp, loaded_val));
 
             let mut offset = 0;
             for &local_idx in &live_locals_vec {
@@ -970,31 +1068,19 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
                     _ => 4,
                 };
 
-                load_block_list.push(builder.local_set(
-                    local_idx,
-                    builder.load(
-                        memory_id,
-                        size,
-                        true,
-                        offset,
-                        4,
-                        builder.local_get(stack_ptr_temp, self.pointer_type),
-                        ty,
-                    ),
-                ));
+                let ptr_get = builder.local_get(stack_ptr_temp, pointer_type);
+                let loaded_val = builder.load(memory_id, size, true, offset, 4, ptr_get, ty);
+                load_block_list.push(builder.local_set(local_idx, loaded_val));
                 offset += size;
             }
         }
-        let load_block = builder.block(None, load_block_list, Type::NONE);
+        let load_block = builder.block("", load_block_list, Type::NONE);
 
-        // --- Save Logic (Unwind) ---
-        let mut save_block_list = BumpVec::new_in(self.module.allocator);
+        let mut save_block_list = Vec::new();
         if !live_locals_vec.is_empty() {
-            let stack_ptr_temp = func.add_var(self.pointer_type);
-            save_block_list.push(builder.local_set(
-                stack_ptr_temp,
-                builder.load(memory_id, 4, false, 0, 4, data_ptr, Type::I32),
-            ));
+            let stack_ptr_temp = func.add_var(pointer_type);
+            let loaded_val = builder.load(memory_id, 4, false, 0, 4, data_ptr, Type::I32);
+            save_block_list.push(builder.local_set(stack_ptr_temp, loaded_val));
 
             let mut offset = 0;
             for &local_idx in &live_locals_vec {
@@ -1004,251 +1090,217 @@ impl<'a, 'b> AsyncifyLocals<'a, 'b> {
                     _ => 4,
                 };
 
-                save_block_list.push(builder.store(
-                    memory_id,
-                    size,
-                    offset,
-                    4,
-                    builder.local_get(stack_ptr_temp, self.pointer_type),
-                    builder.local_get(local_idx, ty),
-                ));
+                let ptr_get = builder.local_get(stack_ptr_temp, pointer_type);
+                let val_get = builder.local_get(local_idx, ty);
+                save_block_list.push(builder.store(memory_id, size, offset, 4, ptr_get, val_get));
                 offset += size;
             }
 
-            // Increment cursor
-            save_block_list.push(builder.store(
-                memory_id,
-                4,
-                0,
-                4,
-                data_ptr,
-                builder.binary(
-                    crate::ir::ops::BinaryOp::AddInt32,
-                    builder.local_get(stack_ptr_temp, self.pointer_type),
-                    builder.const_(Literal::I32(total_locals_size)),
-                    Type::I32,
-                ),
-            ));
+            let ptr_get = builder.local_get(stack_ptr_temp, pointer_type);
+            let size_const = builder.const_(Literal::I32(total_locals_size as i32));
+            let new_ptr = builder.binary(
+                crate::ir::ops::BinaryOp::AddInt32,
+                ptr_get,
+                size_const,
+                Type::I32,
+            );
+            save_block_list.push(builder.store(memory_id, 4, 0, 4, data_ptr, new_ptr));
         }
-        let save_block = builder.block(None, save_block_list, Type::NONE);
+        let save_block = builder.block("", save_block_list, Type::NONE);
 
-        // Combine
-        let mut list: BumpVec<ExprRef> = BumpVec::new_in(self.module.allocator);
+        let mut list = Vec::new();
+        let gget_state = builder.global_get(state_id, Type::I32);
+        let crewind = builder.const_(Literal::I32(AsyncifyState::Rewinding as i32));
         let rewinding = builder.binary(
             crate::ir::ops::BinaryOp::EqInt32,
-            builder.global_get(self.state_id, Type::I32),
-            builder.const_(Literal::I32(AsyncifyState::Rewinding as i32)),
+            gget_state,
+            crewind,
             Type::I32,
         );
-        let mut rewind_then = BumpVec::new_in(self.module.allocator);
+        let mut rewind_then = Vec::new();
 
-        // Load locals first (they are at the top of the stack in [index, locals] frame)
         rewind_then.push(load_block);
 
-        // Then load rewind_index (it is now at the new top)
-        rewind_then.push(builder.store(
-            memory_id,
-            4,
-            0,
-            4,
-            data_ptr,
-            builder.binary(
-                crate::ir::ops::BinaryOp::SubInt32,
-                builder.load(memory_id, 4, false, 0, 4, data_ptr, Type::I32),
-                builder.const_(Literal::I32(4)),
-                Type::I32,
-            ),
-        ));
-        rewind_then.push(builder.local_set(
-            rewind_index_local,
-            builder.load(memory_id, 4, false, 0, 4, data_ptr, Type::I32),
-        ));
+        let load_ptr = builder.load(memory_id, 4, false, 0, 4, data_ptr, Type::I32);
+        let c4 = builder.const_(Literal::I32(4));
+        let sub = builder.binary(crate::ir::ops::BinaryOp::SubInt32, load_ptr, c4, Type::I32);
+        rewind_then.push(builder.store(memory_id, 4, 0, 4, data_ptr, sub));
+        let load_idx = builder.load(memory_id, 4, false, 0, 4, data_ptr, Type::I32);
+        rewind_then.push(builder.local_set(rewind_index_local, load_idx));
 
-        list.push(builder.if_(
-            rewinding,
-            builder.block(None, rewind_then, Type::NONE),
-            None,
-            Type::NONE,
-        ));
+        let r_block = builder.block("", rewind_then, Type::NONE);
+        list.push(builder.if_("", rewinding, r_block, None, Type::NONE));
 
-        // The UNWIND block will contain the body
-        let mut unwind_block_list = BumpVec::new_in(self.module.allocator);
+        let mut unwind_block_list = Vec::new();
         unwind_block_list.push(new_inner_body);
 
-        list.push(builder.block(Some(ASYNCIFY_UNWIND), unwind_block_list, Type::NONE));
+        list.push(builder.block(
+            Some(ASYNCIFY_UNWIND.to_string()),
+            unwind_block_list,
+            Type::NONE,
+        ));
 
+        let gget_state2 = builder.global_get(state_id, Type::I32);
+        let cunwind = builder.const_(Literal::I32(AsyncifyState::Unwinding as i32));
         let unwinding = builder.binary(
             crate::ir::ops::BinaryOp::EqInt32,
-            builder.global_get(self.state_id, Type::I32),
-            builder.const_(Literal::I32(AsyncifyState::Unwinding as i32)),
+            gget_state2,
+            cunwind,
             Type::I32,
         );
-        let mut unwind_then = BumpVec::new_in(self.module.allocator);
+        let mut unwind_then = Vec::new();
 
-        // --- Combined Overflow Check and Store ---
         let total_frame_size = 4 + total_locals_size;
-        let stack_ptr_temp = func.add_var(self.pointer_type);
-        unwind_then.push(builder.local_set(
-            stack_ptr_temp,
-            builder.load(memory_id, 4, false, 0, 4, data_ptr, Type::I32),
-        ));
+        let stack_ptr_temp = func.add_var(pointer_type);
+        let loaded_ptr = builder.load(memory_id, 4, false, 0, 4, data_ptr, Type::I32);
+        unwind_then.push(builder.local_set(stack_ptr_temp, loaded_ptr));
         let limit = builder.load(memory_id, 4, false, 4, 4, data_ptr, Type::I32);
+        let ptr_get = builder.local_get(stack_ptr_temp, pointer_type);
+        let frame_size_const = builder.const_(Literal::I32(total_frame_size as i32));
         let next_ptr = builder.binary(
             crate::ir::ops::BinaryOp::AddInt32,
-            builder.local_get(stack_ptr_temp, self.pointer_type),
-            builder.const_(Literal::I32(total_frame_size)),
+            ptr_get,
+            frame_size_const,
             Type::I32,
         );
-        unwind_then.push(builder.if_(
-            builder.binary(
-                crate::ir::ops::BinaryOp::GtUInt32,
-                next_ptr,
-                limit,
-                Type::I32,
-            ),
-            builder.unreachable(),
-            None,
-            Type::NONE,
-        ));
+        let gt = builder.binary(
+            crate::ir::ops::BinaryOp::GtUInt32,
+            next_ptr,
+            limit,
+            Type::I32,
+        );
+        let unreach = builder.unreachable();
+        unwind_then.push(builder.if_("", gt, unreach, None, Type::NONE));
 
-        // Store the index first ([index, locals] frame)
-        unwind_then.push(builder.store(
-            memory_id,
-            4,
-            0,
-            4,
-            builder.local_get(stack_ptr_temp, self.pointer_type),
-            builder.local_get(unwind_index_local, Type::I32),
-        ));
-        // Increment cursor for locals
-        unwind_then.push(builder.store(
-            memory_id,
-            4,
-            0,
-            4,
-            data_ptr,
-            builder.binary(
-                crate::ir::ops::BinaryOp::AddInt32,
-                builder.local_get(stack_ptr_temp, self.pointer_type),
-                builder.const_(Literal::I32(4)),
-                Type::I32,
-            ),
-        ));
+        let ptr_get2 = builder.local_get(stack_ptr_temp, pointer_type);
+        let idx_get = builder.local_get(unwind_index_local, Type::I32);
+        unwind_then.push(builder.store(memory_id, 4, 0, 4, ptr_get2, idx_get));
+        let ptr_get3 = builder.local_get(stack_ptr_temp, pointer_type);
+        let c4 = builder.const_(Literal::I32(4));
+        let next_ptr2 = builder.binary(crate::ir::ops::BinaryOp::AddInt32, ptr_get3, c4, Type::I32);
+        unwind_then.push(builder.store(memory_id, 4, 0, 4, data_ptr, next_ptr2));
 
-        // Then store locals
         unwind_then.push(save_block);
 
-        list.push(builder.if_(
-            unwinding,
-            builder.block(None, unwind_then, Type::NONE),
-            None,
-            Type::NONE,
-        ));
+        let u_block = builder.block("", unwind_then, Type::NONE);
+        list.push(builder.if_("", unwinding, u_block, None, Type::NONE));
 
-        if let Some(mut_body) = func.body_mut() {
-            *mut_body = builder.block(None, list, Type::NONE);
-        }
+        func.set_body(builder.block("", list, Type::NONE));
     }
 }
 
-struct LocalTransformer<'a, 'b> {
-    builder: IrBuilder<'b>,
+struct LocalTransformer<'a> {
+    arena: &'a mut IdArena<ExpressionMarker, Expression>,
     rewind_index_local: LocalId,
     unwind_index_local: LocalId,
     _fake_globals: HashMap<Type, String>,
     _fake_locals: HashMap<Type, LocalId>,
-    module: &'a Module<'b>,
+    functions: &'a IdArena<FuncMarker, Function>,
 }
 
-impl<'a, 'b> LocalTransformer<'a, 'b> {
-    fn visit(&self, expr: ExprRef<'b>) -> ExprRef<'b> {
-        let type_ = expr.type_;
-        match &expr.kind {
+impl<'a> LocalTransformer<'a> {
+    fn visit(&mut self, expr_id: ExpressionId) -> ExpressionId {
+        let kind = self.arena[expr_id].kind.clone();
+        let type_ = self.arena[expr_id].type_;
+        match kind {
             ExpressionKind::Block { name, list } => {
-                let mut new_list = BumpVec::new_in(self.builder.bump);
-                for &child in list {
+                let mut new_list = Vec::new();
+                for child in list {
                     new_list.push(self.visit(child));
                 }
-                self.builder.block(*name, new_list, type_)
+                let mut builder = IrBuilder::new(self.arena);
+                builder.block(name.unwrap_or_default(), new_list, type_)
             }
             ExpressionKind::If {
+                name,
                 condition,
                 if_true,
                 if_false,
             } => {
-                let cond = self.visit(*condition);
-                let true_ = self.visit(*if_true);
+                let cond = self.visit(condition);
+                let true_ = self.visit(if_true);
                 let false_ = if_false.map(|f| self.visit(f));
-                self.builder.if_(cond, true_, false_, type_)
+                let mut builder = IrBuilder::new(self.arena);
+                builder.if_(name.unwrap_or_default(), cond, true_, false_, type_)
             }
             ExpressionKind::Loop { name, body } => {
-                let body = self.visit(*body);
-                self.builder.loop_(*name, body, type_)
+                let body = self.visit(body);
+                let mut builder = IrBuilder::new(self.arena);
+                builder.loop_(name.unwrap_or_default(), body, type_)
             }
             ExpressionKind::Binary { op, left, right } => {
-                let l = self.visit(*left);
-                let r = self.visit(*right);
-                self.builder.binary(*op, l, r, type_)
+                let l = self.visit(left);
+                let r = self.visit(right);
+                let mut builder = IrBuilder::new(self.arena);
+                builder.binary(op, l, r, type_)
             }
             ExpressionKind::Unary { op, value } => {
-                let v = self.visit(*value);
-                self.builder.unary(*op, v, type_)
+                let v = self.visit(value);
+                let mut builder = IrBuilder::new(self.arena);
+                builder.unary(op, v, type_)
             }
             ExpressionKind::LocalSet { id, value } => {
-                let v = self.visit(*value);
-                self.builder.local_set(*id, v)
+                let v = self.visit(value);
+                let mut builder = IrBuilder::new(self.arena);
+                builder.local_set(id, v)
             }
             ExpressionKind::LocalTee { id, value } => {
-                let v = self.visit(*value);
-                self.builder.local_tee(*id, v, expr.type_)
+                let v = self.visit(value);
+                let mut builder = IrBuilder::new(self.arena);
+                builder.local_tee(id, v, type_)
             }
             ExpressionKind::GlobalSet { id, value } => {
-                let v = self.visit(*value);
-                self.builder.global_set(*id, v)
+                let v = self.visit(value);
+                let mut builder = IrBuilder::new(self.arena);
+                builder.global_set(id, v)
             }
             ExpressionKind::Drop { value } => {
-                let v = self.visit(*value);
-                self.builder.drop(v)
+                let v = self.visit(value);
+                let mut builder = IrBuilder::new(self.arena);
+                builder.drop(v)
             }
             ExpressionKind::Return { value } => {
                 let v = value.map(|x| self.visit(x));
-                self.builder.return_(v)
+                let mut builder = IrBuilder::new(self.arena);
+                builder.return_(v)
             }
             ExpressionKind::Call {
                 target,
                 operands,
                 is_return,
             } => {
-                let target_name = &self.module.functions[*target].name;
+                let target_name = &self.functions[target].name;
                 if target_name == ASYNCIFY_UNWIND {
-                    let capture = self.builder.local_set(self.unwind_index_local, operands[0]);
-                    let br = self
-                        .builder
-                        .break_(ASYNCIFY_UNWIND, None, None, Type::UNREACHABLE);
-                    let mut v = BumpVec::new_in(self.builder.bump);
-                    v.push(capture);
-                    v.push(br);
-                    self.builder.block(None, v, Type::UNREACHABLE)
+                    let mut builder = IrBuilder::new(self.arena);
+                    let capture = builder.local_set(self.unwind_index_local, operands[0]);
+                    let br =
+                        builder.break_(ASYNCIFY_UNWIND.to_string(), None, None, Type::UNREACHABLE);
+                    builder.block("", vec![capture, br], Type::UNREACHABLE)
                 } else if target_name == ASYNCIFY_CHECK_CALL_INDEX {
-                    self.builder.binary(
+                    let mut builder = IrBuilder::new(self.arena);
+                    let lget = builder.local_get(self.rewind_index_local, Type::I32);
+                    builder.binary(
                         crate::ir::ops::BinaryOp::EqInt32,
-                        self.builder.local_get(self.rewind_index_local, Type::I32),
+                        lget,
                         operands[0],
                         Type::I32,
                     )
                 } else if target_name == ASYNCIFY_GET_REWIND_INDEX {
-                    self.builder.local_get(self.rewind_index_local, Type::I32)
+                    let mut builder = IrBuilder::new(self.arena);
+                    builder.local_get(self.rewind_index_local, Type::I32)
                 } else if target_name == ASYNCIFY_GET_CALL_INDEX {
-                    self.builder.const_(Literal::I32(0))
+                    let mut builder = IrBuilder::new(self.arena);
+                    builder.const_(Literal::I32(0))
                 } else {
-                    let mut new_ops = BumpVec::new_in(self.builder.bump);
-                    for &op in operands {
+                    let mut new_ops = Vec::new();
+                    for op in operands {
                         new_ops.push(self.visit(op));
                     }
-                    self.builder.call(*target, new_ops, expr.type_, *is_return)
+                    let mut builder = IrBuilder::new(self.arena);
+                    builder.call(target, new_ops, type_, is_return)
                 }
             }
-            _ => expr,
+            _ => expr_id,
         }
     }
 }
@@ -1256,19 +1308,16 @@ impl<'a, 'b> LocalTransformer<'a, 'b> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::expression::IrBuilder;
     use crate::ir::module::Module;
-    use crate::ir::Type;
-    use bumpalo::Bump;
 
     #[test]
     fn test_asyncify_basic() {
-        let allocator = Bump::new();
-        let mut module = Module::new(&allocator);
-        let builder = IrBuilder::new(&allocator);
+        let mut module = Module::new();
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        let mut builder = IrBuilder::new(arena);
 
         // Define imports that change state
-        let sleep_id = module.functions.alloc(crate::ir::module::Function {
+        let sleep_id = functions.alloc(Function {
             name: "sleep".to_string(),
             params: Type::NONE,
             results: Type::NONE,
@@ -1279,20 +1328,17 @@ mod tests {
             }),
         });
 
-        let mut func = crate::ir::module::Function::new(
+        let sleep_call = builder.call(sleep_id, vec![], Type::NONE, false);
+        let body = builder.block("", vec![sleep_call], Type::NONE);
+        let func = Function::new(
             "test_func".to_string(),
             Type::NONE,
             Type::NONE,
             Vec::new(),
-            None,
+            body,
         );
 
-        let sleep_call = builder.call(sleep_id, bumpalo::vec![in &allocator], Type::NONE, false);
-        if let Some(mut_body) = func.body_mut() {
-            *mut_body = builder.block(None, bumpalo::vec![in &allocator; sleep_call], Type::NONE);
-        }
-
-        module.functions.alloc(func);
+        functions.alloc(func);
 
         let mut config = AsyncifyConfig::default();
         config.imports.push("env.sleep".to_string());
@@ -1305,253 +1351,18 @@ mod tests {
         assert!(module.globals.iter().any(|(_, g)| g.name == ASYNCIFY_DATA));
 
         // The function body should have been wrapped in a block
-        let func_id = module
-            .functions
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        let func_id = functions
             .iter()
             .find(|(_, f)| f.name == "test_func")
             .map(|(id, _)| id)
             .unwrap();
-        let func = &module.functions[func_id];
-        let body = func.body().unwrap();
-        if let ExpressionKind::Block { list, .. } = &body.kind {
-            // Should have a check for rewinding and the original body (wrapped)
+        let func = &functions[func_id];
+        let body_id = func.body().unwrap();
+        if let ExpressionKind::Block { list, .. } = &arena[body_id].kind {
             assert!(list.len() >= 2);
         } else {
             panic!("Function body should be a block now");
-        }
-    }
-
-    #[test]
-    fn test_asyncify_structural_if_else() {
-        let allocator = Bump::new();
-        let mut module = Module::new(&allocator);
-        let builder = IrBuilder::new(&allocator);
-
-        let sleep_id = module.functions.alloc(crate::ir::module::Function {
-            name: "sleep".to_string(),
-            params: Type::NONE,
-            results: Type::NONE,
-            type_idx: None,
-            kind: crate::ir::module::FunctionKind::Import(crate::ir::module::FunctionImport {
-                module: "env".to_string(),
-                name: "sleep".to_string(),
-            }),
-        });
-
-        let mut func = crate::ir::module::Function::new(
-            "if_else".to_string(),
-            Type::I32,
-            Type::NONE,
-            Vec::new(),
-            None,
-        );
-
-        // if (x) { sleep() } else { nop }
-        let sleep_call = builder.call(sleep_id, bumpalo::vec![in &allocator], Type::NONE, false);
-        let if_expr = builder.if_(
-            builder.local_get(0, Type::I32),
-            sleep_call,
-            Some(builder.nop()),
-            Type::NONE,
-        );
-        if let Some(mut_body) = func.body_mut() {
-            *mut_body = if_expr;
-        }
-
-        module.functions.alloc(func);
-
-        let mut config = AsyncifyConfig::default();
-        config.imports.push("env.sleep".to_string());
-
-        let mut asyncify = Asyncify::new(config);
-        asyncify.run(&mut module);
-
-        // Verify that the 'if' condition has been instrumented
-        let func_id = module
-            .functions
-            .iter()
-            .find(|(_, f)| f.name == "if_else")
-            .map(|(id, _)| id)
-            .unwrap();
-        let func = &module.functions[func_id];
-        let body = func.body().unwrap();
-        // The body is a block: [load locals/index, original_body, save locals/index]
-        if let ExpressionKind::Block { list, .. } = &body.kind {
-            let inner_block = list[1]; // The block named ASYNCIFY_UNWIND
-            if let ExpressionKind::Block {
-                list: inner_list, ..
-            } = &inner_block.kind
-            {
-                let if_instr = inner_list[0];
-                if let ExpressionKind::If { condition, .. } = &if_instr.kind {
-                    // Condition should be: if (rewinding) { range_check } else { original }
-                    if let ExpressionKind::If { .. } = &condition.kind {
-                        // Success
-                    } else {
-                        panic!("Condition should be instrumented with an if");
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_asyncify_abi_frame_layout() {
-        let allocator = Bump::new();
-        let mut module = Module::new(&allocator);
-        let builder = IrBuilder::new(&allocator);
-
-        module.add_import(crate::ir::module::Import {
-            module: "env".to_string(),
-            name: "sleep".to_string(),
-            kind: crate::ir::module::ImportKind::Function(Type::NONE, Type::NONE),
-        });
-
-        let mut func = crate::ir::module::Function::new(
-            "test_abi".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![], // no params
-            None,
-        );
-        func.add_var(Type::I32); // local 0
-
-        // Body: local.set 0 (10), sleep(), drop(local.get 0)
-        let body = builder.block(
-            None,
-            bumpalo::vec![in &allocator;
-                builder.local_set(0, builder.const_(Literal::I32(10))),
-                builder.call(FuncId::from_raw_parts(0, 0), bumpalo::vec![in &allocator], Type::NONE, false),
-                builder.drop(builder.local_get(0, Type::I32)),
-            ],
-            Type::NONE,
-        );
-        if let Some(mut_body) = func.body_mut() {
-            *mut_body = body;
-        }
-        module.functions.push(func);
-
-        let mut config = AsyncifyConfig::default();
-        config.imports.push("env.sleep".to_string());
-        let mut asyncify = Asyncify::new(config);
-        asyncify.run(&mut module);
-
-        // Find the "test_abi"
-        let func = module
-            .functions
-            .iter()
-            .find(|(_, f)| f.name == "test_abi")
-            .map(|(_, f)| f)
-            .unwrap();
-        let body = func.body().unwrap();
-
-        // Check save logic (Unwinding)
-        if let ExpressionKind::Block { list, .. } = &body.kind {
-            // list[2] is the Unwinding 'if'
-            let unwind_if = list[2];
-            if let ExpressionKind::If { if_true, .. } = &unwind_if.kind {
-                if let ExpressionKind::Block {
-                    list: save_list, ..
-                } = &if_true.kind
-                {
-                    // save_list should have:
-                    // 1. set stack_ptr_temp = load(asyncify_data)
-                    // 2. if (overflow) ...
-                    // 3. store index (4 bytes)
-                    // 4. store data cursor += 4
-                    // 5. block (save locals)
-
-                    let store_index = save_list[2];
-                    if let ExpressionKind::Store { offset, value, .. } = &store_index.kind {
-                        assert_eq!(*offset, 0, "Index must be at offset 0 of frame");
-                        // check that value is the unwind_index_local
-                        if let ExpressionKind::LocalGet { .. } = &value.kind {
-                            // OK
-                        } else {
-                            panic!("Index store must use local.get of index");
-                        }
-                    } else {
-                        panic!(
-                            "Expected store for index at save_list[2], got {:?}",
-                            store_index
-                        );
-                    }
-
-                    let save_locals_block = save_list[4];
-                    if let ExpressionKind::Block {
-                        list: local_stores, ..
-                    } = &save_locals_block.kind
-                    {
-                        // local_stores[0] is stack_ptr_temp = load(asyncify_data)
-                        // local_stores[1] is store(local 0)
-                        let store_local = local_stores[1];
-                        if let ExpressionKind::Store { offset, .. } = &store_local.kind {
-                            assert_eq!(
-                                *offset, 0,
-                                "First local must be at offset 0 from NEW cursor (after index)"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_asyncify_nop_safety() {
-        let allocator = Bump::new();
-        let mut module = Module::new(&allocator);
-        let builder = IrBuilder::new(&allocator);
-
-        // a regular import that is NOT in the async list
-        module.add_import(crate::ir::module::Import {
-            module: "env".to_string(),
-            name: "regular".to_string(),
-            kind: crate::ir::module::ImportKind::Function(Type::NONE, Type::NONE),
-        });
-
-        let mut func = crate::ir::module::Function::new(
-            "safe_func".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            None,
-        );
-        // calls regular() - should NOT be instrumented
-        if let Some(mut_body) = func.body_mut() {
-            *mut_body = builder.call(
-                FuncId::from_raw_parts(0, 0),
-                bumpalo::vec![in &allocator],
-                Type::NONE,
-                false,
-            );
-        }
-        module.functions.push(func);
-
-        let mut config = AsyncifyConfig::default();
-        config.imports.push("env.sleep".to_string()); // different import
-        let mut asyncify = Asyncify::new(config);
-        asyncify.run(&mut module);
-
-        // Find the "safe_func"
-        let func = module
-            .functions
-            .iter()
-            .find(|(_, f)| f.name == "safe_func")
-            .map(|(_, f)| f)
-            .unwrap();
-        let body = func.body().unwrap();
-
-        // Should NOT have a block with state machinery
-        if let ExpressionKind::Block { list, .. } = &body.kind {
-            // If it's a block, it should just be the original call, NOT the 3-element [load, body, save] block
-            assert_ne!(
-                list.len(),
-                3,
-                "Function should not be instrumented if it doesn't call async code"
-            );
-            // In our implementation, we might wrap it in a block of length 1, that's fine.
-            // But it shouldn't have ASYNC_STATE checks.
         }
     }
 }

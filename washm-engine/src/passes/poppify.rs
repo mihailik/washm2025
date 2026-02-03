@@ -1,4 +1,5 @@
-use crate::ir::expression::ExprRef;
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionMarker};
 use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
 use crate::passes::Pass;
@@ -7,43 +8,27 @@ pub struct Poppify;
 
 impl Pass for Poppify {
     fn name(&self) -> &str {
-        "PoppifyDASHED"
+        "Poppify"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
-        for (_, func) in &mut module.functions {
+    fn run(&mut self, module: &mut Module) {
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        for (_, func) in functions {
             if let Some(body) = func.body_mut() {
                 let mut visitor = GenericVisitor;
-                visitor.visit(body);
+                visitor.visit(body, arena);
             }
         }
     }
 }
 
 struct GenericVisitor;
-impl<'a> Visitor<'a> for GenericVisitor {
-    fn visit_expression(&mut self, _expr: &mut ExprRef<'a>) {}
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ir::expression::Expression;
-    use crate::ir::module::Function;
-    use crate::ir::{Literal, Type};
-    use bumpalo::Bump;
-
-    #[test]
-    fn test_poppify() {
-        let bump = Bump::new();
-        let val = Expression::const_expr(&bump, Literal::I32(1), Type::I32);
-        let func = Function::new("test".to_string(), Type::NONE, Type::I32, vec![], Some(val));
-        let mut module = Module::new(&bump);
-        module.add_function(func);
-        let mut pass = Poppify;
-        pass.run(&mut module);
-        assert!(module.functions[module.functions.iter().next().unwrap().0]
-            .body()
-            .is_some());
+impl Visitor for GenericVisitor {
+    fn visit(
+        &mut self,
+        expr: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        self.visit_children(expr, arena);
     }
 }

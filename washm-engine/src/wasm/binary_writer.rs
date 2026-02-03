@@ -1,6 +1,7 @@
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::Module;
-use crate::ir::ops::{AtomicOp, BinaryOp, UnaryOp};
+use crate::ir::ops::{AtomicOp, BinaryOp, RefAsOp, UnaryOp};
 use crate::ir::{DataId, ElementId, FuncId, GlobalId, MemoryId, TableId, TypeId};
 use crate::ir::{Literal, Type};
 use std::borrow::Cow;
@@ -345,8 +346,8 @@ impl BinaryWriter {
             for (_, table) in &module.tables {
                 if let crate::ir::module::TableKind::Import { module, field } = &table.kind {
                     imports.import(
-                        module,
-                        field,
+                        &module,
+                        &field,
                         wasm_encoder::EntityType::Table(wasm_encoder::TableType {
                             element_type: Self::to_ref_type(table.limits.element_type),
                             minimum: table.limits.initial as u64,
@@ -362,8 +363,8 @@ impl BinaryWriter {
             for (_, mem) in &module.memories {
                 if let crate::ir::module::MemoryKind::Import { module, field } = &mem.kind {
                     imports.import(
-                        module,
-                        field,
+                        &module,
+                        &field,
                         wasm_encoder::EntityType::Memory(wasm_encoder::MemoryType {
                             minimum: mem.limits.initial as u64,
                             maximum: mem.limits.maximum.map(|m| m as u64),
@@ -379,8 +380,8 @@ impl BinaryWriter {
             for (_, global) in &module.globals {
                 if let crate::ir::module::GlobalKind::Import { module, field } = &global.kind {
                     imports.import(
-                        module,
-                        field,
+                        &module,
+                        &field,
                         wasm_encoder::EntityType::Global(wasm_encoder::GlobalType {
                             val_type: Self::to_val_type(global.type_),
                             mutable: global.mutable,
@@ -459,9 +460,10 @@ impl BinaryWriter {
                     let mut init_expr_encoder = ConstExprEncoder::new();
                     Self::write_instructions(
                         &mut init_expr_encoder,
+                        &module.expressions,
                         *init,
                         &mut vec![],
-                        &std::collections::HashMap::new(),
+                        &func_map,
                         &global_map,
                         &type_id_map,
                         &data_map,
@@ -545,6 +547,7 @@ impl BinaryWriter {
                 let mut offset_expr_encoder = ConstExprEncoder::new();
                 Self::write_instructions(
                     &mut offset_expr_encoder,
+                    &module.expressions,
                     segment.offset,
                     &mut vec![],
                     &func_map,
@@ -622,6 +625,7 @@ impl BinaryWriter {
                             let mut label_stack = vec![None];
                             Self::write_instructions(
                                 &mut func_encoder,
+                                &module.expressions,
                                 body_expr,
                                 &mut label_stack,
                                 &func_map,
@@ -651,6 +655,7 @@ impl BinaryWriter {
                 let mut offset_expr_encoder = ConstExprEncoder::new();
                 Self::write_instructions(
                     &mut offset_expr_encoder,
+                    &module.expressions,
                     segment.offset,
                     &mut vec![],
                     &func_map,
@@ -803,7 +808,8 @@ impl BinaryWriter {
     #[allow(clippy::too_many_arguments)]
     fn write_instructions<E: InstructionEncoder>(
         encoder: &mut E,
-        expr_ref: ExprRef,
+        arena: &IdArena<ExpressionMarker, Expression>,
+        id: ExpressionId,
         label_stack: &mut Vec<Option<String>>,
         func_map: &std::collections::HashMap<FuncId, u32>,
         global_map: &std::collections::HashMap<GlobalId, u32>,
@@ -814,32 +820,30 @@ impl BinaryWriter {
         memory_map: &std::collections::HashMap<MemoryId, u32>,
         local_map: &std::collections::HashMap<crate::ir::LocalId, u32>,
     ) -> Result<()> {
-        if expr_ref.is_null() {
-            return Ok(());
-        }
-        let expr = &*expr_ref;
+        let expr = &arena[id];
         match &expr.kind {
-            ExpressionKind::Const(lit) => match lit {
+            ExpressionKind::Const(lit) => match *lit {
                 Literal::I32(v) => {
-                    encoder.instruction(&Instruction::I32Const(*v));
+                    encoder.instruction(&Instruction::I32Const(v));
                 }
                 Literal::I64(v) => {
-                    encoder.instruction(&Instruction::I64Const(*v));
+                    encoder.instruction(&Instruction::I64Const(v));
                 }
                 Literal::F32(v) => {
-                    encoder.instruction(&Instruction::F32Const((*v).into()));
+                    encoder.instruction(&Instruction::F32Const(v.into()));
                 }
                 Literal::F64(v) => {
-                    encoder.instruction(&Instruction::F64Const((*v).into()));
+                    encoder.instruction(&Instruction::F64Const(v.into()));
                 }
-                Literal::V128(v) => {
-                    let mut bytes = [0u8; 16];
-                    bytes.copy_from_slice(v);
-                    encoder.instruction(&Instruction::V128Const(i128::from_le_bytes(bytes)));
+                Literal::V128(_v) => {
+                    return Err(WriteError::UnsupportedFeature(
+                        "V128 constants not yet implemented".to_string(),
+                    ));
                 }
             },
             ExpressionKind::LocalGet { id } => {
-                let idx = local_map.get(id).ok_or_else(|| {
+                let id = *id;
+                let idx = local_map.get(&id).ok_or_else(|| {
                     WriteError::InternalError(format!("Local not found: {:?}", id))
                 })?;
                 encoder.instruction(&Instruction::LocalGet(*idx));
@@ -847,6 +851,7 @@ impl BinaryWriter {
             ExpressionKind::LocalSet { id, value } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *value,
                     label_stack,
                     func_map,
@@ -866,6 +871,7 @@ impl BinaryWriter {
             ExpressionKind::LocalTee { id, value } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *value,
                     label_stack,
                     func_map,
@@ -883,15 +889,19 @@ impl BinaryWriter {
                 encoder.instruction(&Instruction::LocalTee(*idx));
             }
             ExpressionKind::GlobalGet { id } => {
-                let idx = global_map.get(id).ok_or_else(|| {
+                let id = *id;
+                let idx = global_map.get(&id).ok_or_else(|| {
                     WriteError::UnsupportedFeature(format!("Global not found: {:?}", id))
                 })?;
                 encoder.instruction(&Instruction::GlobalGet(*idx));
             }
             ExpressionKind::GlobalSet { id, value } => {
+                let id = *id;
+                let value = *value;
                 Self::write_instructions(
                     encoder,
-                    *value,
+                    arena,
+                    value,
                     label_stack,
                     func_map,
                     global_map,
@@ -902,15 +912,18 @@ impl BinaryWriter {
                     memory_map,
                     local_map,
                 )?;
-                let idx = global_map.get(id).ok_or_else(|| {
+                let idx = global_map.get(&id).ok_or_else(|| {
                     WriteError::UnsupportedFeature(format!("Global not found: {:?}", id))
                 })?;
                 encoder.instruction(&Instruction::GlobalSet(*idx));
             }
             ExpressionKind::Binary { op, left, right } => {
+                let left = *left;
+                let right = *right;
                 Self::write_instructions(
                     encoder,
-                    *left,
+                    arena,
+                    left,
                     label_stack,
                     func_map,
                     global_map,
@@ -923,7 +936,8 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
-                    *right,
+                    arena,
+                    right,
                     label_stack,
                     func_map,
                     global_map,
@@ -1019,9 +1033,11 @@ impl BinaryWriter {
                 encoder.instruction(&instr);
             }
             ExpressionKind::Unary { op, value } => {
+                let value = *value;
                 Self::write_instructions(
                     encoder,
-                    *value,
+                    arena,
+                    value,
                     label_stack,
                     func_map,
                     global_map,
@@ -1094,6 +1110,7 @@ impl BinaryWriter {
                 for &child in list {
                     Self::write_instructions(
                         encoder,
+                        arena,
                         child,
                         label_stack,
                         func_map,
@@ -1110,11 +1127,13 @@ impl BinaryWriter {
                 label_stack.pop();
             }
             ExpressionKind::Loop { name, body } => {
+                let body = *body;
                 label_stack.push(name.as_ref().map(|s| s.to_string()));
                 encoder.instruction(&Instruction::Loop(Self::to_block_type(expr.type_)));
                 Self::write_instructions(
                     encoder,
-                    *body,
+                    arena,
+                    body,
                     label_stack,
                     func_map,
                     global_map,
@@ -1129,13 +1148,18 @@ impl BinaryWriter {
                 label_stack.pop();
             }
             ExpressionKind::If {
+                name,
                 condition,
                 if_true,
                 if_false,
             } => {
+                let condition = *condition;
+                let if_true = *if_true;
+                let if_false = if_false.as_ref().map(|f| *f);
                 Self::write_instructions(
                     encoder,
-                    *condition,
+                    arena,
+                    condition,
                     label_stack,
                     func_map,
                     global_map,
@@ -1146,11 +1170,12 @@ impl BinaryWriter {
                     memory_map,
                     local_map,
                 )?;
-                label_stack.push(None);
+                label_stack.push(name.as_ref().map(|s| s.to_string()));
                 encoder.instruction(&Instruction::If(Self::to_block_type(expr.type_)));
                 Self::write_instructions(
                     encoder,
-                    *if_true,
+                    arena,
+                    if_true,
                     label_stack,
                     func_map,
                     global_map,
@@ -1165,7 +1190,8 @@ impl BinaryWriter {
                     encoder.instruction(&Instruction::Else);
                     Self::write_instructions(
                         encoder,
-                        *f,
+                        arena,
+                        f,
                         label_stack,
                         func_map,
                         global_map,
@@ -1185,10 +1211,13 @@ impl BinaryWriter {
                 condition,
                 value,
             } => {
+                let condition = condition.as_ref().map(|c| *c);
+                let value = value.as_ref().map(|v| *v);
                 if let Some(v) = value {
                     Self::write_instructions(
                         encoder,
-                        *v,
+                        arena,
+                        v,
                         label_stack,
                         func_map,
                         global_map,
@@ -1200,11 +1229,12 @@ impl BinaryWriter {
                         local_map,
                     )?;
                 }
-                let depth = Self::find_label_depth(label_stack, name)?;
+                let depth = Self::find_label_depth(label_stack, &name)?;
                 if let Some(c) = condition {
                     Self::write_instructions(
                         encoder,
-                        *c,
+                        arena,
+                        c,
                         label_stack,
                         func_map,
                         global_map,
@@ -1221,10 +1251,12 @@ impl BinaryWriter {
                 }
             }
             ExpressionKind::Return { value } => {
+                let value = value.as_ref().map(|v| *v);
                 if let Some(v) = value {
                     Self::write_instructions(
                         encoder,
-                        *v,
+                        arena,
+                        v,
                         label_stack,
                         func_map,
                         global_map,
@@ -1242,9 +1274,11 @@ impl BinaryWriter {
                 encoder.instruction(&Instruction::Unreachable);
             }
             ExpressionKind::Drop { value } => {
+                let value = *value;
                 Self::write_instructions(
                     encoder,
-                    *value,
+                    arena,
+                    value,
                     label_stack,
                     func_map,
                     global_map,
@@ -1262,9 +1296,13 @@ impl BinaryWriter {
                 if_true,
                 if_false,
             } => {
+                let condition = *condition;
+                let if_true = *if_true;
+                let if_false = *if_false;
                 Self::write_instructions(
                     encoder,
-                    *if_true,
+                    arena,
+                    if_true,
                     label_stack,
                     func_map,
                     global_map,
@@ -1277,7 +1315,8 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
-                    *if_false,
+                    arena,
+                    if_false,
                     label_stack,
                     func_map,
                     global_map,
@@ -1290,7 +1329,8 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
-                    *condition,
+                    arena,
+                    condition,
                     label_stack,
                     func_map,
                     global_map,
@@ -1311,9 +1351,16 @@ impl BinaryWriter {
                 ptr,
                 memory,
             } => {
+                let ptr = *ptr;
+                let offset = *offset;
+                let align = *align;
+                let bytes = *bytes;
+                let signed = *signed;
+                let memory = *memory;
                 Self::write_instructions(
                     encoder,
-                    *ptr,
+                    arena,
+                    ptr,
                     label_stack,
                     func_map,
                     global_map,
@@ -1325,11 +1372,13 @@ impl BinaryWriter {
                     local_map,
                 )?;
                 let memarg = MemArg {
-                    offset: *offset as u64,
-                    align: *align,
-                    memory_index: *memory_map.get(memory).unwrap(),
+                    offset: offset as u64,
+                    align: align as u32,
+                    memory_index: *memory_map.get(&memory).ok_or_else(|| {
+                        WriteError::InternalError(format!("Memory not found: {:?}", memory))
+                    })?,
                 };
-                let instr = match (expr.type_, *bytes, *signed) {
+                let instr = match (expr.type_, bytes, signed) {
                     (Type::I32, 4, _) => Instruction::I32Load(memarg),
                     (Type::I32, 1, true) => Instruction::I32Load8S(memarg),
                     (Type::I32, 1, false) => Instruction::I32Load8U(memarg),
@@ -1356,9 +1405,16 @@ impl BinaryWriter {
                 value,
                 memory,
             } => {
+                let ptr = *ptr;
+                let value = *value;
+                let offset = *offset;
+                let align = *align;
+                let bytes = *bytes;
+                let memory = *memory;
                 Self::write_instructions(
                     encoder,
-                    *ptr,
+                    arena,
+                    ptr,
                     label_stack,
                     func_map,
                     global_map,
@@ -1371,7 +1427,8 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
-                    *value,
+                    arena,
+                    value,
                     label_stack,
                     func_map,
                     global_map,
@@ -1383,11 +1440,14 @@ impl BinaryWriter {
                     local_map,
                 )?;
                 let memarg = MemArg {
-                    offset: *offset as u64,
-                    align: *align,
-                    memory_index: *memory_map.get(memory).unwrap(),
+                    offset: offset as u64,
+                    align: align as u32,
+                    memory_index: *memory_map.get(&memory).ok_or_else(|| {
+                        WriteError::InternalError(format!("Memory not found: {:?}", memory))
+                    })?,
                 };
-                let instr = match (value.type_, *bytes) {
+                let val_type = arena[value].type_;
+                let instr = match (val_type, bytes) {
                     (Type::I32, 4) => Instruction::I32Store(memarg),
                     (Type::I32, 1) => Instruction::I32Store8(memarg),
                     (Type::I32, 2) => Instruction::I32Store16(memarg),
@@ -1409,6 +1469,7 @@ impl BinaryWriter {
                 for &op in operands {
                     Self::write_instructions(
                         encoder,
+                        arena,
                         op,
                         label_stack,
                         func_map,
@@ -1442,6 +1503,7 @@ impl BinaryWriter {
                 if let Some(v) = value {
                     Self::write_instructions(
                         encoder,
+                        arena,
                         *v,
                         label_stack,
                         func_map,
@@ -1456,6 +1518,7 @@ impl BinaryWriter {
                 }
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *condition,
                     label_stack,
                     func_map,
@@ -1469,18 +1532,21 @@ impl BinaryWriter {
                 )?;
                 let mut targets = Vec::new();
                 for name in names {
-                    targets.push(Self::find_label_depth(label_stack, name)?);
+                    targets.push(Self::find_label_depth(label_stack, &name)?);
                 }
-                let default_target = Self::find_label_depth(label_stack, default)?;
+                let default_target = Self::find_label_depth(label_stack, &default)?;
                 encoder.instruction(&Instruction::BrTable(targets.into(), default_target));
             }
             ExpressionKind::MemorySize { memory } => {
-                let idx = *memory_map.get(memory).unwrap();
+                let idx = *memory_map.get(memory).ok_or_else(|| {
+                    WriteError::InternalError(format!("Memory not found: {:?}", memory))
+                })?;
                 encoder.instruction(&Instruction::MemorySize(idx));
             }
             ExpressionKind::MemoryGrow { delta, memory } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *delta,
                     label_stack,
                     func_map,
@@ -1492,7 +1558,9 @@ impl BinaryWriter {
                     memory_map,
                     local_map,
                 )?;
-                let idx = *memory_map.get(memory).unwrap();
+                let idx = *memory_map.get(memory).ok_or_else(|| {
+                    WriteError::InternalError(format!("Memory not found: {:?}", memory))
+                })?;
                 encoder.instruction(&Instruction::MemoryGrow(idx));
             }
             ExpressionKind::CallIndirect {
@@ -1504,6 +1572,7 @@ impl BinaryWriter {
                 for &op in operands {
                     Self::write_instructions(
                         encoder,
+                        arena,
                         op,
                         label_stack,
                         func_map,
@@ -1518,6 +1587,7 @@ impl BinaryWriter {
                 }
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *target,
                     label_stack,
                     func_map,
@@ -1534,7 +1604,9 @@ impl BinaryWriter {
                     .get(type_id)
                     .ok_or_else(|| WriteError::InternalError("TypeId not in map".to_string()))?;
 
-                let table_idx = *table_map.get(table).unwrap();
+                let table_idx = *table_map.get(table).ok_or_else(|| {
+                    WriteError::InternalError(format!("Table not found: {:?}", table))
+                })?;
                 encoder.instruction(&Instruction::CallIndirect {
                     type_index: idx,
                     table_index: table_idx,
@@ -1547,6 +1619,7 @@ impl BinaryWriter {
             ExpressionKind::RefIsNull { value } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *value,
                     label_stack,
                     func_map,
@@ -1569,6 +1642,7 @@ impl BinaryWriter {
             ExpressionKind::RefEq { left, right } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *left,
                     label_stack,
                     func_map,
@@ -1582,6 +1656,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *right,
                     label_stack,
                     func_map,
@@ -1603,6 +1678,7 @@ impl BinaryWriter {
             } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *dest,
                     label_stack,
                     func_map,
@@ -1616,6 +1692,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *value,
                     label_stack,
                     func_map,
@@ -1629,6 +1706,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *size,
                     label_stack,
                     func_map,
@@ -1640,7 +1718,11 @@ impl BinaryWriter {
                     memory_map,
                     local_map,
                 )?;
-                encoder.instruction(&Instruction::MemoryFill(*memory_map.get(memory).unwrap()));
+                encoder.instruction(&Instruction::MemoryFill(
+                    *memory_map.get(memory).ok_or_else(|| {
+                        WriteError::InternalError(format!("Memory not found: {:?}", memory))
+                    })?,
+                ));
             }
             ExpressionKind::MemoryCopy {
                 dest,
@@ -1651,6 +1733,7 @@ impl BinaryWriter {
             } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *dest,
                     label_stack,
                     func_map,
@@ -1664,6 +1747,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *src,
                     label_stack,
                     func_map,
@@ -1677,6 +1761,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *size,
                     label_stack,
                     func_map,
@@ -1689,8 +1774,18 @@ impl BinaryWriter {
                     local_map,
                 )?;
                 encoder.instruction(&Instruction::MemoryCopy {
-                    src_mem: *memory_map.get(src_memory).unwrap(),
-                    dst_mem: *memory_map.get(dest_memory).unwrap(),
+                    src_mem: *memory_map.get(src_memory).ok_or_else(|| {
+                        WriteError::InternalError(format!(
+                            "Source memory not found: {:?}",
+                            src_memory
+                        ))
+                    })?,
+                    dst_mem: *memory_map.get(dest_memory).ok_or_else(|| {
+                        WriteError::InternalError(format!(
+                            "Destination memory not found: {:?}",
+                            dest_memory
+                        ))
+                    })?,
                 });
             }
             ExpressionKind::MemoryInit {
@@ -1702,6 +1797,7 @@ impl BinaryWriter {
             } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *dest,
                     label_stack,
                     func_map,
@@ -1715,6 +1811,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *offset,
                     label_stack,
                     func_map,
@@ -1728,6 +1825,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *size,
                     label_stack,
                     func_map,
@@ -1740,16 +1838,23 @@ impl BinaryWriter {
                     local_map,
                 )?;
                 encoder.instruction(&Instruction::MemoryInit {
-                    mem: *memory_map.get(memory).unwrap(),
-                    data_index: *data_map.get(segment).unwrap(),
+                    mem: *memory_map.get(memory).ok_or_else(|| {
+                        WriteError::InternalError(format!("Memory not found: {:?}", memory))
+                    })?,
+                    data_index: *data_map.get(segment).ok_or_else(|| {
+                        WriteError::InternalError(format!("Data segment not found: {:?}", segment))
+                    })?,
                 });
             }
             ExpressionKind::DataDrop { segment } => {
-                encoder.instruction(&Instruction::DataDrop(*data_map.get(segment).unwrap()));
+                encoder.instruction(&Instruction::DataDrop(*data_map.get(segment).ok_or_else(
+                    || WriteError::InternalError(format!("Data segment not found: {:?}", segment)),
+                )?));
             }
             ExpressionKind::TableGet { table, index } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *index,
                     label_stack,
                     func_map,
@@ -1761,7 +1866,9 @@ impl BinaryWriter {
                     memory_map,
                     local_map,
                 )?;
-                encoder.instruction(&Instruction::TableGet(*table_map.get(table).unwrap()));
+                encoder.instruction(&Instruction::TableGet(*table_map.get(table).ok_or_else(
+                    || WriteError::InternalError(format!("Table not found: {:?}", table)),
+                )?));
             }
             ExpressionKind::TableSet {
                 table,
@@ -1770,6 +1877,7 @@ impl BinaryWriter {
             } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *index,
                     label_stack,
                     func_map,
@@ -1783,6 +1891,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *value,
                     label_stack,
                     func_map,
@@ -1794,10 +1903,14 @@ impl BinaryWriter {
                     memory_map,
                     local_map,
                 )?;
-                encoder.instruction(&Instruction::TableSet(*table_map.get(table).unwrap()));
+                encoder.instruction(&Instruction::TableSet(*table_map.get(table).ok_or_else(
+                    || WriteError::InternalError(format!("Table not found: {:?}", table)),
+                )?));
             }
             ExpressionKind::TableSize { table } => {
-                encoder.instruction(&Instruction::TableSize(*table_map.get(table).unwrap()));
+                encoder.instruction(&Instruction::TableSize(*table_map.get(table).ok_or_else(
+                    || WriteError::InternalError(format!("Table not found: {:?}", table)),
+                )?));
             }
             ExpressionKind::TableGrow {
                 table,
@@ -1806,6 +1919,7 @@ impl BinaryWriter {
             } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *value,
                     label_stack,
                     func_map,
@@ -1819,6 +1933,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *delta,
                     label_stack,
                     func_map,
@@ -1830,7 +1945,9 @@ impl BinaryWriter {
                     memory_map,
                     local_map,
                 )?;
-                encoder.instruction(&Instruction::TableGrow(*table_map.get(table).unwrap()));
+                encoder.instruction(&Instruction::TableGrow(*table_map.get(table).ok_or_else(
+                    || WriteError::InternalError(format!("Table not found: {:?}", table)),
+                )?));
             }
             ExpressionKind::TableFill {
                 table,
@@ -1840,6 +1957,7 @@ impl BinaryWriter {
             } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *dest,
                     label_stack,
                     func_map,
@@ -1853,6 +1971,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *value,
                     label_stack,
                     func_map,
@@ -1866,6 +1985,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *size,
                     label_stack,
                     func_map,
@@ -1877,7 +1997,9 @@ impl BinaryWriter {
                     memory_map,
                     local_map,
                 )?;
-                encoder.instruction(&Instruction::TableFill(*table_map.get(table).unwrap()));
+                encoder.instruction(&Instruction::TableFill(*table_map.get(table).ok_or_else(
+                    || WriteError::InternalError(format!("Table not found: {:?}", table)),
+                )?));
             }
             ExpressionKind::TableCopy {
                 dest_table,
@@ -1888,6 +2010,7 @@ impl BinaryWriter {
             } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *dest,
                     label_stack,
                     func_map,
@@ -1901,6 +2024,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *src,
                     label_stack,
                     func_map,
@@ -1914,6 +2038,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *size,
                     label_stack,
                     func_map,
@@ -1926,8 +2051,18 @@ impl BinaryWriter {
                     local_map,
                 )?;
                 encoder.instruction(&Instruction::TableCopy {
-                    src_table: *table_map.get(src_table).unwrap(),
-                    dst_table: *table_map.get(dest_table).unwrap(),
+                    src_table: *table_map.get(src_table).ok_or_else(|| {
+                        WriteError::InternalError(format!(
+                            "Source table not found: {:?}",
+                            src_table
+                        ))
+                    })?,
+                    dst_table: *table_map.get(dest_table).ok_or_else(|| {
+                        WriteError::InternalError(format!(
+                            "Destination table not found: {:?}",
+                            dest_table
+                        ))
+                    })?,
                 });
             }
             ExpressionKind::TableInit {
@@ -1939,6 +2074,7 @@ impl BinaryWriter {
             } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *dest,
                     label_stack,
                     func_map,
@@ -1952,6 +2088,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *offset,
                     label_stack,
                     func_map,
@@ -1965,6 +2102,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *size,
                     label_stack,
                     func_map,
@@ -1977,12 +2115,26 @@ impl BinaryWriter {
                     local_map,
                 )?;
                 encoder.instruction(&Instruction::TableInit {
-                    table: *table_map.get(table).unwrap(),
-                    elem_index: *element_map.get(segment).unwrap(),
+                    table: *table_map.get(table).ok_or_else(|| {
+                        WriteError::InternalError(format!("Table not found: {:?}", table))
+                    })?,
+                    elem_index: *element_map.get(segment).ok_or_else(|| {
+                        WriteError::InternalError(format!(
+                            "Element segment not found: {:?}",
+                            segment
+                        ))
+                    })?,
                 });
             }
             ExpressionKind::ElemDrop { segment } => {
-                encoder.instruction(&Instruction::ElemDrop(*element_map.get(segment).unwrap()));
+                encoder.instruction(&Instruction::ElemDrop(
+                    *element_map.get(&segment).ok_or_else(|| {
+                        WriteError::InternalError(format!(
+                            "Element segment not found: {:?}",
+                            segment
+                        ))
+                    })?,
+                ));
             }
             ExpressionKind::AtomicRMW {
                 op,
@@ -1994,6 +2146,7 @@ impl BinaryWriter {
             } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *ptr,
                     label_stack,
                     func_map,
@@ -2007,6 +2160,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *value,
                     label_stack,
                     func_map,
@@ -2027,10 +2181,12 @@ impl BinaryWriter {
                         8 => 3,
                         _ => 0,
                     },
-                    memory_index: *memory_map.get(memory).unwrap(),
+                    memory_index: *memory_map.get(memory).ok_or_else(|| {
+                        WriteError::InternalError(format!("Memory not found: {:?}", memory))
+                    })?,
                 };
-                let ty = value.type_;
-                match *op {
+                let ty = arena[*value].type_;
+                match op {
                     AtomicOp::Add => {
                         if ty == Type::I32 {
                             encoder.instruction(&Instruction::I32AtomicRmwAdd(arg));
@@ -2115,6 +2271,7 @@ impl BinaryWriter {
             } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *ptr,
                     label_stack,
                     func_map,
@@ -2128,6 +2285,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *expected,
                     label_stack,
                     func_map,
@@ -2141,6 +2299,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *replacement,
                     label_stack,
                     func_map,
@@ -2161,9 +2320,11 @@ impl BinaryWriter {
                         8 => 3,
                         _ => 0,
                     },
-                    memory_index: *memory_map.get(memory).unwrap(),
+                    memory_index: *memory_map.get(memory).ok_or_else(|| {
+                        WriteError::InternalError(format!("Memory not found: {:?}", memory))
+                    })?,
                 };
-                let ty = expected.type_;
+                let ty = arena[*expected].type_;
                 if ty == Type::I32 {
                     encoder.instruction(&Instruction::I32AtomicRmwCmpxchg(arg));
                 } else if ty == Type::I64 {
@@ -2184,6 +2345,7 @@ impl BinaryWriter {
             } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *ptr,
                     label_stack,
                     func_map,
@@ -2197,6 +2359,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *expected,
                     label_stack,
                     func_map,
@@ -2210,6 +2373,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *timeout,
                     label_stack,
                     func_map,
@@ -2224,7 +2388,9 @@ impl BinaryWriter {
                 let arg = MemArg {
                     offset: 0,
                     align: if *expected_type == Type::I32 { 2 } else { 3 },
-                    memory_index: *memory_map.get(memory).unwrap(),
+                    memory_index: *memory_map.get(memory).ok_or_else(|| {
+                        WriteError::InternalError(format!("Memory not found: {:?}", memory))
+                    })?,
                 };
                 if *expected_type == Type::I32 {
                     encoder.instruction(&Instruction::MemoryAtomicWait32(arg));
@@ -2240,6 +2406,7 @@ impl BinaryWriter {
             ExpressionKind::AtomicNotify { ptr, count, memory } => {
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *ptr,
                     label_stack,
                     func_map,
@@ -2253,6 +2420,7 @@ impl BinaryWriter {
                 )?;
                 Self::write_instructions(
                     encoder,
+                    arena,
                     *count,
                     label_stack,
                     func_map,
@@ -2267,11 +2435,87 @@ impl BinaryWriter {
                 encoder.instruction(&Instruction::MemoryAtomicNotify(MemArg {
                     offset: 0,
                     align: 2,
-                    memory_index: *memory_map.get(memory).unwrap(),
+                    memory_index: *memory_map.get(memory).ok_or_else(|| {
+                        WriteError::InternalError(format!("Memory not found: {:?}", memory))
+                    })?,
                 }));
             }
             ExpressionKind::AtomicFence => {
                 encoder.instruction(&Instruction::AtomicFence);
+            }
+            ExpressionKind::RefAs { op, value } => {
+                Self::write_instructions(
+                    encoder,
+                    arena,
+                    *value,
+                    label_stack,
+                    func_map,
+                    global_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
+                    table_map,
+                    memory_map,
+                    local_map,
+                )?;
+                match op {
+                    RefAsOp::NonNull => {
+                        encoder.instruction(&Instruction::RefAsNonNull);
+                    }
+                    RefAsOp::Extern => {
+                        encoder.instruction(&Instruction::AnyConvertExtern);
+                    }
+                    RefAsOp::Func => {
+                        encoder.instruction(&Instruction::RefAsNonNull);
+                    }
+                    RefAsOp::Any => {
+                        encoder.instruction(&Instruction::ExternConvertAny);
+                    }
+                    RefAsOp::I31 => {
+                        encoder.instruction(&Instruction::RefAsNonNull);
+                    }
+                };
+            }
+            ExpressionKind::TupleMake { operands } => {
+                for operand in operands {
+                    Self::write_instructions(
+                        encoder,
+                        arena,
+                        *operand,
+                        label_stack,
+                        func_map,
+                        global_map,
+                        type_id_map,
+                        data_map,
+                        element_map,
+                        table_map,
+                        memory_map,
+                        local_map,
+                    )?;
+                }
+            }
+            ExpressionKind::TupleExtract { tuple, index } => {
+                Self::write_instructions(
+                    encoder,
+                    arena,
+                    *tuple,
+                    label_stack,
+                    func_map,
+                    global_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
+                    table_map,
+                    memory_map,
+                    local_map,
+                )?;
+                // WASM doesn't have a tuple.extract opcode in the same way,
+                // but some implementations use local.get/set for components.
+                // For now, this requires a specific instruction if supported by the target.
+                return Err(WriteError::UnsupportedFeature(format!(
+                    "TupleExtract at index {}",
+                    index
+                )));
             }
             _ => todo!(
                 "Other instructions implementation with wasm-encoder: {:?}",
@@ -2296,22 +2540,18 @@ impl BinaryWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::expression::{Expression, ExpressionKind, IrBuilder};
+    use crate::ir::expression::{Expression, ExpressionKind};
     use crate::ir::module::ExportKind;
     use crate::ir::module::{Function, Memory, MemoryKind, MemoryLimits, Module};
     use crate::ir::ops::BinaryOp;
-    use crate::ir::Literal;
+    use crate::ir::{Literal, LocalId};
     use crate::wasm::binary_reader::BinaryReader;
-    use bumpalo::collections::Vec as BumpVec;
-    use bumpalo::Bump;
 
     #[test]
     fn test_write_minimal_module() {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
-        let bump = Bump::new();
-        let body = bump.alloc(Expression {
+        let body = module.expressions.alloc(Expression {
             kind: ExpressionKind::Const(Literal::I32(42)),
             type_: Type::I32,
         });
@@ -2321,7 +2561,7 @@ mod tests {
             Type::NONE,
             Type::I32,
             vec![],
-            Some(ExprRef::new(body)),
+            body,
         ));
 
         let mut writer = BinaryWriter::new();
@@ -2337,9 +2577,8 @@ mod tests {
     #[test]
     fn test_roundtrip() {
         // Original module
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
-        let body = bump.alloc(Expression {
+        let mut module = Module::new();
+        let body = module.expressions.alloc(Expression {
             kind: ExpressionKind::Const(Literal::I32(42)),
             type_: Type::I32,
         });
@@ -2348,7 +2587,7 @@ mod tests {
             Type::NONE,
             Type::I32,
             vec![],
-            Some(ExprRef::new(body)),
+            body,
         ));
 
         // Write
@@ -2356,17 +2595,16 @@ mod tests {
         let bytes = writer.write_module(&module).expect("Failed to write");
 
         // Read back
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         // Verify
         assert_eq!(module2.functions.len(), 1);
         let func = &module2.functions.iter().next().unwrap().1;
         assert_eq!(func.results, Type::I32);
 
-        if let Some(body) = func.body() {
-            match &body.kind {
+        if let Some(body_id) = func.body() {
+            match &module2.expressions[body_id].kind {
                 ExpressionKind::Const(Literal::I32(42)) => {} // Success
                 _ => panic!("Expected i32.const 42"),
             }
@@ -2377,9 +2615,8 @@ mod tests {
     fn test_write_multi_param_function() {
         // Create a module with a function that has a single parameter
         // (our IR currently stores params as single Type, not Vec<Type>)
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
-        let body = bump.alloc(Expression {
+        let mut module = Module::new();
+        let body = module.expressions.alloc(Expression {
             kind: ExpressionKind::LocalGet { id: 0.into() },
             type_: Type::I32,
         });
@@ -2389,7 +2626,7 @@ mod tests {
             Type::I32, // Single param
             Type::I32,
             vec![],
-            Some(ExprRef::new(body)),
+            body,
         ));
 
         let mut writer = BinaryWriter::new();
@@ -2398,9 +2635,8 @@ mod tests {
             .expect("Failed to write module");
 
         // Read it back
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to parse");
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to parse");
 
         assert_eq!(module2.functions.len(), 1);
         let func = &module2.functions.iter().next().unwrap().1;
@@ -2411,19 +2647,20 @@ mod tests {
     #[test]
     fn test_roundtrip_with_locals() {
         // Module with function that has locals
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
-        let body = ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::LocalGet { id: 1.into() }, // Get local variable
+        let mut module = Module::new();
+        let body = module.expressions.alloc(Expression {
+            kind: ExpressionKind::LocalGet {
+                id: LocalId::from(1),
+            }, // Get local variable
             type_: Type::I32,
-        }));
+        });
 
         module.add_function(Function::new(
             "test".to_string(),
             Type::I32,
             Type::I32,
             vec![Type::I32, Type::I64], // Two local variables
-            Some(body),
+            body,
         ));
 
         // Write
@@ -2431,9 +2668,9 @@ mod tests {
         let bytes = writer.write_module(&module).expect("Failed to write");
 
         // Read back
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         // Verify
         assert_eq!(module2.functions.len(), 1);
@@ -2454,77 +2691,52 @@ mod tests {
     fn test_control_flow_roundtrip() {
         use crate::ir::expression::IrBuilder;
         use crate::wasm::binary_reader::BinaryReader;
-        use bumpalo::collections::Vec as BumpVec;
 
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
 
-        // Build a function with control flow:
-        // fn test(i32) -> i32 {
-        //   block {
-        //     if (local.get 0) {
-        //       return const 1
-        //     }
-        //     loop {
-        //       drop (const 42)
-        //       break
-        //     }
-        //   }
-        //   select (const 10, const 20, local.get 0)
-        // }
+            // Build a function with control flow:
+            // fn test(i32) -> i32 {
+            //   block {
+            //     if (local.get 0) {
+            //       return const 1
+            //     }
+            //     loop {
+            //       drop (const 42)
+            //       break
+            //     }
+            //   }
+            //   select (const 10, const 20, local.get 0)
+            // }
 
-        let local_get = builder.local_get(0, Type::I32);
-        let const_1 = builder.const_(Literal::I32(1));
-        let return_expr = Expression::new(
-            &bump,
-            ExpressionKind::Return {
-                value: Some(const_1),
-            },
-            Type::UNREACHABLE,
-        );
-        let if_body = builder.if_(local_get, return_expr, None, Type::NONE);
+            let local_get = builder.local_get(LocalId::from(0), Type::I32);
+            let const_1 = builder.const_(Literal::I32(1));
+            let return_expr = builder.return_(Some(const_1));
+            let if_body = builder.if_("", local_get, return_expr, None, Type::NONE);
 
-        let const_42 = builder.const_(Literal::I32(42));
-        let drop_expr =
-            Expression::new(&bump, ExpressionKind::Drop { value: const_42 }, Type::NONE);
-        let break_expr = builder.break_("$loop", None, None, Type::UNREACHABLE);
-        let mut loop_body_list = BumpVec::new_in(&bump);
-        loop_body_list.push(drop_expr);
-        loop_body_list.push(break_expr);
-        let loop_body_block = builder.block(None, loop_body_list, Type::NONE);
-        let loop_expr = builder.loop_(Some("$loop"), loop_body_block, Type::NONE);
+            let const_42 = builder.const_(Literal::I32(42));
+            let drop_expr = builder.drop(const_42);
+            let break_expr = builder.break_("$loop", None, None, Type::UNREACHABLE);
+            let loop_body_block = builder.block("", vec![drop_expr, break_expr], Type::NONE);
+            let loop_expr = builder.loop_(Some("$loop"), loop_body_block, Type::NONE);
 
-        let mut block_list = BumpVec::new_in(&bump);
-        block_list.push(if_body);
-        block_list.push(loop_expr);
-        let block = builder.block(None, block_list, Type::NONE);
+            let block = builder.block("", vec![if_body, loop_expr], Type::NONE);
 
-        let const_10 = builder.const_(Literal::I32(10));
-        let const_20 = builder.const_(Literal::I32(20));
-        let local_get2 = builder.local_get(0, Type::I32);
-        let select_expr = Expression::new(
-            &bump,
-            ExpressionKind::Select {
-                condition: local_get2,
-                if_true: const_10,
-                if_false: const_20,
-            },
-            Type::I32,
-        );
+            let const_10 = builder.const_(Literal::I32(10));
+            let const_20 = builder.const_(Literal::I32(20));
+            let local_get2 = builder.local_get(LocalId::from(0), Type::I32);
+            let select_expr = builder.select(local_get2, const_10, const_20, Type::I32);
 
-        let mut final_body_list = BumpVec::new_in(&bump);
-        final_body_list.push(block);
-        final_body_list.push(select_expr);
-        let body = builder.block(None, final_body_list, Type::I32);
+            builder.block("", vec![block, select_expr], Type::I32)
+        };
 
         module.add_function(Function::new(
             "test_control_flow".to_string(),
             Type::I32,
             Type::I32,
             vec![],
-            Some(body),
+            body,
         ));
 
         // Write
@@ -2535,9 +2747,9 @@ mod tests {
         println!("Bytes: {:02X?}", &bytes[0..std::cmp::min(100, bytes.len())]);
 
         // Read back
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         // Verify basic structure
         assert_eq!(module2.functions.len(), 1);
@@ -2554,12 +2766,8 @@ mod tests {
     fn test_memory_operations_roundtrip() {
         use crate::ir::expression::IrBuilder;
         use crate::wasm::binary_reader::BinaryReader;
-        use bumpalo::collections::Vec as BumpVec;
 
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         let mem_id = module.add_memory(Memory {
             name: "memory".to_string(),
             limits: MemoryLimits {
@@ -2569,31 +2777,32 @@ mod tests {
             kind: MemoryKind::Local,
         });
 
-        // Build a function with memory operations:
-        // fn test(i32) -> i32 {
-        //   let ptr = local.get 0
-        //   i32.store offset=4 align=2 (ptr, const 42)
-        //   i32.load offset=4 align=2 (ptr)
-        // }
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
 
-        let ptr = builder.local_get(0, Type::I32);
-        let const_42 = builder.const_(Literal::I32(42));
-        let store_expr = builder.store(mem_id, 4, 4, 2, ptr, const_42);
+            // Build a function with memory operations:
+            // fn test(i32) -> i32 {
+            //   let ptr = local.get 0
+            //   i32.store offset=4 align=2 (ptr, const 42)
+            //   i32.load offset=4 align=2 (ptr)
+            // }
 
-        let ptr2 = builder.local_get(0, Type::I32);
-        let load_expr = builder.load(mem_id, 4, false, 4, 2, ptr2, Type::I32);
+            let ptr = builder.local_get(0, Type::I32);
+            let const_42 = builder.const_(Literal::I32(42));
+            let store_expr = builder.store(mem_id, 4, 4, 2, ptr, const_42);
 
-        let mut body_list = BumpVec::new_in(&bump);
-        body_list.push(store_expr);
-        body_list.push(load_expr);
-        let body = builder.block(None, body_list, Type::I32);
+            let ptr2 = builder.local_get(0, Type::I32);
+            let load_expr = builder.load(mem_id, 4, false, 4, 2, ptr2, Type::I32);
+
+            builder.block("", vec![store_expr, load_expr], Type::I32)
+        };
 
         module.add_function(Function::new(
             "test_memory".to_string(),
             Type::I32,
             Type::I32,
             vec![],
-            Some(body),
+            body,
         ));
 
         // Write
@@ -2603,9 +2812,9 @@ mod tests {
         println!("Memory ops written {} bytes", bytes.len());
 
         // Read back
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         // Verify basic structure
         assert_eq!(module2.functions.len(), 1);
@@ -2621,12 +2830,8 @@ mod tests {
     fn test_load_variants() {
         use crate::ir::expression::IrBuilder;
         use crate::wasm::binary_reader::BinaryReader;
-        use bumpalo::collections::Vec as BumpVec;
 
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         let mem_id = module.add_memory(Memory {
             name: "memory".to_string(),
             limits: MemoryLimits {
@@ -2636,45 +2841,46 @@ mod tests {
             kind: MemoryKind::Local,
         });
 
-        // Test all load variants: i32.load8_s, i32.load8_u, i32.load16_s, i32.load16_u, i64.load
-        let ptr = builder.local_get(0, Type::I32);
-        let load8_s = builder.load(mem_id, 1, true, 0, 0, ptr, Type::I32);
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
 
-        let ptr2 = builder.local_get(0, Type::I32);
-        let load8_u = builder.load(mem_id, 1, false, 1, 0, ptr2, Type::I32);
+            // Test all load variants: i32.load8_s, i32.load8_u, i32.load16_s, i32.load16_u, i64.load
+            let ptr = builder.local_get(0, Type::I32);
+            let load8_s = builder.load(mem_id, 1, true, 0, 0, ptr, Type::I32);
 
-        let ptr3 = builder.local_get(0, Type::I32);
-        let load16_s = builder.load(mem_id, 2, true, 2, 1, ptr3, Type::I32);
+            let ptr2 = builder.local_get(0, Type::I32);
+            let load8_u = builder.load(mem_id, 1, false, 1, 0, ptr2, Type::I32);
 
-        let ptr4 = builder.local_get(0, Type::I32);
-        let load16_u = builder.load(mem_id, 2, false, 4, 1, ptr4, Type::I32);
+            let ptr3 = builder.local_get(0, Type::I32);
+            let load16_s = builder.load(mem_id, 2, true, 2, 1, ptr3, Type::I32);
 
-        let ptr5 = builder.local_get(0, Type::I32);
-        let load64 = builder.load(mem_id, 8, false, 8, 3, ptr5, Type::I64);
+            let ptr4 = builder.local_get(0, Type::I32);
+            let load16_u = builder.load(mem_id, 2, false, 4, 1, ptr4, Type::I32);
 
-        let mut body_list = BumpVec::new_in(&bump);
-        body_list.push(load8_s);
-        body_list.push(load8_u);
-        body_list.push(load16_s);
-        body_list.push(load16_u);
-        body_list.push(load64);
-        let body = builder.block(None, body_list, Type::I64);
+            let ptr5 = builder.local_get(0, Type::I32);
+            let load64 = builder.load(mem_id, 8, false, 8, 3, ptr5, Type::I64);
+
+            builder.block(
+                "",
+                vec![load8_s, load8_u, load16_s, load16_u, load64],
+                Type::I64,
+            )
+        };
 
         module.add_function(Function::new(
             "test_loads".to_string(),
             Type::I32,
             Type::I64,
             vec![],
-            Some(body),
+            body,
         ));
 
         // Write and read back
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         assert_eq!(module2.functions.len(), 1);
         println!("All load variants test passed!");
@@ -2684,12 +2890,8 @@ mod tests {
     fn test_store_variants() {
         use crate::ir::expression::IrBuilder;
         use crate::wasm::binary_reader::BinaryReader;
-        use bumpalo::collections::Vec as BumpVec;
 
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         let mem_id = module.add_memory(Memory {
             name: "memory".to_string(),
             limits: MemoryLimits {
@@ -2699,40 +2901,39 @@ mod tests {
             kind: MemoryKind::Local,
         });
 
-        // Test all store variants: i32.store8, i32.store16, i64.store
-        let ptr1 = builder.local_get(0, Type::I32);
-        let val1 = builder.const_(Literal::I32(1));
-        let store8 = builder.store(mem_id, 1, 0, 0, ptr1, val1);
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
 
-        let ptr2 = builder.local_get(0, Type::I32);
-        let val2 = builder.const_(Literal::I32(2));
-        let store16 = builder.store(mem_id, 2, 2, 1, ptr2, val2);
+            // Test all store variants: i32.store8, i32.store16, i64.store
+            let ptr1 = builder.local_get(0, Type::I32);
+            let val1 = builder.const_(Literal::I32(1));
+            let store8 = builder.store(mem_id, 1, 0, 0, ptr1, val1);
 
-        let ptr3 = builder.local_get(0, Type::I32);
-        let val3 = builder.const_(Literal::I64(3));
-        let store64 = builder.store(mem_id, 8, 4, 3, ptr3, val3);
+            let ptr2 = builder.local_get(0, Type::I32);
+            let val2 = builder.const_(Literal::I32(2));
+            let store16 = builder.store(mem_id, 2, 2, 1, ptr2, val2);
 
-        let mut body_list = BumpVec::new_in(&bump);
-        body_list.push(store8);
-        body_list.push(store16);
-        body_list.push(store64);
-        let body = builder.block(None, body_list, Type::NONE);
+            let ptr3 = builder.local_get(0, Type::I32);
+            let val3 = builder.const_(Literal::I64(3));
+            let store64 = builder.store(mem_id, 8, 4, 3, ptr3, val3);
+
+            builder.block("", vec![store8, store16, store64], Type::NONE)
+        };
 
         module.add_function(Function::new(
             "test_stores".to_string(),
             Type::I32,
             Type::NONE,
             vec![],
-            Some(body),
+            body,
         ));
 
         // Write and read back
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         assert_eq!(module2.functions.len(), 1);
         println!("All store variants test passed!");
@@ -2742,12 +2943,8 @@ mod tests {
     fn test_memory_with_control_flow() {
         use crate::ir::expression::IrBuilder;
         use crate::wasm::binary_reader::BinaryReader;
-        use bumpalo::collections::Vec as BumpVec;
 
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         let mem_id = module.add_memory(Memory {
             name: "memory".to_string(),
             limits: MemoryLimits {
@@ -2757,27 +2954,28 @@ mod tests {
             kind: MemoryKind::Local,
         });
 
-        // Build: if (local.get 0) { i32.store(ptr, 100) } else { i32.store(ptr, 200) }
-        //        return i32.load(ptr)
-        let condition = builder.local_get(0, Type::I32);
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
 
-        let ptr_true = builder.local_get(1, Type::I32);
-        let val_true = builder.const_(Literal::I32(100));
-        let store_true = builder.store(mem_id, 4, 0, 2, ptr_true, val_true);
+            // Build: if (local.get 0) { i32.store(ptr, 100) } else { i32.store(ptr, 200) }
+            //        return i32.load(ptr)
+            let condition = builder.local_get(0, Type::I32);
 
-        let ptr_false = builder.local_get(1, Type::I32);
-        let val_false = builder.const_(Literal::I32(200));
-        let store_false = builder.store(mem_id, 4, 0, 2, ptr_false, val_false);
+            let ptr_true = builder.local_get(1, Type::I32);
+            let val_true = builder.const_(Literal::I32(100));
+            let store_true = builder.store(mem_id, 4, 0, 2, ptr_true, val_true);
 
-        let if_expr = builder.if_(condition, store_true, Some(store_false), Type::NONE);
+            let ptr_false = builder.local_get(1, Type::I32);
+            let val_false = builder.const_(Literal::I32(200));
+            let store_false = builder.store(mem_id, 4, 0, 2, ptr_false, val_false);
 
-        let ptr_load = builder.local_get(1, Type::I32);
-        let load_result = builder.load(mem_id, 4, false, 0, 2, ptr_load, Type::I32);
+            let if_expr = builder.if_("", condition, store_true, Some(store_false), Type::NONE);
 
-        let mut body_list = BumpVec::new_in(&bump);
-        body_list.push(if_expr);
-        body_list.push(load_result);
-        let body = builder.block(None, body_list, Type::I32);
+            let ptr_load = builder.local_get(1, Type::I32);
+            let load_result = builder.load(mem_id, 4, false, 0, 2, ptr_load, Type::I32);
+
+            builder.block("", vec![if_expr, load_result], Type::I32)
+        };
 
         // Note: Using basic types since tuple params not fully supported yet
         module.add_function(Function::new(
@@ -2785,16 +2983,15 @@ mod tests {
             Type::I32, // Simple param for now
             Type::I32,
             vec![Type::I32], // local for ptr
-            Some(body),
+            body,
         ));
 
         // Write and read back
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         assert_eq!(module2.functions.len(), 1);
         println!("Memory with control flow test passed!");
@@ -2804,12 +3001,8 @@ mod tests {
     fn test_memory_offsets_and_alignment() {
         use crate::ir::expression::IrBuilder;
         use crate::wasm::binary_reader::BinaryReader;
-        use bumpalo::collections::Vec as BumpVec;
 
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
         let mem_id = module.add_memory(Memory {
             name: "memory".to_string(),
             limits: MemoryLimits {
@@ -2819,37 +3012,40 @@ mod tests {
             kind: MemoryKind::Local,
         });
 
-        // Test various offsets and alignments
-        let ptr1 = builder.local_get(0, Type::I32);
-        let load_offset0 = builder.load(mem_id, 4, false, 0, 0, ptr1, Type::I32);
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
 
-        let ptr2 = builder.local_get(0, Type::I32);
-        let load_offset8 = builder.load(mem_id, 4, false, 8, 2, ptr2, Type::I32);
+            // Test various offsets and alignments
+            let ptr1 = builder.local_get(0, Type::I32);
+            let load_offset0 = builder.load(mem_id, 4, false, 0, 0, ptr1, Type::I32);
 
-        let ptr3 = builder.local_get(0, Type::I32);
-        let load_offset1024 = builder.load(mem_id, 4, false, 1024, 2, ptr3, Type::I32);
+            let ptr2 = builder.local_get(0, Type::I32);
+            let load_offset8 = builder.load(mem_id, 4, false, 8, 2, ptr2, Type::I32);
 
-        let mut body_list = BumpVec::new_in(&bump);
-        body_list.push(load_offset0);
-        body_list.push(load_offset8);
-        body_list.push(load_offset1024);
-        let body = builder.block(None, body_list, Type::I32);
+            let ptr3 = builder.local_get(0, Type::I32);
+            let load_offset1024 = builder.load(mem_id, 4, false, 1024, 2, ptr3, Type::I32);
+
+            builder.block(
+                "",
+                vec![load_offset0, load_offset8, load_offset1024],
+                Type::I32,
+            )
+        };
 
         module.add_function(Function::new(
             "test_offsets".to_string(),
             Type::I32,
             Type::I32,
             vec![],
-            Some(body),
+            body,
         ));
 
         // Write and read back
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         assert_eq!(module2.functions.len(), 1);
         println!("Memory offsets and alignment test passed!");
@@ -2857,10 +3053,10 @@ mod tests {
 
     #[test]
     fn test_memory_section() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
+
+        let mut module = Module::new();
 
         // Add memory with limits
         let mem_id = module.add_memory(Memory {
@@ -2872,26 +3068,28 @@ mod tests {
             kind: MemoryKind::Local,
         });
 
-        // Add a simple function that uses memory
-        let ptr = builder.const_(Literal::I32(0));
-        let val = builder.const_(Literal::I32(42));
-        let store = builder.store(mem_id, 4, 0, 2, ptr, val);
+        let store = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            // Add a simple function that uses memory
+            let ptr = builder.const_(Literal::I32(0));
+            let val = builder.const_(Literal::I32(42));
+            builder.store(mem_id, 4, 0, 2, ptr, val)
+        };
 
         module.add_function(Function::new(
             "init_memory".to_string(),
             Type::NONE,
             Type::NONE,
             vec![],
-            Some(store),
+            store,
         ));
 
         // Write and read back
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         // Verify memory limits
         assert_eq!(module2.memories.len(), 1);
@@ -2905,19 +3103,22 @@ mod tests {
 
     #[test]
     fn test_export_section() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
+
+        let mut module = Module::new();
 
         // Add a function
-        let result = builder.const_(Literal::I32(42));
+        let result = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(42))
+        };
         let func_id = module.add_function(Function::new(
             "get_answer".to_string(),
             Type::NONE,
             Type::I32,
             vec![],
-            Some(result),
+            result,
         ));
 
         // Export the function
@@ -2927,9 +3128,8 @@ mod tests {
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         // Verify export
         assert_eq!(module2.exports.len(), 1);
@@ -2943,10 +3143,10 @@ mod tests {
 
     #[test]
     fn test_memory_and_exports_combined() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
+
+        let mut module = Module::new();
 
         // Set memory
         let mem_id = module.add_memory(Memory {
@@ -2959,15 +3159,18 @@ mod tests {
         });
 
         // Add a function that loads from memory
-        let ptr = builder.const_(Literal::I32(0));
-        let load = builder.load(mem_id, 4, false, 0, 2, ptr, Type::I32);
+        let load = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let ptr = builder.const_(Literal::I32(0));
+            builder.load(mem_id, 4, false, 0, 2, ptr, Type::I32)
+        };
 
         let func_id = module.add_function(Function::new(
             "read_mem".to_string(),
             Type::NONE,
             Type::I32,
             vec![],
-            Some(load),
+            load,
         ));
 
         // Export both function and memory
@@ -2978,9 +3181,8 @@ mod tests {
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         // Verify memory
         assert_eq!(module2.memories.len(), 1);
@@ -3003,13 +3205,12 @@ mod tests {
 
     #[test]
     fn test_complete_wasm_module() {
+        use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
         use std::fs;
         use std::process::Command;
 
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
         // Set memory (1 page = 64KB)
         let mem_id = module.add_memory(Memory {
@@ -3022,39 +3223,48 @@ mod tests {
         });
 
         // Function 1: get42 - returns constant 42
-        let result = builder.const_(Literal::I32(42));
+        let result = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(42))
+        };
 
         let f1 = module.add_function(Function::new(
             "get42".to_string(),
             Type::NONE,
             Type::I32,
             vec![],
-            Some(result),
+            result,
         ));
 
         // Function 2: store_value - stores a value in memory
-        let value_param = builder.local_get(0, Type::I32);
-        let ptr = builder.const_(Literal::I32(0));
-        let store = builder.store(mem_id, 4, 0, 2, ptr, value_param);
+        let store = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let value_param = builder.local_get(0, Type::I32);
+            let ptr = builder.const_(Literal::I32(0));
+            builder.store(mem_id, 4, 0, 2, ptr, value_param)
+        };
 
         let f2 = module.add_function(Function::new(
             "store_value".to_string(),
             Type::I32,
             Type::NONE,
             vec![],
-            Some(store),
+            store,
         ));
 
         // Function 3: load_value - loads value from memory
-        let ptr3 = builder.const_(Literal::I32(0));
-        let load = builder.load(mem_id, 4, false, 0, 2, ptr3, Type::I32);
+        let load = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let ptr3 = builder.const_(Literal::I32(0));
+            builder.load(mem_id, 4, false, 0, 2, ptr3, Type::I32)
+        };
 
         let f3 = module.add_function(Function::new(
             "load_value".to_string(),
             Type::NONE,
             Type::I32,
             vec![],
-            Some(load),
+            load,
         ));
 
         // Export all functions and memory
@@ -3092,9 +3302,9 @@ mod tests {
         }
 
         // Verify round-trip
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read back");
+
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read back");
 
         assert_eq!(module2.functions.len(), 3);
         assert_eq!(module2.exports.len(), 4);
@@ -3105,40 +3315,44 @@ mod tests {
 
     #[test]
     fn test_function_call() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
+
+        let mut module = Module::new();
 
         // Function 1: helper - returns 42
-        let result1 = builder.const_(Literal::I32(42));
+        let result1 = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(42))
+        };
         let helper_id = module.add_function(Function::new(
             "helper".to_string(),
             Type::NONE,
             Type::I32,
             vec![],
-            Some(result1),
+            result1,
         ));
 
         // Function 2: caller - calls helper
-        let operands = BumpVec::new_in(&bump);
-        let call_expr = builder.call(helper_id, operands, Type::I32, false);
+        let call_expr = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.call(helper_id, vec![], Type::I32, false)
+        };
 
         module.add_function(Function::new(
             "caller".to_string(),
             Type::NONE,
             Type::I32,
             vec![],
-            Some(call_expr),
+            call_expr,
         ));
 
         // Write and read back
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         // Verify structure
         assert_eq!(module2.functions.len(), 2);
@@ -3148,7 +3362,7 @@ mod tests {
         assert!(caller_func.body().is_some());
 
         if let Some(body) = caller_func.body() {
-            match &body.kind {
+            match &module.expressions[body].kind {
                 ExpressionKind::Call {
                     target,
                     operands,
@@ -3157,9 +3371,12 @@ mod tests {
                     let helper_id = module2.functions.iter().next().unwrap().0;
                     assert_eq!(*target, helper_id); // Should call function at index 0
                     assert_eq!(operands.len(), 0); // No arguments
-                    assert!(!*is_return); // Not a tail call
+                    assert!(!is_return); // Not a tail call
                 }
-                _ => panic!("Expected Call expression, got {:?}", body.kind),
+                _ => panic!(
+                    "Expected Call expression, got {:?}",
+                    module.expressions[body].kind
+                ),
             }
         }
 
@@ -3168,45 +3385,48 @@ mod tests {
 
     #[test]
     fn test_function_call_with_args() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
+
+        let mut module = Module::new();
 
         // Function 1: add_five - takes i32 param and adds 5
-        let param = builder.local_get(0, Type::I32);
-        let five = builder.const_(Literal::I32(5));
-        let sum = builder.binary(BinaryOp::AddInt32, param, five, Type::I32);
+        let sum = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let param = builder.local_get(0, Type::I32);
+            let five = builder.const_(Literal::I32(5));
+            builder.binary(BinaryOp::AddInt32, param, five, Type::I32)
+        };
 
         let add_five_id = module.add_function(Function::new(
             "add_five".to_string(),
             Type::I32,
             Type::I32,
             vec![],
-            Some(sum),
+            sum,
         ));
 
         // Function 2: caller - calls add_five with argument 10
-        let arg = builder.const_(Literal::I32(10));
-        let mut operands = BumpVec::new_in(&bump);
-        operands.push(arg);
-        let call_expr = builder.call(add_five_id, operands, Type::I32, false);
+        let call_expr = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let arg = builder.const_(Literal::I32(10));
+            builder.call(add_five_id, vec![arg], Type::I32, false)
+        };
 
         module.add_function(Function::new(
             "caller".to_string(),
             Type::NONE,
             Type::I32,
             vec![],
-            Some(call_expr),
+            call_expr,
         ));
 
         // Write and read back
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         // Verify structure
         assert_eq!(module2.functions.len(), 2);
@@ -3216,35 +3436,36 @@ mod tests {
 
     #[test]
     fn test_recursive_function() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
+
+        let mut module = Module::new();
 
         // Recursive factorial function (simplified)
         // factorial(n): if n <= 1 then 1 else n * factorial(n-1)
-        let _n = builder.local_get(0, Type::I32);
-        let one = builder.const_(Literal::I32(1));
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let _n = builder.local_get(0, Type::I32);
+            builder.const_(Literal::I32(1))
+        };
 
         // For simplicity, just return 1 (base case)
         // A full recursive implementation would need proper if/else with recursive call
-        let body = one;
 
         module.add_function(Function::new(
             "factorial".to_string(),
             Type::I32,
             Type::I32,
             vec![],
-            Some(body),
+            body,
         ));
 
         // Write and read back
         let mut writer = BinaryWriter::new();
         let bytes = writer.write_module(&module).expect("Failed to write");
 
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read");
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read");
 
         assert_eq!(module2.functions.len(), 1);
 
@@ -3253,13 +3474,11 @@ mod tests {
 
     #[test]
     fn test_multi_function_program_with_wasmtime() {
+        use crate::ir::expression::IrBuilder;
         use std::fs;
         use std::process::Command;
 
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
         // Set memory
         let mem_id = module.add_memory(Memory {
@@ -3272,50 +3491,55 @@ mod tests {
         });
 
         // Function 1: double - doubles an i32 parameter
-        let param = builder.local_get(0, Type::I32);
-        let two = builder.const_(Literal::I32(2));
-        let doubled = builder.binary(BinaryOp::MulInt32, param, two, Type::I32);
+        let doubled = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let param = builder.local_get(0, Type::I32);
+            let two = builder.const_(Literal::I32(2));
+            builder.binary(BinaryOp::MulInt32, param, two, Type::I32)
+        };
 
         let double_id = module.add_function(Function::new(
             "double".to_string(),
             Type::I32,
             Type::I32,
             vec![],
-            Some(doubled),
+            doubled,
         ));
 
         // Function 2: increment - adds 1 to an i32 parameter
-        let param2 = builder.local_get(0, Type::I32);
-        let one = builder.const_(Literal::I32(1));
-        let incremented = builder.binary(BinaryOp::AddInt32, param2, one, Type::I32);
+        let incremented = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let param2 = builder.local_get(0, Type::I32);
+            let one = builder.const_(Literal::I32(1));
+            builder.binary(BinaryOp::AddInt32, param2, one, Type::I32)
+        };
 
         let increment_id = module.add_function(Function::new(
             "increment".to_string(),
             Type::I32,
             Type::I32,
             vec![],
-            Some(incremented),
+            incremented,
         ));
 
         // Function 3: process - calls both functions: increment(double(x))
-        let input = builder.const_(Literal::I32(5)); // Input: 5
+        let final_result = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let input = builder.const_(Literal::I32(5)); // Input: 5
 
-        // Call double(5) -> 10
-        let mut double_args = BumpVec::new_in(&bump);
-        double_args.push(input);
-        let double_result = builder.call(double_id, double_args, Type::I32, false);
+            // Call double(5) -> 10
+            let double_result = builder.call(double_id, vec![input], Type::I32, false);
 
-        // Call increment(10) -> 11
-        let mut inc_args = BumpVec::new_in(&bump);
-        inc_args.push(double_result);
-        let final_result = builder.call(increment_id, inc_args, Type::I32, false);
+            // Call increment(10) -> 11
+            builder.call(increment_id, vec![double_result], Type::I32, false)
+        };
 
         let process_id = module.add_function(Function::new(
             "process".to_string(),
             Type::NONE,
             Type::I32,
             vec![],
-            Some(final_result),
+            final_result,
         ));
 
         // Export all functions
@@ -3353,9 +3577,9 @@ mod tests {
         }
 
         // Verify round-trip
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
-        let module2 = reader.parse_module().expect("Failed to read back");
+
+        let mut reader = BinaryReader::new();
+        let module2 = reader.parse_module(&bytes).expect("Failed to read back");
 
         assert_eq!(module2.functions.len(), 3);
         assert_eq!(module2.exports.len(), 4); // 3 functions + memory
@@ -3369,12 +3593,15 @@ mod tests {
 
     #[test]
     fn test_globals_roundtrip() {
-        let bump = bumpalo::Bump::new();
-        let mut module = Module::new(&bump);
+        use crate::ir::expression::IrBuilder;
+        use crate::wasm::binary_reader::BinaryReader;
+        let mut module = Module::new();
 
         // 1. Define global: mut i32 g0 = 100
-        let builder = IrBuilder::new(&bump);
-        let init0 = builder.const_(Literal::I32(100)); // Fixed
+        let init0 = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(100))
+        };
         let g0_id = module.add_global(crate::ir::module::Global {
             name: "g0".to_string(),
             type_: Type::I32,
@@ -3383,8 +3610,10 @@ mod tests {
         });
 
         // 2. Define global: const f32 g1 = 3.14
-        let builder2 = IrBuilder::new(&bump);
-        let init1 = builder2.const_(Literal::F32(2.5)); // Fixed
+        let init1 = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::F32(2.5))
+        };
         let g1_id = module.add_global(crate::ir::module::Global {
             name: "g1".to_string(),
             type_: Type::F32,
@@ -3393,21 +3622,19 @@ mod tests {
         });
 
         // 3. Define function that uses globals
-        let builder3 = IrBuilder::new(&bump);
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
 
-        let get_g0 = builder3.global_get(g0_id, Type::I32);
-        let const_1 = builder3.const_(Literal::I32(1)); // Fixed
-        let add = builder3.binary(BinaryOp::AddInt32, get_g0, const_1, Type::I32); // Fixed
-        let set_g0 = builder3.global_set(g0_id, add); // g0 = g0 + 1
+            let get_g0 = builder.global_get(g0_id, Type::I32);
+            let const_1 = builder.const_(Literal::I32(1));
+            let add = builder.binary(BinaryOp::AddInt32, get_g0, const_1, Type::I32);
+            let set_g0 = builder.global_set(g0_id, add); // g0 = g0 + 1
 
-        let get_g1 = builder3.global_get(g1_id, Type::F32);
-        let drop_g1 = builder3.drop(get_g1); // Fixed
+            let get_g1 = builder.global_get(g1_id, Type::F32);
+            let drop_g1 = builder.drop(get_g1);
 
-        let body = builder3.block(
-            None,
-            BumpVec::from_iter_in([set_g0, drop_g1], &bump),
-            Type::NONE,
-        );
+            builder.block("", vec![set_g0, drop_g1], Type::NONE)
+        };
 
         // Function with no params/results/locals
         let func_id = module.add_function(Function::new(
@@ -3415,7 +3642,7 @@ mod tests {
             Type::NONE,
             Type::NONE,
             vec![],
-            Some(body),
+            body,
         ));
         module.export_function(func_id, "test_globals".to_string());
 
@@ -3426,10 +3653,9 @@ mod tests {
             .expect("Failed to write module with globals");
 
         // Read back
-        let bump2 = Bump::new();
-        let mut reader = BinaryReader::new(&bump2, bytes);
+        let mut reader = BinaryReader::new();
         let module2 = reader
-            .parse_module()
+            .parse_module(&bytes)
             .expect("Failed to read back module with globals");
 
         // Checks

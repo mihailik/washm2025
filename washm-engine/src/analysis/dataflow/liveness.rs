@@ -1,4 +1,4 @@
-use crate::ir::expression::ExprRef;
+use crate::ir::expression::ExpressionId;
 use crate::ir::LocalId;
 use std::collections::{HashMap, HashSet};
 
@@ -10,16 +10,16 @@ pub enum ActionKind {
 }
 
 #[derive(Debug, Clone)]
-pub struct LivenessAction<'a> {
+pub struct LivenessAction {
     pub kind: ActionKind,
     pub id: LocalId,
     pub effective: bool,
-    pub origin: ExprRef<'a>,
+    pub origin: ExpressionId,
     pub copy_from: Option<LocalId>,
 }
 
-impl<'a> LivenessAction<'a> {
-    pub fn get(id: LocalId, origin: ExprRef<'a>) -> Self {
+impl LivenessAction {
+    pub fn get(id: LocalId, origin: ExpressionId) -> Self {
         Self {
             kind: ActionKind::Get,
             id,
@@ -28,7 +28,7 @@ impl<'a> LivenessAction<'a> {
             copy_from: None,
         }
     }
-    pub fn set(id: LocalId, origin: ExprRef<'a>, copy_from: Option<LocalId>) -> Self {
+    pub fn set(id: LocalId, origin: ExpressionId, copy_from: Option<LocalId>) -> Self {
         Self {
             kind: ActionKind::Set,
             id,
@@ -47,10 +47,10 @@ impl<'a> LivenessAction<'a> {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Liveness<'a> {
+pub struct Liveness {
     pub start: HashSet<LocalId>,
     pub end: HashSet<LocalId>,
-    pub actions: Vec<LivenessAction<'a>>,
+    pub actions: Vec<LivenessAction>,
 }
 
 pub struct InterferenceGraph {

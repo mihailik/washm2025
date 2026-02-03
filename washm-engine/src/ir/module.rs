@@ -1,6 +1,6 @@
 use crate::collections::id_arena::{Id, IdArena};
 use crate::ir::annotation::AnnotationStore;
-use crate::ir::expression::ExprRef;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionMarker};
 use crate::ir::wasm_features::FeatureSet;
 use crate::ir::Type;
 
@@ -33,6 +33,10 @@ pub struct MemoryMarker;
 pub type MemoryId = Id<MemoryMarker>;
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct TagMarker;
+pub type TagId = Id<TagMarker>;
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct LocalMarker;
 pub type LocalId = Id<LocalMarker>;
 
@@ -48,33 +52,33 @@ pub struct FunctionImport {
     pub name: String,
 }
 
-#[derive(Debug)]
-pub enum FunctionKind<'a> {
+#[derive(Debug, Clone)]
+pub enum FunctionKind {
     Local {
         locals: IdArena<LocalMarker, Local>,
         param_ids: Vec<LocalId>,
         var_ids: Vec<LocalId>,
-        body: ExprRef<'a>,
+        body: ExpressionId,
     },
     Import(FunctionImport),
 }
 
-#[derive(Debug)]
-pub struct Function<'a> {
+#[derive(Debug, Clone)]
+pub struct Function {
     pub name: String,
     pub type_idx: Option<TypeId>, // Pointer to module.types
     pub params: Type,
     pub results: Type,
-    pub kind: FunctionKind<'a>,
+    pub kind: FunctionKind,
 }
 
-impl<'a> Function<'a> {
+impl Function {
     pub fn new(
         name: String,
         params: Type,
         results: Type,
         vars: Vec<Type>,
-        body: Option<ExprRef<'a>>,
+        body: ExpressionId,
     ) -> Self {
         let mut locals: IdArena<LocalMarker, Local> = IdArena::new();
         let mut param_ids = Vec::new();
@@ -108,7 +112,7 @@ impl<'a> Function<'a> {
                 locals,
                 param_ids,
                 var_ids,
-                body: body.unwrap_or_else(|| ExprRef::new_null()),
+                body,
             },
         }
     }
@@ -119,7 +123,7 @@ impl<'a> Function<'a> {
         params: Type,
         results: Type,
         vars: Vec<Type>,
-        body: Option<ExprRef<'a>>,
+        body: ExpressionId,
     ) -> Self {
         let mut locals: IdArena<LocalMarker, Local> = IdArena::new();
         let mut param_ids = Vec::new();
@@ -153,7 +157,7 @@ impl<'a> Function<'a> {
                 locals,
                 param_ids,
                 var_ids,
-                body: body.unwrap_or_else(|| ExprRef::new_null()),
+                body,
             },
         }
     }
@@ -212,17 +216,23 @@ impl<'a> Function<'a> {
         }
     }
 
-    pub fn body(&self) -> Option<ExprRef<'a>> {
+    pub fn body(&self) -> Option<ExpressionId> {
         match &self.kind {
             FunctionKind::Local { body, .. } => Some(*body),
             FunctionKind::Import(_) => None,
         }
     }
 
-    pub fn body_mut(&mut self) -> Option<&mut ExprRef<'a>> {
+    pub fn body_mut(&mut self) -> Option<&mut ExpressionId> {
         match &mut self.kind {
             FunctionKind::Local { body, .. } => Some(body),
             FunctionKind::Import(_) => None,
+        }
+    }
+
+    pub fn set_body(&mut self, new_body: ExpressionId) {
+        if let FunctionKind::Local { body, .. } = &mut self.kind {
+            *body = new_body;
         }
     }
 
@@ -245,7 +255,7 @@ impl<'a> Function<'a> {
     }
 
     #[cfg(test)]
-    pub fn new_for_test(f: Function<'a>) -> Self {
+    pub fn new_for_test(f: Function) -> Self {
         f
     }
 
@@ -284,7 +294,7 @@ pub struct MemoryLimits {
     pub maximum: Option<u32>, // Optional maximum size
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Memory {
     pub name: String,
     pub limits: MemoryLimits,
@@ -304,7 +314,7 @@ pub struct TableLimits {
     pub maximum: Option<u32>, // Optional maximum size
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Table {
     pub name: String,
     pub limits: TableLimits,
@@ -317,26 +327,26 @@ pub enum TableKind {
     Local,
 }
 
-#[derive(Debug)]
-pub struct Global<'a> {
+#[derive(Debug, Clone)]
+pub struct Global {
     pub name: String,
     pub type_: Type,
     pub mutable: bool,
-    pub kind: GlobalKind<'a>,
+    pub kind: GlobalKind,
 }
 
-#[derive(Debug)]
-pub enum GlobalKind<'a> {
+#[derive(Debug, Clone)]
+pub enum GlobalKind {
     Import { module: String, field: String },
-    Local { init: ExprRef<'a> },
+    Local { init: ExpressionId },
 }
 
-impl<'a> Global<'a> {
+impl Global {
     pub fn is_import(&self) -> bool {
         matches!(self.kind, GlobalKind::Import { .. })
     }
 
-    pub fn kind_to_init(&self) -> Option<ExprRef<'a>> {
+    pub fn kind_to_init(&self) -> Option<ExpressionId> {
         match self.kind {
             GlobalKind::Local { init } => Some(init),
             GlobalKind::Import { .. } => None,
@@ -344,8 +354,8 @@ impl<'a> Global<'a> {
     }
 }
 
-impl<'a> GlobalKind<'a> {
-    pub fn set_init(&mut self, new_init: ExprRef<'a>) {
+impl GlobalKind {
+    pub fn set_init(&mut self, new_init: ExpressionId) {
         if let GlobalKind::Local { init } = self {
             *init = new_init;
         }
@@ -387,41 +397,51 @@ pub struct FuncType {
     pub results: Type, // Result types
 }
 
-#[derive(Debug)]
-pub struct DataSegment<'a> {
+#[derive(Debug, Clone)]
+pub struct DataSegment {
     pub memory_index: MemoryId,
-    pub offset: ExprRef<'a>, // Offset expression (where in memory)
-    pub data: Vec<u8>,       // The actual data bytes
+    pub offset: ExpressionId, // Offset expression (where in memory)
+    pub data: Vec<u8>,        // The actual data bytes
 }
 
-#[derive(Debug)]
-pub struct ElementSegment<'a> {
+#[derive(Debug, Clone)]
+pub struct ElementSegment {
     pub table_index: TableId,
-    pub offset: ExprRef<'a>,       // Offset expression (where in table)
+    pub offset: ExpressionId,      // Offset expression (where in table)
     pub func_indices: Vec<FuncId>, // Function indices to initialize
 }
 
-#[derive(Debug)]
-pub struct Module<'a> {
-    pub allocator: &'a bumpalo::Bump,
-    pub features: FeatureSet,
-    pub types: IdArena<TypeMarker, FuncType>, // Type section
-    pub functions: IdArena<FuncMarker, Function<'a>>,
-    pub tables: IdArena<TableMarker, Table>,
-    pub memories: IdArena<MemoryMarker, Memory>,
-    pub globals: IdArena<GlobalMarker, Global<'a>>,
-    pub start: Option<FuncId>, // Start function index
-    pub exports: Vec<Export>,
-    pub elements: IdArena<ElementMarker, ElementSegment<'a>>, // Element section
-    pub data: IdArena<DataMarker, DataSegment<'a>>,
-    pub type_names: Vec<String>, // Names for types (debug)
-    pub annotations: AnnotationStore<'a>,
+#[derive(Debug, Clone)]
+pub struct Tag {
+    pub name: String,
+    pub type_idx: TypeId,
 }
 
-impl<'a> Module<'a> {
-    pub fn new(allocator: &'a bumpalo::Bump) -> Self {
+#[derive(Debug, Clone)]
+pub struct Module {
+    pub features: FeatureSet,
+    pub types: IdArena<TypeMarker, FuncType>, // Type section
+    pub functions: IdArena<FuncMarker, Function>,
+    pub tables: IdArena<TableMarker, Table>,
+    pub memories: IdArena<MemoryMarker, Memory>,
+    pub globals: IdArena<GlobalMarker, Global>,
+    pub start: Option<FuncId>, // Start function index
+    pub exports: Vec<Export>,
+    pub elements: IdArena<ElementMarker, ElementSegment>, // Element section
+    pub data: IdArena<DataMarker, DataSegment>,
+    pub tags: IdArena<TagMarker, Tag>,
+    pub type_names: Vec<String>, // Names for types (debug)
+    pub annotations: AnnotationStore,
+    pub expressions: IdArena<ExpressionMarker, Expression>,
+    // Dummies for 13-tuple matching
+    pub imports: Vec<Import>,
+    pub strings: Vec<String>,
+    pub recgroups: Vec<()>,
+}
+
+impl Module {
+    pub fn new() -> Self {
         Self {
-            allocator,
             features: FeatureSet::DEFAULT,
             types: IdArena::new(),
             functions: IdArena::new(),
@@ -432,28 +452,63 @@ impl<'a> Module<'a> {
             exports: Vec::new(),
             elements: IdArena::new(),
             data: IdArena::new(),
+            tags: IdArena::new(),
             type_names: Vec::new(),
             annotations: AnnotationStore::new(),
+            expressions: IdArena::new(),
+            imports: Vec::new(),
+            strings: Vec::new(),
+            recgroups: Vec::new(),
         }
     }
 
-    pub fn allocator(&self) -> &'a bumpalo::Bump {
-        self.allocator
+    pub fn parts_mut(
+        &mut self,
+    ) -> (
+        &mut IdArena<ExpressionMarker, Expression>,
+        &mut IdArena<TypeMarker, FuncType>,
+        &mut IdArena<FuncMarker, Function>,
+        &mut IdArena<GlobalMarker, Global>,
+        &mut Vec<Export>,
+        &mut Vec<Import>,
+        &mut IdArena<TableMarker, Table>,
+        &mut IdArena<MemoryMarker, Memory>,
+        &mut IdArena<ElementMarker, ElementSegment>,
+        &mut IdArena<DataMarker, DataSegment>,
+        &mut IdArena<TagMarker, Tag>,
+        &mut Vec<String>,
+        &mut Vec<()>,
+    ) {
+        (
+            &mut self.expressions,
+            &mut self.types,
+            &mut self.functions,
+            &mut self.globals,
+            &mut self.exports,
+            &mut self.imports,
+            &mut self.tables,
+            &mut self.memories,
+            &mut self.elements,
+            &mut self.data,
+            &mut self.tags,
+            &mut self.strings,
+            &mut self.recgroups,
+        )
     }
 
-    pub fn add_function(&mut self, func: Function<'a>) -> FuncId {
+    pub fn add_function(&mut self, func: Function) -> FuncId {
         self.functions.alloc(func).cast()
     }
 
-    pub fn get_function(&self, id: FuncId) -> Option<&Function<'a>> {
+    pub fn get_function(&self, id: FuncId) -> Option<&Function> {
         self.functions.get(id.cast())
     }
 
-    pub fn get_function_mut(&mut self, id: FuncId) -> Option<&mut Function<'a>> {
+    pub fn get_function_mut(&mut self, id: FuncId) -> Option<&mut Function> {
         self.functions.get_mut(id.cast())
     }
 
-    pub fn get_function_by_name(&self, name: &str) -> Option<(FuncId, &Function<'a>)> {
+    pub fn get_function_by_name(&self, name: &str) -> Option<(FuncId, &Function)> {
         self.functions
             .iter()
             .find(|(_, f)| f.name == name)
@@ -552,15 +607,15 @@ impl<'a> Module<'a> {
         self.add_export(export_name, ExportKind::Function(id));
     }
 
-    pub fn add_global(&mut self, global: Global<'a>) -> GlobalId {
+    pub fn add_global(&mut self, global: Global) -> GlobalId {
         self.globals.alloc(global).cast()
     }
 
-    pub fn get_global(&self, id: GlobalId) -> Option<&Global<'a>> {
+    pub fn get_global(&self, id: GlobalId) -> Option<&Global> {
         self.globals.get(id.cast())
     }
 
-    pub fn get_global_by_name(&self, name: &str) -> Option<(GlobalId, &Global<'a>)> {
+    pub fn get_global_by_name(&self, name: &str) -> Option<(GlobalId, &Global)> {
         self.globals
             .iter()
             .find(|(_, g)| g.name == name)
@@ -571,7 +626,7 @@ impl<'a> Module<'a> {
         self.add_export(export_name, ExportKind::Global(id));
     }
 
-    pub fn add_data_segment(&mut self, segment: DataSegment<'a>) -> DataId {
+    pub fn add_data_segment(&mut self, segment: DataSegment) -> DataId {
         self.data.alloc(segment).cast()
     }
 
@@ -579,7 +634,7 @@ impl<'a> Module<'a> {
         self.start = Some(id);
     }
 
-    pub fn add_element_segment(&mut self, segment: ElementSegment<'a>) -> ElementId {
+    pub fn add_element_segment(&mut self, segment: ElementSegment) -> ElementId {
         self.elements.alloc(segment).cast()
     }
 
@@ -598,37 +653,37 @@ impl<'a> Module<'a> {
 
     pub fn set_annotation(
         &mut self,
-        expr: ExprRef<'a>,
-        annotation: crate::ir::annotation::Annotation<'a>,
+        expr: ExpressionId,
+        annotation: crate::ir::annotation::Annotation,
     ) {
         self.annotations.insert(expr, annotation);
     }
 
     pub fn get_annotations(
         &self,
-        expr: ExprRef<'a>,
-    ) -> Option<crate::ir::annotation::Annotations<'a>> {
+        expr: ExpressionId,
+    ) -> Option<crate::ir::annotation::Annotations> {
         self.annotations.get(expr)
     }
 
-    pub fn set_function_local_name(&mut self, _func_idx: usize, _local_idx: u32, _name: &'a str) {
+    pub fn set_function_local_name(&mut self, _func_idx: usize, _local_idx: u32, _name: &str) {
         // Implementation pending schema decision
     }
 
     /// Read a WebAssembly module from binary format.
-    pub fn read_binary(allocator: &'a bumpalo::Bump, binary: &[u8]) -> Result<Self, String> {
-        let mut reader = crate::wasm::binary_reader::BinaryReader::new(allocator, binary.to_vec());
+    pub fn read_binary(binary: &[u8]) -> Result<Self, String> {
+        let mut reader = crate::wasm::binary_reader::BinaryReader::new();
         reader
-            .parse_module()
+            .parse_module(binary)
             .map_err(|e| format!("Binary parsing error: {:?}", e))
     }
 
     /// Read a WebAssembly module from WAT format using the "binary bridge".
-    pub fn read_wat(allocator: &'a bumpalo::Bump, wat: &str) -> Result<Self, String> {
+    pub fn read_wat(wat: &str) -> Result<Self, String> {
         let binary = wat::parse_str(wat).map_err(|e| format!("WAT parsing error: {}", e))?;
-        let mut reader = crate::wasm::binary_reader::BinaryReader::new(allocator, binary);
+        let mut reader = crate::wasm::binary_reader::BinaryReader::new();
         reader
-            .parse_module()
+            .parse_module(&binary)
             .map_err(|e| format!("Binary parsing error: {:?}", e))
     }
 

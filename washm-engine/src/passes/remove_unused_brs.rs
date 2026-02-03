@@ -1,4 +1,5 @@
-use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::Module;
 use crate::ir::{Literal, Type};
 use crate::passes::Pass;
@@ -13,26 +14,25 @@ impl Pass for RemoveUnusedBrs {
     }
 
     fn run(&mut self, module: &mut Module) {
-        let mut optimizer = BrOptimizer {
-            _bump: module.allocator,
-        };
+        let mut optimizer = BrOptimizer;
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
 
-        for (_, func) in &mut module.functions {
-            if let Some(mut_body) = func.body_mut() {
-                optimizer.optimize(mut_body);
+        for (_, func) in functions {
+            if let Some(body) = func.body_mut() {
+                optimizer.optimize(body, arena);
             }
         }
     }
 }
 
-struct Flow<'a> {
-    unconditional_breaks: Vec<ExprRef<'a>>,
-    all_targets: HashSet<&'a str>,
-    returns: Vec<ExprRef<'a>>,
+struct Flow {
+    unconditional_breaks: Vec<ExpressionId>,
+    all_targets: HashSet<String>,
+    returns: Vec<ExpressionId>,
     falls_through: bool,
 }
 
-impl<'a> Flow<'a> {
+impl Flow {
     fn none() -> Self {
         Self {
             unconditional_breaks: Vec::new(),
@@ -51,28 +51,18 @@ impl<'a> Flow<'a> {
         }
     }
 
-    fn break_(expr: ExprRef<'a>, name: &'a str) -> Self {
+    fn break_(id: ExpressionId, name: String) -> Self {
         let mut all_targets = HashSet::new();
         all_targets.insert(name);
         Self {
-            unconditional_breaks: vec![expr],
+            unconditional_breaks: vec![id],
             all_targets,
             returns: Vec::new(),
             falls_through: false,
         }
     }
 
-    #[allow(dead_code)]
-    fn return_(expr: ExprRef<'a>) -> Self {
-        Self {
-            unconditional_breaks: Vec::new(),
-            all_targets: HashSet::new(),
-            returns: vec![expr],
-            falls_through: false,
-        }
-    }
-
-    fn merge(&mut self, other: Flow<'a>) {
+    fn merge(&mut self, other: Flow) {
         self.unconditional_breaks.extend(other.unconditional_breaks);
         for target in other.all_targets {
             self.all_targets.insert(target);
@@ -82,62 +72,62 @@ impl<'a> Flow<'a> {
     }
 }
 
-struct BrOptimizer<'a> {
-    _bump: &'a bumpalo::Bump,
-}
+struct BrOptimizer;
 
-impl<'a> BrOptimizer<'a> {
-    fn optimize(&mut self, expr: &mut ExprRef<'a>) -> Flow<'a> {
-        let e = *expr;
-        match &mut expr.kind {
-            ExpressionKind::Block { name, list } => {
+impl BrOptimizer {
+    fn optimize(
+        &mut self,
+        expr_id: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) -> Flow {
+        let original_id = *expr_id;
+        // Collect children first to avoid borrow checker issues with the match on kind
+        let kind = arena[original_id].kind.clone();
+
+        match kind {
+            ExpressionKind::Block { mut name, mut list } => {
                 let mut current_flow = Flow::fallthrough();
                 let mut i = 0;
                 while i < list.len() {
-                    let child_flow = self.optimize(&mut list[i]);
+                    let mut child_id = list[i];
+                    let child_flow = self.optimize(&mut child_id, arena);
+                    list[i] = child_id;
+
                     if !current_flow.falls_through {
-                        list.truncate(i);
+                        list.truncate(i + 1);
                         break;
                     }
                     current_flow = child_flow;
                     i += 1;
                 }
 
-                if !current_flow.falls_through && i < list.len() {
-                    list.truncate(i);
-                }
-
-                if let Some(block_name) = name {
+                if let Some(block_name) = name.clone() {
                     let mut still_targetted = false;
                     let mut j = 0;
                     while j < current_flow.unconditional_breaks.len() {
-                        let mut br = current_flow.unconditional_breaks[j];
+                        let br_id = current_flow.unconditional_breaks[j];
                         let is_target = if let ExpressionKind::Break {
-                            name: br_name,
+                            name: ref br_name,
                             condition,
                             ..
-                        } = &br.kind
+                        } = arena[br_id].kind
                         {
-                            *br_name == *block_name && condition.is_none()
+                            *br_name == block_name && condition.is_none()
                         } else {
                             false
                         };
 
                         if is_target {
-                            if let ExpressionKind::Break { value, .. } = &br.kind {
-                                if let Some(val) = value {
-                                    let val_ref = *val;
-                                    unsafe {
-                                        let val_ptr = val_ref.as_ptr();
-                                        let br_ptr = br.as_ptr();
-                                        std::ptr::swap(br_ptr, val_ptr);
-                                    }
-                                } else {
-                                    *br = Expression {
-                                        kind: ExpressionKind::Nop,
-                                        type_: Type::NONE,
-                                    };
-                                }
+                            if let ExpressionKind::Break {
+                                value: Some(val), ..
+                            } = arena[br_id].kind
+                            {
+                                // Instead of cloning the expression, we can just replace the break with the value
+                                arena[br_id].kind = arena[val].kind.clone();
+                                arena[br_id].type_ = arena[val].type_;
+                            } else {
+                                arena[br_id].kind = ExpressionKind::Nop;
+                                arena[br_id].type_ = Type::NONE;
                             }
                             current_flow.unconditional_breaks.remove(j);
                             current_flow.falls_through = true;
@@ -147,185 +137,226 @@ impl<'a> BrOptimizer<'a> {
                         }
                     }
 
-                    if !still_targetted && !current_flow.all_targets.contains(block_name) {
-                        *name = None;
+                    if !still_targetted && !current_flow.all_targets.contains(&block_name) {
+                        name = None;
                     } else {
-                        current_flow.all_targets.remove(block_name);
+                        current_flow.all_targets.remove(&block_name);
                     }
                 }
 
+                // Update the block in the arena
+                arena[*expr_id].kind = ExpressionKind::Block { name, list };
+
                 current_flow
             }
-            ExpressionKind::Loop { name, body } => {
-                let mut flow = self.optimize(body);
+            ExpressionKind::Loop { mut name, mut body } => {
+                let loop_name = name.clone();
+                let mut flow = self.optimize(&mut body, arena);
 
-                if let Some(loop_name) = name {
-                    flow.unconditional_breaks.retain(|br| {
-                        if let ExpressionKind::Break { name: br_name, .. } = &br.kind {
-                            return *br_name != *loop_name;
+                if let Some(loop_name_str) = loop_name {
+                    flow.unconditional_breaks.retain(|&br_id| {
+                        if let ExpressionKind::Break {
+                            name: ref br_name, ..
+                        } = arena[br_id].kind
+                        {
+                            return *br_name != loop_name_str;
                         }
                         true
                     });
 
-                    if !flow.all_targets.contains(loop_name) {
-                        *name = None;
+                    if !flow.all_targets.contains(&loop_name_str) {
+                        name = None;
                     } else {
-                        flow.all_targets.remove(loop_name);
+                        flow.all_targets.remove(&loop_name_str);
                     }
                 }
+
+                arena[*expr_id].kind = ExpressionKind::Loop { name, body };
                 flow
             }
             ExpressionKind::If {
-                condition,
-                if_true,
-                if_false,
+                name,
+                mut condition,
+                mut if_true,
+                mut if_false,
             } => {
-                let _ = self.optimize(condition);
+                let _ = self.optimize(&mut condition, arena);
 
-                if let ExpressionKind::Const(lit) = &condition.kind {
+                if let ExpressionKind::Const(lit) = arena[condition].kind {
                     let is_true = match lit {
-                        Literal::I32(v) => *v != 0,
-                        Literal::I64(v) => *v != 0,
+                        Literal::I32(v) => v != 0,
+                        Literal::I64(v) => v != 0,
                         _ => false,
                     };
                     if is_true {
-                        let flow = self.optimize(if_true);
-                        let true_ref = *if_true;
-                        unsafe {
-                            std::ptr::swap(expr.as_ptr(), true_ref.as_ptr());
-                        }
+                        let flow = self.optimize(&mut if_true, arena);
+                        *expr_id = if_true;
                         return flow;
-                    } else if let Some(f_expr) = if_false {
-                        let flow = self.optimize(f_expr);
-                        let false_ref = *f_expr;
-                        unsafe {
-                            std::ptr::swap(expr.as_ptr(), false_ref.as_ptr());
-                        }
+                    } else if let Some(mut fid) = if_false {
+                        let flow = self.optimize(&mut fid, arena);
+                        *expr_id = fid;
                         return flow;
                     } else {
-                        **expr = Expression {
-                            kind: ExpressionKind::Nop,
-                            type_: Type::NONE,
-                        };
+                        arena[*expr_id].kind = ExpressionKind::Nop;
+                        arena[*expr_id].type_ = Type::NONE;
                         return Flow::fallthrough();
                     }
                 }
 
-                let mut flow = self.optimize(if_true);
-                if let Some(f_expr) = if_false {
-                    let false_flow = self.optimize(f_expr);
+                let mut flow = self.optimize(&mut if_true, arena);
+                if let Some(mut fid) = if_false {
+                    let false_flow = self.optimize(&mut fid, arena);
                     flow.merge(false_flow);
+                    if_false = Some(fid);
                 } else {
                     flow.falls_through = true;
                 }
+
+                arena[*expr_id].kind = ExpressionKind::If {
+                    name,
+                    condition,
+                    if_true,
+                    if_false,
+                };
                 flow
             }
             ExpressionKind::Break {
                 name,
-                condition,
-                value,
+                mut condition,
+                mut value,
             } => {
-                let br_name = *name;
-                if let Some(cond) = condition {
-                    let _ = self.optimize(cond);
-                    if let ExpressionKind::Const(lit) = &cond.kind {
+                if let Some(mut cond) = condition {
+                    let _ = self.optimize(&mut cond, arena);
+                    if let ExpressionKind::Const(lit) = arena[cond].kind {
                         let is_true = match lit {
-                            Literal::I32(v) => *v != 0,
-                            Literal::I64(v) => *v != 0,
+                            Literal::I32(v) => v != 0,
+                            Literal::I64(v) => v != 0,
                             _ => false,
                         };
                         if is_true {
-                            *condition = None;
-                        } else if let Some(val) = value {
-                            let val_ref = *val;
-                            unsafe {
-                                std::ptr::swap(expr.as_ptr(), val_ref.as_ptr());
-                            }
-                            return self.optimize(expr);
+                            condition = None;
+                        } else if let Some(mut val) = value {
+                            let flow = self.optimize(&mut val, arena);
+                            *expr_id = val;
+                            return flow;
                         } else {
-                            **expr = Expression {
-                                kind: ExpressionKind::Nop,
-                                type_: Type::NONE,
-                            };
+                            arena[*expr_id].kind = ExpressionKind::Nop;
+                            arena[*expr_id].type_ = Type::NONE;
                             return Flow::fallthrough();
                         }
+                    } else {
+                        condition = Some(cond);
                     }
                 }
 
-                if let Some(val) = value {
-                    self.optimize(val);
+                if let Some(mut val) = value {
+                    self.optimize(&mut val, arena);
+                    value = Some(val);
                 }
 
+                arena[*expr_id].kind = ExpressionKind::Break {
+                    name: name.clone(),
+                    condition,
+                    value,
+                };
+
                 if condition.is_none() {
-                    Flow::break_(e, br_name)
+                    Flow::break_(*expr_id, name)
                 } else {
                     let mut flow = Flow::fallthrough();
-                    flow.all_targets.insert(br_name);
+                    flow.all_targets.insert(name);
                     flow
                 }
             }
             ExpressionKind::Switch {
                 names,
                 default,
-                condition,
-                value,
+                mut condition,
+                mut value,
             } => {
-                self.optimize(condition);
-                if let Some(val) = value {
-                    self.optimize(val);
+                self.optimize(&mut condition, arena);
+                if let Some(mut val) = value {
+                    self.optimize(&mut val, arena);
+                    value = Some(val);
                 }
 
-                if let ExpressionKind::Const(Literal::I32(idx)) = &condition.kind {
-                    let idx_usize = *idx as usize;
+                if let ExpressionKind::Const(Literal::I32(idx)) = arena[condition].kind {
+                    let idx_usize = idx as usize;
                     let target = if idx_usize < names.len() {
-                        names[idx_usize]
+                        names[idx_usize].clone()
                     } else {
-                        default
+                        default.clone()
                     };
-                    expr.kind = ExpressionKind::Break {
+                    arena[*expr_id].kind = ExpressionKind::Break {
                         name: target,
                         condition: None,
-                        value: *value,
+                        value,
                     };
-                    return self.optimize(expr);
+                    // re-optimize as a break
+                    return self.optimize(expr_id, arena);
                 }
 
                 let mut flow = Flow::none();
-                for &n in names.iter() {
-                    flow.all_targets.insert(n);
+                for n in names.iter() {
+                    flow.all_targets.insert(n.clone());
                 }
-                flow.all_targets.insert(default);
+                flow.all_targets.insert(default.clone());
+
+                arena[*expr_id].kind = ExpressionKind::Switch {
+                    names,
+                    default,
+                    condition,
+                    value,
+                };
                 flow
             }
-            _ => self.visit_children_flow(expr),
+            _ => self.visit_children_flow(expr_id, arena),
         }
     }
 
-    fn visit_children_flow(&mut self, expr: &mut ExprRef<'a>) -> Flow<'a> {
+    fn visit_children_flow(
+        &mut self,
+        expr_id: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) -> Flow {
         let mut current_flow = Flow::fallthrough();
-        match &mut expr.kind {
-            ExpressionKind::Unary { value, .. }
-            | ExpressionKind::Drop { value }
-            | ExpressionKind::LocalSet { value, .. }
-            | ExpressionKind::LocalTee { value, .. }
-            | ExpressionKind::GlobalSet { value, .. }
-            | ExpressionKind::Load { ptr: value, .. }
-            | ExpressionKind::MemoryGrow { delta: value, .. } => {
-                current_flow = self.optimize(value);
+        let mut kind = arena[*expr_id].kind.clone();
+
+        match kind {
+            ExpressionKind::Unary { ref mut value, .. }
+            | ExpressionKind::Drop { ref mut value }
+            | ExpressionKind::LocalSet { ref mut value, .. }
+            | ExpressionKind::LocalTee { ref mut value, .. }
+            | ExpressionKind::GlobalSet { ref mut value, .. }
+            | ExpressionKind::Load {
+                ptr: ref mut value, ..
             }
-            ExpressionKind::Binary { left, right, .. }
-            | ExpressionKind::Store {
-                ptr: left,
-                value: right,
+            | ExpressionKind::MemoryGrow {
+                delta: ref mut value,
                 ..
             } => {
-                current_flow = self.optimize(left);
+                current_flow = self.optimize(value, arena);
+            }
+            ExpressionKind::Binary {
+                ref mut left,
+                ref mut right,
+                ..
+            }
+            | ExpressionKind::Store {
+                ptr: ref mut left,
+                value: ref mut right,
+                ..
+            } => {
+                current_flow = self.optimize(left, arena);
                 if current_flow.falls_through {
-                    current_flow = self.optimize(right);
+                    let right_flow = self.optimize(right, arena);
+                    current_flow.merge(right_flow);
                 }
             }
             _ => {}
         }
+
+        arena[*expr_id].kind = kind;
         current_flow
     }
 }
@@ -333,49 +364,33 @@ impl<'a> BrOptimizer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
+    use crate::ir::expression::IrBuilder;
     use crate::ir::module::Function;
     use crate::ir::Type;
-    use bumpalo::collections::Vec as BumpVec;
-    use bumpalo::Bump;
 
     #[test]
     fn test_remove_unused_br_void() {
-        let bump = Bump::new();
-        let br_expr = bump.alloc(Expression {
-            kind: ExpressionKind::Break {
-                name: "L",
-                condition: None,
-                value: None,
-            },
-            type_: Type::UNREACHABLE,
-        });
-        let br = ExprRef::new(br_expr);
-        let mut list = BumpVec::new_in(&bump);
-        list.push(br);
-        let block_expr = bump.alloc(Expression {
-            kind: ExpressionKind::Block {
-                name: Some("L"),
-                list,
-            },
-            type_: Type::NONE,
-        });
-        let block = ExprRef::new(block_expr);
-        let func = Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(block),
-        );
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let br = builder.break_("L".to_string(), None, None, Type::NONE);
+            builder.block(Some("L".to_string()), vec![br], Type::NONE)
+        };
+
+        let func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], body);
         module.add_function(func);
+
         let mut pass = RemoveUnusedBrs;
         pass.run(&mut module);
-        let binding = module.functions[module.functions.iter().next().unwrap().0].body();
-        let body = binding.as_ref().unwrap();
-        if let ExpressionKind::Block { list, .. } = &body.kind {
-            assert!(matches!(list[0].kind, ExpressionKind::Nop));
+
+        let func_id = module.functions.iter().next().unwrap().0;
+        let body_id = module.functions[func_id].body().unwrap();
+
+        if let ExpressionKind::Block { list, .. } = &module.expressions[body_id].kind {
+            assert!(matches!(
+                module.expressions[list[0]].kind,
+                ExpressionKind::Nop
+            ));
         } else {
             panic!();
         }

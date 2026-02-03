@@ -9,7 +9,7 @@ impl Pass for Print {
         "Print"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         match module.to_wat() {
             Ok(wat) => println!("{}", wat),
             Err(e) => eprintln!("Error printing module: {}", e),

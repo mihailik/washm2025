@@ -1,19 +1,20 @@
 use crate::analysis::dataflow::liveness::{ActionKind, InterferenceGraph, LivenessAction};
-use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::LocalId;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
-pub struct BasicBlock<'a> {
+pub struct BasicBlock {
     pub index: usize,
     pub preds: Vec<usize>,
     pub succs: Vec<usize>,
-    pub actions: Vec<LivenessAction<'a>>,
+    pub actions: Vec<LivenessAction>,
     pub live_in: HashSet<LocalId>,
     pub live_out: HashSet<LocalId>,
 }
 
-impl<'a> BasicBlock<'a> {
+impl BasicBlock {
     pub fn new(index: usize) -> Self {
         Self {
             index,
@@ -26,18 +27,18 @@ impl<'a> BasicBlock<'a> {
     }
 }
 
-pub struct ControlFlowGraph<'a> {
-    pub blocks: Vec<BasicBlock<'a>>,
+pub struct ControlFlowGraph {
+    pub blocks: Vec<BasicBlock>,
     pub entry: usize,
 }
 
-impl<'a> Default for ControlFlowGraph<'a> {
+impl Default for ControlFlowGraph {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'a> ControlFlowGraph<'a> {
+impl ControlFlowGraph {
     pub fn new() -> Self {
         Self {
             blocks: Vec::new(),
@@ -183,20 +184,14 @@ struct Scope {
 }
 
 pub struct CFGBuilder<'a> {
-    cfg: ControlFlowGraph<'a>,
+    cfg: ControlFlowGraph,
     current_block: usize,
     scope_stack: Vec<Scope>,
-    _marker: std::marker::PhantomData<&'a mut Expression<'a>>,
-}
-
-impl<'a> Default for CFGBuilder<'a> {
-    fn default() -> Self {
-        Self::new()
-    }
+    arena: &'a IdArena<ExpressionMarker, Expression>,
 }
 
 impl<'a> CFGBuilder<'a> {
-    pub fn new() -> Self {
+    pub fn new(arena: &'a IdArena<ExpressionMarker, Expression>) -> Self {
         let mut cfg = ControlFlowGraph::new();
         let entry = cfg.add_block();
         cfg.entry = entry;
@@ -204,30 +199,20 @@ impl<'a> CFGBuilder<'a> {
             cfg,
             current_block: entry,
             scope_stack: Vec::new(),
-            _marker: std::marker::PhantomData,
+            arena,
         }
     }
 
-    pub fn build(mut self, root: &mut Expression<'a>) -> ControlFlowGraph<'a> {
+    pub fn build(mut self, root: ExpressionId) -> ControlFlowGraph {
         self.visit(root);
         self.cfg
     }
 
-    fn make_ref(expr: &mut Expression<'a>) -> ExprRef<'a> {
-        unsafe {
-            let ptr: *mut Expression<'a> = expr as *mut _;
-            let unbounded: &'a mut Expression<'a> = &mut *ptr;
-            ExprRef::new(unbounded)
-        }
-    }
-
-    fn visit(&mut self, expr: &mut Expression<'a>) {
-        let expr_ptr = Self::make_ref(expr);
-
-        match &mut expr.kind {
+    fn visit(&mut self, expr_id: ExpressionId) {
+        match &self.arena[expr_id].kind {
             ExpressionKind::Block { name, list } => {
                 let end_block = self.cfg.add_block();
-                let label = name.map(|s| s.to_string());
+                let label = name.clone();
 
                 self.scope_stack.push(Scope {
                     label,
@@ -236,7 +221,7 @@ impl<'a> CFGBuilder<'a> {
                 });
 
                 for child in list {
-                    self.visit(child);
+                    self.visit(*child);
                 }
 
                 self.scope_stack.pop();
@@ -246,7 +231,7 @@ impl<'a> CFGBuilder<'a> {
             ExpressionKind::Loop { name, body } => {
                 let loop_head = self.cfg.add_block();
                 let loop_exit = self.cfg.add_block();
-                let label = name.map(|s| s.to_string());
+                let label = name.clone();
 
                 self.cfg.add_edge(self.current_block, loop_head);
                 self.current_block = loop_head;
@@ -257,7 +242,7 @@ impl<'a> CFGBuilder<'a> {
                     continue_target: Some(loop_head),
                 });
 
-                self.visit(body);
+                self.visit(*body);
 
                 self.scope_stack.pop();
 
@@ -265,11 +250,12 @@ impl<'a> CFGBuilder<'a> {
                 self.current_block = loop_exit;
             }
             ExpressionKind::If {
+                name: _,
                 condition,
                 if_true,
                 if_false,
             } => {
-                self.visit(condition);
+                self.visit(*condition);
 
                 let condition_block = self.current_block;
                 let true_block = self.cfg.add_block();
@@ -284,12 +270,12 @@ impl<'a> CFGBuilder<'a> {
                 self.cfg.add_edge(condition_block, false_block);
 
                 self.current_block = true_block;
-                self.visit(if_true);
+                self.visit(*if_true);
                 self.cfg.add_edge(self.current_block, merge_block);
 
                 if let Some(false_expr) = if_false {
                     self.current_block = false_block;
-                    self.visit(false_expr);
+                    self.visit(*false_expr);
                     self.cfg.add_edge(self.current_block, merge_block);
                 }
 
@@ -301,15 +287,15 @@ impl<'a> CFGBuilder<'a> {
                 value,
             } => {
                 if let Some(v) = value {
-                    self.visit(v);
+                    self.visit(*v);
                 }
                 if let Some(c) = condition {
-                    self.visit(c);
-                    if let Some(target) = self.find_break_target(Some(*name)) {
+                    self.visit(*c);
+                    if let Some(target) = self.find_break_target(Some(name)) {
                         self.cfg.add_edge(self.current_block, target);
                     }
                 } else {
-                    if let Some(target) = self.find_break_target(Some(*name)) {
+                    if let Some(target) = self.find_break_target(Some(name)) {
                         self.cfg.add_edge(self.current_block, target);
                     }
                     let dead = self.cfg.add_block();
@@ -319,33 +305,35 @@ impl<'a> CFGBuilder<'a> {
             ExpressionKind::LocalGet { id } => {
                 self.cfg.blocks[self.current_block]
                     .actions
-                    .push(LivenessAction::get(*id, expr_ptr));
+                    .push(LivenessAction::get(*id, expr_id));
             }
             ExpressionKind::LocalSet { id, value } => {
-                let copy_from = if let ExpressionKind::LocalGet { id: src_id } = &value.kind {
-                    Some(*src_id)
-                } else {
-                    None
-                };
-                self.visit(value);
+                let copy_from =
+                    if let ExpressionKind::LocalGet { id: src_id } = &self.arena[*value].kind {
+                        Some(*src_id)
+                    } else {
+                        None
+                    };
+                self.visit(*value);
                 self.cfg.blocks[self.current_block]
                     .actions
-                    .push(LivenessAction::set(*id, expr_ptr, copy_from));
+                    .push(LivenessAction::set(*id, expr_id, copy_from));
             }
             ExpressionKind::LocalTee { id, value } => {
-                let copy_from = if let ExpressionKind::LocalGet { id: src_id } = &value.kind {
-                    Some(*src_id)
-                } else {
-                    None
-                };
-                self.visit(value);
+                let copy_from =
+                    if let ExpressionKind::LocalGet { id: src_id } = &self.arena[*value].kind {
+                        Some(*src_id)
+                    } else {
+                        None
+                    };
+                self.visit(*value);
                 self.cfg.blocks[self.current_block]
                     .actions
-                    .push(LivenessAction::set(*id, expr_ptr, copy_from));
+                    .push(LivenessAction::set(*id, expr_id, copy_from));
             }
             ExpressionKind::Return { value } => {
                 if let Some(v) = value {
-                    self.visit(v);
+                    self.visit(*v);
                 }
                 let dead = self.cfg.add_block();
                 self.current_block = dead;
@@ -353,14 +341,14 @@ impl<'a> CFGBuilder<'a> {
             ExpressionKind::Call { operands, .. }
             | ExpressionKind::CallIndirect { operands, .. } => {
                 for op in operands {
-                    self.visit(op);
+                    self.visit(*op);
                 }
             }
-            ExpressionKind::Drop { value } => self.visit(value),
-            ExpressionKind::Unary { value, .. } => self.visit(value),
+            ExpressionKind::Drop { value } => self.visit(*value),
+            ExpressionKind::Unary { value, .. } => self.visit(*value),
             ExpressionKind::Binary { left, right, .. } => {
-                self.visit(left);
-                self.visit(right);
+                self.visit(*left);
+                self.visit(*right);
             }
             ExpressionKind::Const(_) | ExpressionKind::Nop | ExpressionKind::Unreachable => {}
             _ => {}

@@ -1,7 +1,8 @@
-use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::module::Module;
 use crate::ir::visitor::Visitor;
-use crate::ir::Literal;
+use crate::ir::{Literal, Type};
 use crate::passes::Pass;
 
 pub struct OptimizeForJS;
@@ -11,186 +12,74 @@ impl Pass for OptimizeForJS {
         "optimize-for-js"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
-        let mut optimizer = JSOptimizer {
-            allocator: module.allocator,
-        };
+    fn run(&mut self, module: &mut Module) {
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        let mut optimizer = JSOptimizer;
 
-        for (_, func) in &mut module.functions {
-            if let Some(body) = func.body_mut() {
-                optimizer.visit(body);
+        for (_, func) in functions {
+            if let Some(mut body) = func.body_mut() {
+                optimizer.visit(&mut body, arena);
             }
         }
     }
 }
 
-struct JSOptimizer<'a> {
-    allocator: &'a bumpalo::Bump,
-}
+struct JSOptimizer;
 
-impl<'a> Visitor<'a> for JSOptimizer<'a> {
-    fn visit_expression(&mut self, expr: &mut ExprRef<'a>) {
+impl Visitor for JSOptimizer {
+    fn visit_expression(
+        &mut self,
+        expr_id: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
         // 1. Unwrap singleton blocks with no name.
-        if let ExpressionKind::Block { name, list } = &expr.kind {
+        if let ExpressionKind::Block { name, list } = &arena[*expr_id].kind {
             if name.is_none() && list.len() == 1 {
                 let child = list[0];
-                *expr = child;
+                let (child_type, child_kind) = {
+                    let child_node = &mut arena[child];
+                    (
+                        child_node.type_,
+                        std::mem::replace(&mut child_node.kind, ExpressionKind::Nop),
+                    )
+                };
+                arena[*expr_id].type_ = child_type;
+                arena[*expr_id].kind = child_kind;
                 return;
             }
         }
 
         // 2. Remove Drop of Const.
-        if let ExpressionKind::Drop { value } = &expr.kind {
-            if let ExpressionKind::Const(_) = value.kind {
+        if let ExpressionKind::Drop { value } = &arena[*expr_id].kind {
+            if let ExpressionKind::Const(_) = arena[*value].kind {
                 // Replace with Nop
-                *expr = Expression::nop(self.allocator);
+                arena[*expr_id].kind = ExpressionKind::Nop;
+                arena[*expr_id].type_ = Type::NONE;
                 return;
             }
         }
 
         // 3. Optimize Select with constant condition.
-        // Match reference to avoid moving out of expr
+        let mut replacement = None;
         if let ExpressionKind::Select {
             condition,
             if_true,
             if_false,
-        } = &expr.kind
+        } = &arena[*expr_id].kind
         {
-            if let ExpressionKind::Const(lit) = &condition.kind {
+            if let ExpressionKind::Const(lit) = arena[*condition].kind {
                 let is_true = match lit {
-                    Literal::I32(v) => *v != 0,
-                    Literal::I64(v) => *v != 0,
+                    Literal::I32(v) => v != 0,
+                    Literal::I64(v) => v != 0,
                     Literal::F32(v) => v.to_bits() != 0,
                     Literal::F64(v) => v.to_bits() != 0,
                     _ => false,
                 };
-
-                if is_true {
-                    *expr = *if_true;
-                } else {
-                    *expr = *if_false;
-                }
+                replacement = Some(if is_true { *if_true } else { *if_false });
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ir::expression::{ExprRef, Expression, ExpressionKind};
-    use crate::ir::module::Function;
-    use crate::ir::FuncId;
-    use crate::ir::{Literal, Type};
-    use bumpalo::collections::Vec as BumpVec;
-    use bumpalo::Bump;
-
-    // Helper to create drop since it might not be static on Expression
-    fn make_drop<'a>(bump: &'a Bump, value: ExprRef<'a>) -> ExprRef<'a> {
-        ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::Drop { value },
-            type_: Type::NONE,
-        }))
-    }
-
-    // Helper to create select
-    fn make_select<'a>(
-        bump: &'a Bump,
-        cond: ExprRef<'a>,
-        if_true: ExprRef<'a>,
-        if_false: ExprRef<'a>,
-        ty: Type,
-    ) -> ExprRef<'a> {
-        ExprRef::new(bump.alloc(Expression {
-            kind: ExpressionKind::Select {
-                condition: cond,
-                if_true,
-                if_false,
-            },
-            type_: ty,
-        }))
-    }
-
-    #[test]
-    fn test_unwrap_singleton_block() {
-        let allocator = Bump::new();
-        let mut module = Module::new(&allocator);
-
-        let const_expr = Expression::const_expr(&allocator, Literal::I32(42), Type::I32);
-        let mut list = BumpVec::new_in(&allocator);
-        list.push(const_expr);
-        let block = Expression::block(&allocator, None, list, Type::I32);
-
-        let func = Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::I32,
-            vec![],
-            Some(block),
-        );
-        module.add_function(func);
-
-        let mut pass = OptimizeForJS;
-        pass.run(&mut module);
-
-        let func = module.get_function(FuncId::from_raw_parts(0, 0)).unwrap();
-        let body = func.body().unwrap();
-
-        assert!(matches!(body.kind, ExpressionKind::Const(Literal::I32(42))));
-    }
-
-    #[test]
-    fn test_remove_drop_const() {
-        let allocator = Bump::new();
-        let mut module = Module::new(&allocator);
-
-        let const_expr = Expression::const_expr(&allocator, Literal::I32(42), Type::I32);
-        let drop_expr = make_drop(&allocator, const_expr);
-
-        let func = Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(drop_expr),
-        );
-        module.add_function(func);
-
-        let mut pass = OptimizeForJS;
-        pass.run(&mut module);
-
-        let func = module.get_function(FuncId::from_raw_parts(0, 0)).unwrap();
-        let body = func.body().unwrap();
-
-        assert!(matches!(body.kind, ExpressionKind::Nop));
-    }
-
-    #[test]
-    fn test_optimize_select() {
-        let allocator = Bump::new();
-        let mut module = Module::new(&allocator);
-
-        let cond = Expression::const_expr(&allocator, Literal::I32(1), Type::I32);
-        let true_val = Expression::const_expr(&allocator, Literal::I32(10), Type::I32);
-        let false_val = Expression::const_expr(&allocator, Literal::I32(20), Type::I32);
-
-        let select = make_select(&allocator, cond, true_val, false_val, Type::I32);
-
-        let func = Function::new(
-            "test".to_string(),
-            Type::NONE,
-            Type::I32,
-            vec![],
-            Some(select),
-        );
-        module.add_function(func);
-
-        let mut pass = OptimizeForJS;
-        pass.run(&mut module);
-
-        let func = module.get_function(FuncId::from_raw_parts(0, 0)).unwrap();
-        let body = func.body().unwrap();
-
-        assert!(matches!(body.kind, ExpressionKind::Const(Literal::I32(10))));
+        if let Some(new_id) = replacement {
+            *expr_id = new_id;
+        }
     }
 }

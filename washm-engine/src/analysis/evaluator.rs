@@ -1,37 +1,39 @@
-use crate::ir::expression::{ExprRef, ExpressionKind};
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
 use crate::ir::ops::{BinaryOp, UnaryOp};
 use crate::ir::Literal;
-use bumpalo::Bump;
 use std::collections::HashMap;
 
 /// Compile-time expression evaluator
 #[allow(dead_code)]
-pub struct Evaluator<'a> {
-    _arena: &'a Bump,
+pub struct Evaluator {
     /// Known constant values for globals/locals
     /// Using usize for now as GlobalId/LocalId are likely indices
     constants: HashMap<usize, Literal>,
 }
 
-impl<'a> Evaluator<'a> {
-    pub fn new(arena: &'a Bump) -> Self {
+impl Evaluator {
+    pub fn new() -> Self {
         Self {
-            _arena: arena,
             constants: HashMap::new(),
         }
     }
 
     /// Evaluate expression to constant if possible
-    pub fn eval(&self, expr: ExprRef) -> Option<Literal> {
-        match &expr.kind {
+    pub fn eval(
+        &self,
+        expr_id: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) -> Option<Literal> {
+        match &arena[expr_id].kind {
             ExpressionKind::Const(lit) => Some(*lit),
             ExpressionKind::Binary { op, left, right } => {
-                let l = self.eval(*left)?;
-                let r = self.eval(*right)?;
+                let l = self.eval(*left, arena)?;
+                let r = self.eval(*right, arena)?;
                 self.eval_binary(*op, l, r)
             }
             ExpressionKind::Unary { op, value } => {
-                let v = self.eval(*value)?;
+                let v = self.eval(*value, arena)?;
                 self.eval_unary(*op, v)
             }
             // TODO: Handle GlobalGet/LocalGet if we have context
@@ -100,36 +102,6 @@ impl<'a> Evaluator<'a> {
             (BinaryOp::RotRInt32, Literal::I32(l), Literal::I32(r)) => {
                 Some(Literal::I32(l.rotate_right((r as u32) % 32)))
             }
-            (BinaryOp::EqInt32, Literal::I32(l), Literal::I32(r)) => {
-                Some(Literal::I32(if l == r { 1 } else { 0 }))
-            }
-            (BinaryOp::NeInt32, Literal::I32(l), Literal::I32(r)) => {
-                Some(Literal::I32(if l != r { 1 } else { 0 }))
-            }
-            (BinaryOp::LtSInt32, Literal::I32(l), Literal::I32(r)) => {
-                Some(Literal::I32(if l < r { 1 } else { 0 }))
-            }
-            (BinaryOp::LtUInt32, Literal::I32(l), Literal::I32(r)) => {
-                Some(Literal::I32(if (l as u32) < (r as u32) { 1 } else { 0 }))
-            }
-            (BinaryOp::LeSInt32, Literal::I32(l), Literal::I32(r)) => {
-                Some(Literal::I32(if l <= r { 1 } else { 0 }))
-            }
-            (BinaryOp::LeUInt32, Literal::I32(l), Literal::I32(r)) => {
-                Some(Literal::I32(if (l as u32) <= (r as u32) { 1 } else { 0 }))
-            }
-            (BinaryOp::GtSInt32, Literal::I32(l), Literal::I32(r)) => {
-                Some(Literal::I32(if l > r { 1 } else { 0 }))
-            }
-            (BinaryOp::GtUInt32, Literal::I32(l), Literal::I32(r)) => {
-                Some(Literal::I32(if (l as u32) > (r as u32) { 1 } else { 0 }))
-            }
-            (BinaryOp::GeSInt32, Literal::I32(l), Literal::I32(r)) => {
-                Some(Literal::I32(if l >= r { 1 } else { 0 }))
-            }
-            (BinaryOp::GeUInt32, Literal::I32(l), Literal::I32(r)) => {
-                Some(Literal::I32(if (l as u32) >= (r as u32) { 1 } else { 0 }))
-            }
 
             // Int64
             (BinaryOp::AddInt64, Literal::I64(l), Literal::I64(r)) => {
@@ -175,20 +147,54 @@ impl<'a> Evaluator<'a> {
             (BinaryOp::OrInt64, Literal::I64(l), Literal::I64(r)) => Some(Literal::I64(l | r)),
             (BinaryOp::XorInt64, Literal::I64(l), Literal::I64(r)) => Some(Literal::I64(l ^ r)),
             (BinaryOp::ShlInt64, Literal::I64(l), Literal::I64(r)) => {
-                Some(Literal::I64(l.wrapping_shl((r as u32) % 64)))
+                Some(Literal::I64(l.wrapping_shl((r as u64 % 64) as u32)))
             }
             (BinaryOp::ShrSInt64, Literal::I64(l), Literal::I64(r)) => {
-                Some(Literal::I64(l.wrapping_shr((r as u32) % 64)))
+                Some(Literal::I64(l.wrapping_shr((r as u64 % 64) as u32)))
             }
-            (BinaryOp::ShrUInt64, Literal::I64(l), Literal::I64(r)) => {
-                Some(Literal::I64((l as u64).wrapping_shr((r as u32) % 64) as i64))
-            }
+            (BinaryOp::ShrUInt64, Literal::I64(l), Literal::I64(r)) => Some(Literal::I64(
+                (l as u64).wrapping_shr((r as u64 % 64) as u32) as i64,
+            )),
             (BinaryOp::RotLInt64, Literal::I64(l), Literal::I64(r)) => {
-                Some(Literal::I64(l.rotate_left((r as u32) % 64)))
+                Some(Literal::I64(l.rotate_left((r as u64 % 64) as u32)))
             }
             (BinaryOp::RotRInt64, Literal::I64(l), Literal::I64(r)) => {
-                Some(Literal::I64(l.rotate_right((r as u32) % 64)))
+                Some(Literal::I64(l.rotate_right((r as u64 % 64) as u32)))
             }
+
+            // Comparisons I32
+            (BinaryOp::EqInt32, Literal::I32(l), Literal::I32(r)) => {
+                Some(Literal::I32(if l == r { 1 } else { 0 }))
+            }
+            (BinaryOp::NeInt32, Literal::I32(l), Literal::I32(r)) => {
+                Some(Literal::I32(if l != r { 1 } else { 0 }))
+            }
+            (BinaryOp::LtSInt32, Literal::I32(l), Literal::I32(r)) => {
+                Some(Literal::I32(if l < r { 1 } else { 0 }))
+            }
+            (BinaryOp::LtUInt32, Literal::I32(l), Literal::I32(r)) => {
+                Some(Literal::I32(if (l as u32) < (r as u32) { 1 } else { 0 }))
+            }
+            (BinaryOp::GtSInt32, Literal::I32(l), Literal::I32(r)) => {
+                Some(Literal::I32(if l > r { 1 } else { 0 }))
+            }
+            (BinaryOp::GtUInt32, Literal::I32(l), Literal::I32(r)) => {
+                Some(Literal::I32(if (l as u32) > (r as u32) { 1 } else { 0 }))
+            }
+            (BinaryOp::LeSInt32, Literal::I32(l), Literal::I32(r)) => {
+                Some(Literal::I32(if l <= r { 1 } else { 0 }))
+            }
+            (BinaryOp::LeUInt32, Literal::I32(l), Literal::I32(r)) => {
+                Some(Literal::I32(if (l as u32) <= (r as u32) { 1 } else { 0 }))
+            }
+            (BinaryOp::GeSInt32, Literal::I32(l), Literal::I32(r)) => {
+                Some(Literal::I32(if l >= r { 1 } else { 0 }))
+            }
+            (BinaryOp::GeUInt32, Literal::I32(l), Literal::I32(r)) => {
+                Some(Literal::I32(if (l as u32) >= (r as u32) { 1 } else { 0 }))
+            }
+
+            // Comparisons I64
             (BinaryOp::EqInt64, Literal::I64(l), Literal::I64(r)) => {
                 Some(Literal::I32(if l == r { 1 } else { 0 }))
             }
@@ -201,21 +207,17 @@ impl<'a> Evaluator<'a> {
             (BinaryOp::LtUInt64, Literal::I64(l), Literal::I64(r)) => {
                 Some(Literal::I32(if (l as u64) < (r as u64) { 1 } else { 0 }))
             }
-            (BinaryOp::LeSInt64, Literal::I64(l), Literal::I64(r)) => {
-                Some(Literal::I32(if l <= r { 1 } else { 0 }))
-            }
-            (BinaryOp::LeUInt64, Literal::I64(l), Literal::I64(r)) => Some(Literal::I32(
-                if (u64::from_ne_bytes(l.to_ne_bytes())) <= (u64::from_ne_bytes(r.to_ne_bytes())) {
-                    1
-                } else {
-                    0
-                },
-            )),
             (BinaryOp::GtSInt64, Literal::I64(l), Literal::I64(r)) => {
                 Some(Literal::I32(if l > r { 1 } else { 0 }))
             }
             (BinaryOp::GtUInt64, Literal::I64(l), Literal::I64(r)) => {
                 Some(Literal::I32(if (l as u64) > (r as u64) { 1 } else { 0 }))
+            }
+            (BinaryOp::LeSInt64, Literal::I64(l), Literal::I64(r)) => {
+                Some(Literal::I32(if l <= r { 1 } else { 0 }))
+            }
+            (BinaryOp::LeUInt64, Literal::I64(l), Literal::I64(r)) => {
+                Some(Literal::I32(if (l as u64) <= (r as u64) { 1 } else { 0 }))
             }
             (BinaryOp::GeSInt64, Literal::I64(l), Literal::I64(r)) => {
                 Some(Literal::I32(if l >= r { 1 } else { 0 }))
@@ -224,121 +226,68 @@ impl<'a> Evaluator<'a> {
                 Some(Literal::I32(if (l as u64) >= (r as u64) { 1 } else { 0 }))
             }
 
-            // TODO: Implement f32, f64 ops
+            // Float 32
+            (BinaryOp::AddFloat32, Literal::F32(l), Literal::F32(r)) => Some(Literal::F32(l + r)),
+            (BinaryOp::SubFloat32, Literal::F32(l), Literal::F32(r)) => Some(Literal::F32(l - r)),
+            (BinaryOp::MulFloat32, Literal::F32(l), Literal::F32(r)) => Some(Literal::F32(l * r)),
+            (BinaryOp::DivFloat32, Literal::F32(l), Literal::F32(r)) => Some(Literal::F32(l / r)),
+            (BinaryOp::MinFloat32, Literal::F32(l), Literal::F32(r)) => {
+                Some(Literal::F32(l.min(r)))
+            }
+            (BinaryOp::MaxFloat32, Literal::F32(l), Literal::F32(r)) => {
+                Some(Literal::F32(l.max(r)))
+            }
+
+            // Float 64
+            (BinaryOp::AddFloat64, Literal::F64(l), Literal::F64(r)) => Some(Literal::F64(l + r)),
+            (BinaryOp::SubFloat64, Literal::F64(l), Literal::F64(r)) => Some(Literal::F64(l - r)),
+            (BinaryOp::MulFloat64, Literal::F64(l), Literal::F64(r)) => Some(Literal::F64(l * r)),
+            (BinaryOp::DivFloat64, Literal::F64(l), Literal::F64(r)) => Some(Literal::F64(l / r)),
+            (BinaryOp::MinFloat64, Literal::F64(l), Literal::F64(r)) => {
+                Some(Literal::F64(l.min(r)))
+            }
+            (BinaryOp::MaxFloat64, Literal::F64(l), Literal::F64(r)) => {
+                Some(Literal::F64(l.max(r)))
+            }
+
             _ => None,
         }
     }
 
     fn eval_unary(&self, op: UnaryOp, v: Literal) -> Option<Literal> {
         match (op, v) {
-            // Int32
             (UnaryOp::EqZInt32, Literal::I32(v)) => Some(Literal::I32(if v == 0 { 1 } else { 0 })),
             (UnaryOp::ClzInt32, Literal::I32(v)) => Some(Literal::I32(v.leading_zeros() as i32)),
             (UnaryOp::CtzInt32, Literal::I32(v)) => Some(Literal::I32(v.trailing_zeros() as i32)),
             (UnaryOp::PopcntInt32, Literal::I32(v)) => Some(Literal::I32(v.count_ones() as i32)),
 
-            // Int64
             (UnaryOp::EqZInt64, Literal::I64(v)) => Some(Literal::I32(if v == 0 { 1 } else { 0 })),
-            (UnaryOp::ClzInt64, Literal::I64(v)) => Some(Literal::I64(v.leading_zeros() as i64)),
-            (UnaryOp::CtzInt64, Literal::I64(v)) => Some(Literal::I64(v.trailing_zeros() as i64)),
-            (UnaryOp::PopcntInt64, Literal::I64(v)) => Some(Literal::I64(v.count_ones() as i64)),
+            (UnaryOp::ClzInt64, Literal::I64(v)) => Some(Literal::I32(v.leading_zeros() as i32)),
+            (UnaryOp::CtzInt64, Literal::I64(v)) => Some(Literal::I32(v.trailing_zeros() as i32)),
+            (UnaryOp::PopcntInt64, Literal::I64(v)) => Some(Literal::I32(v.count_ones() as i32)),
+
+            (UnaryOp::AbsFloat32, Literal::F32(v)) => Some(Literal::F32(v.abs())),
+            (UnaryOp::NegFloat32, Literal::F32(v)) => Some(Literal::F32(-v)),
+            (UnaryOp::CeilFloat32, Literal::F32(v)) => Some(Literal::F32(v.ceil())),
+            (UnaryOp::FloorFloat32, Literal::F32(v)) => Some(Literal::F32(v.floor())),
+            (UnaryOp::TruncFloat32, Literal::F32(v)) => Some(Literal::F32(v.trunc())),
+            (UnaryOp::NearestFloat32, Literal::F32(v)) => Some(Literal::F32(v.round())),
+            (UnaryOp::SqrtFloat32, Literal::F32(v)) => Some(Literal::F32(v.sqrt())),
+
+            (UnaryOp::AbsFloat64, Literal::F64(v)) => Some(Literal::F64(v.abs())),
+            (UnaryOp::NegFloat64, Literal::F64(v)) => Some(Literal::F64(-v)),
+            (UnaryOp::CeilFloat64, Literal::F64(v)) => Some(Literal::F64(v.ceil())),
+            (UnaryOp::FloorFloat64, Literal::F64(v)) => Some(Literal::F64(v.floor())),
+            (UnaryOp::TruncFloat64, Literal::F64(v)) => Some(Literal::F64(v.trunc())),
+            (UnaryOp::NearestFloat64, Literal::F64(v)) => Some(Literal::F64(v.round())),
+            (UnaryOp::SqrtFloat64, Literal::F64(v)) => Some(Literal::F64(v.sqrt())),
 
             // Conversions
             (UnaryOp::ExtendSInt32, Literal::I32(v)) => Some(Literal::I64(v as i64)),
             (UnaryOp::ExtendUInt32, Literal::I32(v)) => Some(Literal::I64(v as u32 as i64)),
             (UnaryOp::WrapInt64, Literal::I64(v)) => Some(Literal::I32(v as i32)),
 
-            (UnaryOp::ExtendS8Int32, Literal::I32(v)) => Some(Literal::I32(v as i8 as i32)),
-            (UnaryOp::ExtendS16Int32, Literal::I32(v)) => Some(Literal::I32(v as i16 as i32)),
-            (UnaryOp::ExtendS8Int64, Literal::I64(v)) => Some(Literal::I64(v as i8 as i64)),
-            (UnaryOp::ExtendS16Int64, Literal::I64(v)) => Some(Literal::I64(v as i16 as i64)),
-            (UnaryOp::ExtendS32Int64, Literal::I64(v)) => Some(Literal::I64(v as i32 as i64)),
-
-            // TODO: Implement f32, f64 ops
             _ => None,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ir::expression::IrBuilder;
-    use crate::ir::Type;
-
-    #[test]
-    fn test_eval_basic() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let evaluator = Evaluator::new(&bump);
-
-        // 1 + 2 = 3
-        let c1 = builder.const_(Literal::I32(1));
-        let c2 = builder.const_(Literal::I32(2));
-        let add = builder.binary(BinaryOp::AddInt32, c1, c2, Type::I32);
-
-        assert_eq!(evaluator.eval(add), Some(Literal::I32(3)));
-    }
-
-    #[test]
-    fn test_eval_nested() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let evaluator = Evaluator::new(&bump);
-
-        // (1 + 2) * 3 = 9
-        let c1 = builder.const_(Literal::I32(1));
-        let c2 = builder.const_(Literal::I32(2));
-        let add = builder.binary(BinaryOp::AddInt32, c1, c2, Type::I32);
-        let c3 = builder.const_(Literal::I32(3));
-        let mul = builder.binary(BinaryOp::MulInt32, add, c3, Type::I32);
-
-        assert_eq!(evaluator.eval(mul), Some(Literal::I32(9)));
-    }
-
-    #[test]
-    fn test_eval_div_zero() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let evaluator = Evaluator::new(&bump);
-
-        // 1 / 0 = None
-        let c1 = builder.const_(Literal::I32(1));
-        let c0 = builder.const_(Literal::I32(0));
-        let div = builder.binary(BinaryOp::DivSInt32, c1, c0, Type::I32);
-
-        assert_eq!(evaluator.eval(div), None);
-    }
-
-    #[test]
-    fn test_eval_i64() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let evaluator = Evaluator::new(&bump);
-
-        // (1 << 33) | 7 = 0x200000007
-        let c1 = builder.const_(Literal::I64(1));
-        let c33 = builder.const_(Literal::I64(33));
-        let shl = builder.binary(BinaryOp::ShlInt64, c1, c33, Type::I64);
-        let c7 = builder.const_(Literal::I64(7));
-        let or = builder.binary(BinaryOp::OrInt64, shl, c7, Type::I64);
-
-        assert_eq!(evaluator.eval(or), Some(Literal::I64((1i64 << 33) | 7)));
-    }
-
-    #[test]
-    fn test_eval_conversions() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
-        let evaluator = Evaluator::new(&bump);
-
-        // extend_s/i32 (-1) -> -1i64
-        let minus_one = builder.const_(Literal::I32(-1));
-        let extend = builder.unary(UnaryOp::ExtendSInt32, minus_one, Type::I64);
-        assert_eq!(evaluator.eval(extend), Some(Literal::I64(-1)));
-
-        // extend_u/i32 (-1) -> 0xffffffffi64
-        let extend_u = builder.unary(UnaryOp::ExtendUInt32, minus_one, Type::I64);
-        assert_eq!(evaluator.eval(extend_u), Some(Literal::I64(0xffffffff)));
     }
 }

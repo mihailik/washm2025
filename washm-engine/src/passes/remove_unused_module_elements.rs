@@ -1,6 +1,4 @@
 use crate::analysis::usage::UsageTracker;
-#[cfg(test)]
-use crate::ir::expression::ExpressionKind;
 use crate::ir::module::{ExportKind, Module};
 use crate::passes::Pass;
 
@@ -11,7 +9,7 @@ impl Pass for RemoveUnusedModuleElements {
         "RemoveUnusedModuleElements"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         let tracker = UsageTracker::analyze(module);
 
         // 1. Remove unused elements from arenas
@@ -64,44 +62,49 @@ impl Pass for RemoveUnusedModuleElements {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::expression::ExpressionKind;
     use crate::ir::expression::IrBuilder;
-    use crate::ir::module::{Function, Global, GlobalKind, Module};
-    use crate::ir::FuncId;
-    use crate::ir::{Literal, Type};
-    use bumpalo::collections::Vec as BumpVec;
-    use bumpalo::Bump;
+    use crate::ir::module::{ExportKind, Function, Global, GlobalKind, Module};
+    use crate::ir::{Literal, Type, TypeId};
 
     #[test]
     fn test_remove_unused_functions() {
-        let bump = Bump::new();
-        let mut module = Module::new(&bump);
-        let builder = IrBuilder::new(&bump);
-
-        // Func 0: Unused
-        let func0 = Function::new("unused".to_string(), Type::NONE, Type::NONE, vec![], None);
-        module.add_function(func0);
-
-        // Func 1: Exported (Used)
-        let func1 = Function::new("exported".to_string(), Type::NONE, Type::NONE, vec![], None);
-        module.add_function(func1);
-        module.export_function(FuncId::from_raw_parts(1, 0), "main".to_string());
+        let mut module = Module::new();
 
         // Func 2: Called by Func 1 (Used)
-        let func2 = Function::new("called".to_string(), Type::NONE, Type::NONE, vec![], None);
-        module.add_function(func2);
+        let id2 = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let func2 = Function::new(
+                "called".to_string(),
+                Type::NONE,
+                Type::NONE,
+                vec![],
+                builder.nop(),
+            );
+            module.add_function(func2)
+        };
 
-        // Body of Func 1 calls Func 2
-        let call = builder.call(
-            FuncId::from_raw_parts(2, 0),
-            BumpVec::new_in(&bump),
-            Type::NONE,
-            false,
-        );
-        let f1 = module
-            .get_function_mut(FuncId::from_raw_parts(1, 0))
-            .unwrap();
-        if let Some(mut_body) = f1.body_mut() {
-            *mut_body = call;
+        // Func 1: Exported (Used)
+        let id1 = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            // Body of Func 1 calls Func 2
+            let call = builder.call(id2, vec![], Type::NONE, false);
+            let func1 = Function::new("exported".to_string(), Type::NONE, Type::NONE, vec![], call);
+            module.add_function(func1)
+        };
+        module.export_function(id1, "main".to_string());
+
+        // Func 0: Unused
+        {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let func0 = Function::new(
+                "unused".to_string(),
+                Type::NONE,
+                Type::NONE,
+                vec![],
+                builder.nop(),
+            );
+            module.add_function(func0);
         }
 
         let mut pass = RemoveUnusedModuleElements;
@@ -112,8 +115,8 @@ mod tests {
         let mut ids = module.functions.ids();
         let f0_id = ids.next().unwrap();
         let f1_id = ids.next().unwrap();
-        assert_eq!(module.functions[f0_id].name, "exported");
-        assert_eq!(module.functions[f1_id].name, "called");
+        assert_eq!(module.functions[f0_id].name, "called");
+        assert_eq!(module.functions[f1_id].name, "exported");
 
         // Check Export index updated
         assert_eq!(
@@ -121,18 +124,19 @@ mod tests {
                 ExportKind::Function(idx) => idx,
                 _ => panic!("Expected Function export"),
             },
-            f0_id.cast()
+            f1_id
         );
     }
 
     #[test]
     fn test_remove_unused_globals() {
-        let bump = Bump::new();
-        let mut module = Module::new(&bump);
-        let builder = IrBuilder::new(&bump);
+        let mut module = Module::new();
 
         // Global 0: Unused
-        let init0 = builder.const_(Literal::I32(0));
+        let init0 = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(0))
+        };
         let glob0 = Global {
             name: "unused".to_string(),
             type_: Type::I32,
@@ -142,7 +146,10 @@ mod tests {
         module.add_global(glob0);
 
         // Global 1: Used by Export
-        let init1 = builder.const_(Literal::I32(1));
+        let init1 = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(1))
+        };
         let glob1 = Global {
             name: "exported".to_string(),
             type_: Type::I32,
@@ -153,7 +160,10 @@ mod tests {
         module.export_global(g1_id, "g".to_string());
 
         // Global 2: Used by Func 0 (which is exported)
-        let init2 = builder.const_(Literal::I32(2));
+        let init2 = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.const_(Literal::I32(2))
+        };
         let glob2 = Global {
             name: "used_by_code".to_string(),
             type_: Type::I32,
@@ -163,16 +173,13 @@ mod tests {
         let g2_id = module.add_global(glob2);
 
         // Func using Global 2
-        let get = builder.global_get(g2_id, Type::I32);
-        let func = Function::new(
-            "user".to_string(),
-            Type::NONE,
-            Type::NONE,
-            vec![],
-            Some(get),
-        );
-        module.add_function(func);
-        module.export_function(FuncId::from_raw_parts(0, 0), "user".to_string());
+        let user_id = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let get = builder.global_get(g2_id, Type::I32);
+            let func = Function::new("user".to_string(), Type::NONE, Type::NONE, vec![], get);
+            module.add_function(func)
+        };
+        module.export_function(user_id, "user".to_string());
 
         let mut pass = RemoveUnusedModuleElements;
         pass.run(&mut module);
@@ -180,10 +187,10 @@ mod tests {
         // Global 0 removed. 1 -> 0. 2 -> 1.
         assert_eq!(module.globals.len(), 2);
         let mut ids = module.globals.ids();
-        let g0_id = ids.next().unwrap();
-        let g1_id = ids.next().unwrap();
-        assert_eq!(module.globals[g0_id].name, "exported");
-        assert_eq!(module.globals[g1_id].name, "used_by_code");
+        let g_exp_id = ids.next().unwrap();
+        let g_code_id = ids.next().unwrap();
+        assert_eq!(module.globals[g_exp_id].name, "exported");
+        assert_eq!(module.globals[g_code_id].name, "used_by_code");
 
         // Check Export index updated
         assert_eq!(
@@ -191,29 +198,29 @@ mod tests {
                 ExportKind::Global(id) => id,
                 _ => panic!("Expected Global export"),
             },
-            g0_id.cast()
+            g_exp_id
         );
 
         // Check Code index updated
-        let binding = module.functions[FuncId::from_raw_parts(0, 0)].body();
-        let body = binding.as_ref().unwrap();
+        let user_f_id = module.functions.ids().next().unwrap();
+        let body_id = module.functions[user_f_id].body().unwrap();
+        let body = &module.expressions[body_id];
         if let ExpressionKind::GlobalGet { id } = &body.kind {
-            assert_eq!(*id, g1_id.cast());
+            assert_eq!(*id, g_code_id);
         } else {
-            panic!("Expected GlobalGet");
+            panic!("Expected GlobalGet, got {:?}", body.kind);
         }
     }
 
     #[test]
     fn test_remove_unused_types() {
-        let bump = Bump::new();
-        let mut module = Module::new(&bump);
+        let mut module = Module::new();
 
         // Add 3 types
         module.types.push(crate::ir::module::FuncType {
             params: Type::I32,
             results: Type::I32,
-        }); // Type FuncId::from_raw_parts(0, 0)
+        }); // Type 0
         module.types.push(crate::ir::module::FuncType {
             params: Type::F64,
             results: Type::F64,
@@ -223,15 +230,24 @@ mod tests {
             results: Type::I64,
         }); // Type 2
 
+        let nop = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.nop()
+        };
+
         // Function 0 (Exported) uses Type 1
-        let mut func = Function::new("f0".to_string(), Type::F64, Type::F64, vec![], None);
-        func.type_idx = Some(1.into());
+        let mut func = Function::new("f0".to_string(), Type::F64, Type::F64, vec![], nop);
+        func.type_idx = Some(TypeId::from(1));
         let f0_id = module.add_function(func);
         module.export_function(f0_id, "f0".to_string());
 
         // Function 1 (Unused) uses Type 2
-        let mut func2 = Function::new("f1".to_string(), Type::I64, Type::I64, vec![], None);
-        func2.type_idx = Some(2.into());
+        let nop2 = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            builder.nop()
+        };
+        let mut func2 = Function::new("f1".to_string(), Type::I64, Type::I64, vec![], nop2);
+        func2.type_idx = Some(TypeId::from(2));
         module.add_function(func2);
 
         let mut pass = RemoveUnusedModuleElements;
@@ -247,14 +263,13 @@ mod tests {
         assert_eq!(module.types[remaining_type_id].params, Type::F64);
 
         // Function 0's type_idx should still point to the same type.
+        let f0_id = module.functions.ids().next().unwrap();
         assert_eq!(module.functions[f0_id].type_idx, Some(remaining_type_id));
     }
 
     #[test]
     fn test_remove_unused_imports_gtm() {
-        let bump = Bump::new();
-        let mut module = Module::new(&bump);
-        let builder = IrBuilder::new(&bump);
+        let mut module = Module::new();
 
         // Import 0: Function (Used)
         let f_id = module.add_function(Function::new_import(
@@ -288,23 +303,16 @@ mod tests {
         });
 
         // Add code that uses Function Import and Global Import
-        let call = builder.call(f_id, BumpVec::new_in(&bump), Type::NONE, false);
-        let get = builder.global_get(g_used_id, Type::I32);
+        let body = {
+            let mut builder = IrBuilder::new(&mut module.expressions);
+            let call = builder.call(f_id, vec![], Type::NONE, false);
+            let get = builder.global_get(g_used_id, Type::I32);
+            builder.block("", vec![call, get], Type::I32)
+        };
 
-        let mut block_list = BumpVec::new_in(&bump);
-        block_list.push(call);
-        block_list.push(get);
-        let body = builder.block(None, block_list, Type::I32);
-
-        let func = Function::new(
-            "main".to_string(),
-            Type::NONE,
-            Type::I32,
-            vec![],
-            Some(body),
-        );
+        let func = Function::new("main".to_string(), Type::NONE, Type::I32, vec![], body);
         let main_id = module.add_function(func);
-        module.export_function(main_id, "main".to_string()); // main_id is defined func
+        module.export_function(main_id, "main".to_string());
 
         let mut pass = RemoveUnusedModuleElements;
         pass.run(&mut module);

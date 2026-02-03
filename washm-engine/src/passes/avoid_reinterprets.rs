@@ -1,5 +1,6 @@
 use crate::analysis::patterns::{MatchEnv, Pattern, PatternMatcher};
-use crate::ir::expression::ExprRef;
+use crate::collections::id_arena::IdArena;
+use crate::ir::expression::{Expression, ExpressionId, ExpressionMarker};
 use crate::ir::module::Module;
 use crate::ir::ops::UnaryOp;
 use crate::ir::visitor::Visitor;
@@ -30,7 +31,7 @@ impl AvoidReinterprets {
                 UnaryOp::ReinterpretFloat32,
                 Pattern::unary(UnaryOp::ReinterpretInt32, Pattern::Var("x")),
             ),
-            |env: &MatchEnv, _| env.get("x").copied(),
+            |env: &MatchEnv, _arena| env.get("x").copied(),
         );
 
         // f32.reinterpret_i32(i32.reinterpret_f32(x)) -> x
@@ -39,7 +40,7 @@ impl AvoidReinterprets {
                 UnaryOp::ReinterpretInt32,
                 Pattern::unary(UnaryOp::ReinterpretFloat32, Pattern::Var("x")),
             ),
-            |env: &MatchEnv, _| env.get("x").copied(),
+            |env: &MatchEnv, _arena| env.get("x").copied(),
         );
 
         // i64.reinterpret_f64(f64.reinterpret_i64(x)) -> x
@@ -48,7 +49,7 @@ impl AvoidReinterprets {
                 UnaryOp::ReinterpretFloat64,
                 Pattern::unary(UnaryOp::ReinterpretInt64, Pattern::Var("x")),
             ),
-            |env: &MatchEnv, _| env.get("x").copied(),
+            |env: &MatchEnv, _arena| env.get("x").copied(),
         );
 
         // f64.reinterpret_i64(i64.reinterpret_f64(x)) -> x
@@ -57,7 +58,7 @@ impl AvoidReinterprets {
                 UnaryOp::ReinterpretInt64,
                 Pattern::unary(UnaryOp::ReinterpretFloat64, Pattern::Var("x")),
             ),
-            |env: &MatchEnv, _| env.get("x").copied(),
+            |env: &MatchEnv, _arena| env.get("x").copied(),
         );
     }
 }
@@ -67,29 +68,33 @@ impl Pass for AvoidReinterprets {
         "avoid-reinterprets"
     }
 
-    fn run<'a>(&mut self, module: &mut Module<'a>) {
+    fn run(&mut self, module: &mut Module) {
         let mut visitor = AvoidReinterpretsVisitor {
             matcher: &self.matcher,
-            allocator: module.allocator,
         };
 
-        for (_, func) in &mut module.functions {
-            if let Some(body) = func.body_mut() {
-                visitor.visit(body);
+        let (expressions, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+
+        for (_, func) in functions {
+            if let Some(mut body) = func.body_mut() {
+                visitor.visit(&mut body, expressions);
             }
         }
     }
 }
 
-struct AvoidReinterpretsVisitor<'a, 'b> {
-    matcher: &'b PatternMatcher,
-    allocator: &'a bumpalo::Bump,
+struct AvoidReinterpretsVisitor<'a> {
+    matcher: &'a PatternMatcher,
 }
 
-impl<'a, 'b> Visitor<'a> for AvoidReinterpretsVisitor<'a, 'b> {
-    fn visit(&mut self, expr: &mut ExprRef<'a>) {
-        self.visit_children(expr);
-        if let Some(new_expr) = self.matcher.simplify(*expr, self.allocator) {
+impl<'a> Visitor for AvoidReinterpretsVisitor<'a> {
+    fn visit(
+        &mut self,
+        expr: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
+    ) {
+        self.visit_children(expr, arena);
+        if let Some(new_expr) = self.matcher.simplify(*expr, arena) {
             *expr = new_expr;
         }
     }
@@ -100,31 +105,31 @@ mod tests {
     use super::*;
     use crate::ir::expression::{ExpressionKind, IrBuilder};
     use crate::ir::{LocalId, Type};
-    use bumpalo::Bump;
 
     #[test]
     fn test_avoid_reinterprets_roundtrip() {
-        let bump = Bump::new();
-        let builder = IrBuilder::new(&bump);
+        let mut module = Module::new();
+        let (expressions, _, _, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+        let mut builder = IrBuilder::new(expressions);
 
         // i32.reinterpret_f32(f32.reinterpret_i32(local.get 0)) -> local.get 0
         let x = builder.local_get(LocalId::from(0), Type::I32);
-        let f = builder.unary(UnaryOp::ReinterpretInt32, x, Type::F32);
-        let i = builder.unary(UnaryOp::ReinterpretFloat32, f, Type::I32);
+        let f = builder.unary(UnaryOp::ReinterpretFloat32, x, Type::F32);
+        let i = builder.unary(UnaryOp::ReinterpretInt32, f, Type::I32);
 
-        let mut expr_ref = i;
+        let mut expr_id = i;
         let pass = AvoidReinterprets::new();
         let mut visitor = AvoidReinterpretsVisitor {
             matcher: &pass.matcher,
-            allocator: &bump,
         };
 
-        visitor.visit(&mut expr_ref);
+        visitor.visit(&mut expr_id, expressions);
 
-        if let ExpressionKind::LocalGet { id, .. } = &expr_ref.kind {
+        let expr = &expressions[expr_id];
+        if let ExpressionKind::LocalGet { id, .. } = &expr.kind {
             assert_eq!(id.index(), 0);
         } else {
-            panic!("Expected LocalGet, got {:?}", expr_ref.kind);
+            panic!("Expected LocalGet, got {:?}", expr.kind);
         }
     }
 }

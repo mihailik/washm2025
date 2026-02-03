@@ -6,8 +6,7 @@ pub fn version() -> &'static str {
 
 pub mod strings;
 pub use strings::StringInterner;
-pub mod arena;
-pub use arena::Arena;
+
 pub mod id_arena;
 pub use id_arena::{Id, IdArena};
 pub mod hash;
