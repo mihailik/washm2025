@@ -15,10 +15,8 @@ pub fn run_triad_test(source_path_str: &str) {
         .expect("utf8 stem");
     let dir = source_path.parent().expect("parent dir");
 
-    let rust_gold_path = dir.join("roundtrip").join(format!("{}_roundtrip.rs", stem));
-    let cpp_gold_path = dir
-        .join("roundtrip")
-        .join(format!("{}_roundtrip.cpp", stem));
+    let rust_gold_path = dir.join(format!("{}.roundtrip.rs", stem));
+    let cpp_gold_path = dir.join(format!("{}.roundtrip.cpp", stem));
 
     // 1. Compile to WASM
     let temp_wasm = tempfile::NamedTempFile::new().expect("Failed to create temp wasm file");
