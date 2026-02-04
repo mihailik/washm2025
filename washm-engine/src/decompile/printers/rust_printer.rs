@@ -18,6 +18,22 @@ impl<'m> RustPrinter<'m> {
         }
     }
 
+    fn sanitize_label(name: &str) -> String {
+        let mut out = String::new();
+        for c in name.chars() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                out.push(c);
+            } else {
+                out.push('_');
+            }
+        }
+        // Label must not start with a digit
+        if out.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            out = format!("label_{}", out);
+        }
+        out
+    }
+
     fn get_local_name(
         &self,
         func: &Function,
@@ -231,10 +247,28 @@ impl<'m> RustPrinter<'m> {
                     if inverted {
                         self.output.push_str("!");
                     }
-                    self.walk_inline_expression(func, condition);
+                    // Prefer printing boolean constants as `true`/`false` when used as conditions
+                    match &self.module.expressions[condition].kind {
+                        ExpressionKind::Const(lit) => {
+                            use crate::ir::Literal;
+                            match lit {
+                                Literal::I32(v) => {
+                                    self.output.push_str(if *v != 0 { "true" } else { "false" })
+                                }
+                                Literal::I64(v) => {
+                                    self.output.push_str(if *v != 0 { "true" } else { "false" })
+                                }
+                                _ => self.walk_inline_expression(func, condition),
+                            }
+                        }
+                        _ => {
+                            self.walk_inline_expression(func, condition);
+                        }
+                    }
                     self.output.push_str(" ");
                 } else if let Some(n) = name {
-                    self.output.push_str(&format!("'{}: ", n));
+                    let safe = Self::sanitize_label(n);
+                    self.output.push_str(&format!("'{}: ", safe));
                 }
 
                 self.output.push_str("{\n");
@@ -275,7 +309,155 @@ impl<'m> RustPrinter<'m> {
                     }
                 }
             }
-            // Add more cases as needed ...
+            ExpressionKind::If {
+                condition,
+                if_true,
+                if_false,
+                ..
+            } => {
+                self.output.push_str("if ");
+                self.walk_inline_expression(func, *condition);
+                self.output.push_str(" ");
+                self.walk_expression_ext(func, *if_true, false);
+                if let Some(f) = if_false {
+                    // Omit printing `else` when the branch is an explicit NOP
+                    match &self.module.expressions[*f].kind {
+                        ExpressionKind::Nop => {}
+                        _ => {
+                            self.write_indent();
+                            self.output.push_str("else ");
+                            self.walk_expression_ext(func, *f, false);
+                        }
+                    }
+                }
+            }
+            ExpressionKind::Loop { name, body } => {
+                if let Some(n) = name {
+                    self.output.push_str(&format!("/* loop: {} */ ", n));
+                }
+                self.output.push_str("loop {\n");
+                self.indent += 1;
+                self.walk_expression_ext(func, *body, false);
+                self.indent -= 1;
+                self.write_indent();
+                self.output.push_str("}\n");
+            }
+            ExpressionKind::Break {
+                name: _,
+                condition,
+                value,
+            } => {
+                if let Some(cond) = condition {
+                    self.output.push_str("if ");
+                    self.walk_inline_expression(func, *cond);
+                    self.output.push_str(" {");
+                    if let Some(v) = value {
+                        self.output.push_str(" /* break with value: ");
+                        self.walk_inline_expression(func, *v);
+                        self.output.push_str(" */");
+                    }
+                    self.output.push_str(" break; }\n");
+                } else {
+                    if let Some(v) = value {
+                        self.output.push_str("/* break with value: ");
+                        self.walk_inline_expression(func, *v);
+                        self.output.push_str(" */;\n");
+                    } else {
+                        self.output.push_str("break;\n");
+                    }
+                }
+            }
+            ExpressionKind::LocalTee { id, value } => {
+                let name = self.get_local_name(func, *id, Some(expr_id));
+                if is_return {
+                    self.output.push_str(&format!("{} = ", name));
+                    self.walk_inline_expression(func, *value);
+                    self.output.push_str(";\n");
+                } else {
+                    self.output.push_str("(");
+                    self.output.push_str(&format!("{} = ", name));
+                    self.walk_inline_expression(func, *value);
+                    self.output.push_str(")\n");
+                }
+            }
+            ExpressionKind::Nop => {
+                self.output.push_str("/* nop */\n");
+            }
+            ExpressionKind::Unreachable => {
+                self.output.push_str("panic!(\"unreachable\");\n");
+            }
+            ExpressionKind::Select {
+                condition,
+                if_true,
+                if_false,
+            } => {
+                if is_return {
+                    self.output.push_str("return ");
+                    self.walk_inline_expression(func, *if_true);
+                    self.output.push_str(";\n");
+                } else {
+                    self.output.push_str("(");
+                    self.walk_inline_expression(func, *condition);
+                    self.output.push_str(" ? ");
+                    self.walk_inline_expression(func, *if_true);
+                    self.output.push_str(" : ");
+                    self.walk_inline_expression(func, *if_false);
+                    self.output.push_str(")\n");
+                }
+            }
+            ExpressionKind::Store { ptr, value, .. } => {
+                self.walk_inline_expression(func, *ptr);
+                self.output.push_str(" = ");
+                self.walk_inline_expression(func, *value);
+                self.output.push_str(";\n");
+            }
+            ExpressionKind::Load { ptr, .. } => {
+                self.output.push_str("(");
+                self.walk_inline_expression(func, *ptr);
+                self.output.push_str(") /* load */\n");
+            }
+            ExpressionKind::GlobalGet { id } => {
+                if let Some(g) = self.module.globals.get(id.cast()) {
+                    self.output.push_str(&g.name);
+                    self.output.push_str("\n");
+                } else {
+                    self.output.push_str(&format!("global_{}\n", id.index()));
+                }
+            }
+            ExpressionKind::GlobalSet { id, value } => {
+                if let Some(g) = self.module.globals.get(id.cast()) {
+                    self.output.push_str(&format!("{} = ", g.name));
+                } else {
+                    self.output.push_str(&format!("global_{} = ", id.index()));
+                }
+                self.walk_inline_expression(func, *value);
+                self.output.push_str(";\n");
+            }
+            ExpressionKind::CallIndirect {
+                target, operands, ..
+            } => {
+                self.walk_inline_expression(func, *target);
+                self.output.push_str("(");
+                for (i, op) in operands.iter().enumerate() {
+                    if i > 0 {
+                        self.output.push_str(", ");
+                    }
+                    self.walk_inline_expression(func, *op);
+                }
+                self.output.push_str(")\n");
+            }
+            ExpressionKind::Try {
+                body, catch_bodies, ..
+            } => {
+                self.output.push_str("/* try */\n");
+                self.walk_expression_ext(func, *body, false);
+                for &cb in catch_bodies {
+                    self.walk_expression_ext(func, cb, false);
+                }
+            }
+            ExpressionKind::Throw { tag, operands } => {
+                self.output.push_str(&format!("/* throw {} */\n", tag));
+            }
             _ => {
                 if is_return {
                     self.output.push_str("return ");
@@ -327,6 +509,86 @@ impl<'m> RustPrinter<'m> {
                 self.output.push_str(&format!(" {} ", op_str));
                 self.walk_inline_expression(func, *right);
                 self.output.push_str(")");
+            }
+            ExpressionKind::Unary { op, value } => {
+                let op_str = match op {
+                    crate::ir::ops::UnaryOp::ClzInt32 | crate::ir::ops::UnaryOp::ClzInt64 => "clz",
+                    crate::ir::ops::UnaryOp::CtzInt32 | crate::ir::ops::UnaryOp::CtzInt64 => "ctz",
+                    crate::ir::ops::UnaryOp::PopcntInt32 | crate::ir::ops::UnaryOp::PopcntInt64 => {
+                        "popcnt"
+                    }
+                    _ => "unary",
+                };
+                self.output.push_str(&format!("{}(", op_str));
+                self.walk_inline_expression(func, *value);
+                self.output.push_str(")");
+            }
+            ExpressionKind::LocalTee { id, value } => {
+                let name = self.get_local_name(func, *id, Some(expr_id));
+                self.output.push_str("(");
+                self.output.push_str(&format!("{} = ", name));
+                self.walk_inline_expression(func, *value);
+                self.output.push_str(")");
+            }
+            ExpressionKind::GlobalGet { id } => {
+                if let Some(g) = self.module.globals.get(id.cast()) {
+                    self.output.push_str(&g.name);
+                } else {
+                    self.output.push_str(&format!("global_{}", id.index()));
+                }
+            }
+            ExpressionKind::Select {
+                condition,
+                if_true,
+                if_false,
+            } => {
+                self.output.push_str("(");
+                self.walk_inline_expression(func, *condition);
+                self.output.push_str(" ? ");
+                self.walk_inline_expression(func, *if_true);
+                self.output.push_str(" : ");
+                self.walk_inline_expression(func, *if_false);
+                self.output.push_str(")");
+            }
+            ExpressionKind::Load { ptr, .. } => {
+                self.output.push_str("(");
+                self.walk_inline_expression(func, *ptr);
+                self.output.push_str(") /* load */");
+            }
+            ExpressionKind::Store { ptr, value, .. } => {
+                self.walk_inline_expression(func, *ptr);
+                self.output.push_str(" = ");
+                self.walk_inline_expression(func, *value);
+            }
+            ExpressionKind::CallIndirect {
+                target, operands, ..
+            } => {
+                self.walk_inline_expression(func, *target);
+                self.output.push_str("(");
+                for (i, op) in operands.iter().enumerate() {
+                    if i > 0 {
+                        self.output.push_str(", ");
+                    }
+                    self.walk_inline_expression(func, *op);
+                }
+                self.output.push_str(")");
+            }
+            ExpressionKind::TupleMake { operands } => {
+                self.output.push_str("(");
+                for (i, id) in operands.iter().enumerate() {
+                    if i > 0 {
+                        self.output.push_str(", ");
+                    }
+                    self.walk_inline_expression(func, *id);
+                }
+                self.output.push_str(")");
+            }
+            ExpressionKind::RefFunc { func } => {
+                if let Some(f) = self.module.functions.get(*func) {
+                    self.output.push_str(&format!("&{}", f.name));
+                } else {
+                    self.output.push_str("&func");
+                }
             }
             _ => {
                 self.output.push_str(&format!("/* {:?} */", expr.kind));

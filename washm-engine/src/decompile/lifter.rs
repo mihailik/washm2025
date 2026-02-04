@@ -6,7 +6,10 @@ use crate::decompile::passes::{
 };
 use crate::ir::module::Module;
 use crate::passes::{
-    dce::DCE, global_refining::GlobalRefining, gufa::GUFA, local_subtyping::LocalSubtyping, Pass,
+    dce::DCE, global_refining::GlobalRefining, gufa::GUFA, local_cse::LocalCSE,
+    local_subtyping::LocalSubtyping, merge_blocks::MergeBlocks,
+    optimize_instructions::OptimizeInstructions, remove_unused_names::RemoveUnusedNames,
+    rereloop::Rereloop, simplify_control_flow::SimplifyControlFlow, vacuum::Vacuum, Pass,
 };
 
 /// The Lifter is responsible for running passes that "lift" low-level WASM IR
@@ -31,25 +34,39 @@ impl Lifter {
         DCE.run(module);
         GUFA.run(module);
 
-        // 1. Run global analysis to inform later passes
+        // 1. Restructure control flow for cleaner decompilation
+        SimplifyControlFlow.run(module);
+        Vacuum.run(module);
+        Rereloop.run(module);
+        RemoveUnusedNames.run(module);
+        MergeBlocks.run(module);
+        LocalCSE.run(module);
+        OptimizeInstructions::default().run(module);
+
+        // 2. Run global analysis to inform later passes
         let call_graph = CallGraph::build(module);
         let global_analysis = GlobalAnalysis::analyze(module, &call_graph);
 
-        // 1. Identify types first
+        // 3. Identify high-level types and structures
         IdentifyPointers::new().run(module);
         IdentifyBooleans::new().run(module);
 
-        // 2. Identify control flow structures
+        // 4. Identify control flow patterns in the structured IR
         IdentifyLoops::new().run(module);
         IdentifyIfElse::new().run(module);
 
-        // 3. Recombine expressions (inlining single-use locals)
+        // Run cleanup again after structure detection to remove degenerate patterns
+        Vacuum.run(module);
+        MergeBlocks.run(module);
+        SimplifyControlFlow.run(module);
+
+        // 5. Recombine expressions (inlining single-use locals)
         ExpressionRecombination::run(module);
 
-        // 4. Infer variable names
+        // 6. Infer variable names
         NameInferencePass::new().run(module);
 
-        // 5. Use global_analysis to annotate constant globals in IR
+        // 7. Use global_analysis to annotate constant globals in IR
         annotate_constant_globals(module, &global_analysis);
     }
 }

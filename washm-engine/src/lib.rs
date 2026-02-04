@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod cfg;
 pub mod collections;
 pub mod decompile;
 pub mod ir;

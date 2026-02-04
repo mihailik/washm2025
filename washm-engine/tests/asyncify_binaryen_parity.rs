@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
-use washm::ir::module::Module;
+use washm::ir::Module;
 use washm::passes::asyncify::{Asyncify, AsyncifyConfig};
 use washm::passes::Pass;
 use washm::wasm::binary_reader::BinaryReader;
@@ -10,17 +10,12 @@ use wast::Wast;
 #[test]
 fn test_asyncify_binaryen_sleep_parity() {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("..");
-    path.push("external");
-    path.push("binaryen-fork");
-    path.push("test");
-    path.push("unit");
-    path.push("input");
+    path.push("tests");
+    path.push("fixtures");
     path.push("asyncify-sleep.wat");
 
     if !path.exists() {
-        println!("Skipping test: asyncify-sleep.wat not found at {:?}", path);
-        return;
+        panic!("Fixture missing: {:?}", path);
     }
 
     let wat_content = fs::read_to_string(&path).expect("Failed to read .wat file");
@@ -133,19 +128,11 @@ fn test_asyncify_binaryen_sleep_parity() {
 #[test]
 fn test_asyncify_binaryen_suite_parity() {
     let base_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("external")
-        .join("binaryen-fork")
-        .join("test")
-        .join("lit")
-        .join("passes");
+        .join("tests")
+        .join("fixtures");
 
     if !base_path.exists() {
-        println!(
-            "Skipping suite: Binaryen tests not found at {:?}",
-            base_path
-        );
-        return;
+        panic!("Fixture directory missing: {:?}", base_path);
     }
 
     let test_files = [
@@ -158,7 +145,7 @@ fn test_asyncify_binaryen_suite_parity() {
 
     for file_name in &test_files {
         let path = base_path.join(file_name);
-        println!("Running Binaryen parity test: {}", file_name);
+        println!("Running fixture parity test: {}", file_name);
 
         let wast_content = fs::read_to_string(&path).expect("Failed to read .wast file");
 
@@ -216,73 +203,6 @@ fn test_asyncify_binaryen_suite_parity() {
                         .any(|e| e.name == "asyncify_get_state"),
                     "{} missing helper export",
                     file_name
-                );
-            }
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn verify_liveness1(module: &Module, func: &washm::ir::module::Function) {
-    use washm::ir::expression::ExpressionKind;
-    use washm::ir::Literal;
-
-    let body = func.body().expect("liveness1 missing body");
-    if let ExpressionKind::Block { list, .. } = &module.expressions[body].kind {
-        let first_expr_id = list[0];
-        if let ExpressionKind::If { if_true, .. } = &module.expressions[first_expr_id].kind {
-            if let ExpressionKind::Block {
-                list: rewind_list, ..
-            } = &module.expressions[*if_true].kind
-            {
-                let mut found_8 = false;
-                let mut found_4 = false;
-
-                for &expr_id in rewind_list {
-                    let expr = &module.expressions[expr_id];
-                    if let ExpressionKind::LocalSet { value, .. } = &expr.kind {
-                        let value_expr = &module.expressions[*value];
-                        if let ExpressionKind::Binary { right, .. } = &value_expr.kind {
-                            let right_expr = &module.expressions[*right];
-                            if let ExpressionKind::Const(Literal::I32(val)) = &right_expr.kind {
-                                if *val == 8 {
-                                    found_8 = true;
-                                }
-                                if *val == 4 {
-                                    found_4 = true;
-                                }
-                            }
-                        }
-                    }
-                    if let ExpressionKind::Block { list: sub, .. } = &expr.kind {
-                        for &sub_expr_id in sub {
-                            let sub_expr = &module.expressions[sub_expr_id];
-                            if let ExpressionKind::LocalSet { value, .. } = &sub_expr.kind {
-                                let value_expr = &module.expressions[*value];
-                                if let ExpressionKind::Binary { right, .. } = &value_expr.kind {
-                                    let right_expr = &module.expressions[*right];
-                                    if let ExpressionKind::Const(Literal::I32(val)) =
-                                        &right_expr.kind
-                                    {
-                                        if *val == 8 {
-                                            found_8 = true;
-                                        }
-                                        if *val == 4 {
-                                            found_4 = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                assert!(
-                    found_8,
-                    "Expected subtraction of 8 for live locals in liveness1"
-                );
-                assert!(
-                    found_4,
-                    "Expected subtraction of 4 for call index in liveness1"
                 );
             }
         }
