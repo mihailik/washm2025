@@ -21,6 +21,7 @@ pub enum Annotation {
     Inlined,                    // Tag for local.set that should be omitted
     InlinedValue(ExpressionId), // Tag for local.get that should be replaced by this expression
     Location(DebugLocation),
+    ConstantGlobal(crate::ir::Literal),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +53,7 @@ pub struct Annotations {
     pub inlined: bool,
     pub inlined_value: Option<ExpressionId>,
     pub location: Option<DebugLocation>,
+    pub constant_global: Option<crate::ir::Literal>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -89,6 +91,7 @@ impl AnnotationStore {
             Annotation::Inlined => entry.inlined = true,
             Annotation::InlinedValue(val) => entry.inlined_value = Some(val),
             Annotation::Location(loc) => entry.location = Some(loc),
+            Annotation::ConstantGlobal(lit) => entry.constant_global = Some(lit),
         }
     }
 
@@ -145,6 +148,10 @@ impl AnnotationStore {
     /// Returns the source expression if this is an inlined value.
     pub fn get_inlined_value(&self, expr: ExpressionId) -> Option<ExpressionId> {
         self.inner.get(&expr).and_then(|a| a.inlined_value)
+    }
+
+    pub fn get_constant_global(&self, expr: ExpressionId) -> Option<crate::ir::Literal> {
+        self.inner.get(&expr).and_then(|a| a.constant_global)
     }
 
     pub fn get_local_name(&self, expr: ExpressionId) -> Option<&str> {

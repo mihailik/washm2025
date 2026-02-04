@@ -513,9 +513,17 @@ impl BinaryReader {
                         }
 
                         let mut mapping = Vec::new();
-                        mapping.extend_from_slice(func.param_ids());
-                        // We will add the var_ids later, but we know how many there will be
-                        // Actually, we need the LocalIds which are only created when we add them to the function.
+
+                        // FIX: We need the actual LocalIds for parameters.
+                        match &func.kind {
+                            crate::ir::module::FunctionKind::Local { param_ids, .. } => {
+                                mapping.extend_from_slice(param_ids);
+                            }
+                            crate::ir::module::FunctionKind::Import(_) => {
+                                // This shouldn't happen for CodeSectionEntry
+                            }
+                        }
+
                         (var_types, mapping)
                     };
 
@@ -598,12 +606,6 @@ impl BinaryReader {
 
         while !reader.eof() {
             let op = reader.read()?;
-            println!(
-                "OP: {:?}, stack: {}, values: {}",
-                op,
-                stack.len(),
-                value_stack.len()
-            );
             match op {
                 Operator::End => {
                     self.last_op_was_else = false;
@@ -627,9 +629,7 @@ impl BinaryReader {
                     let name = self.make_label_name();
                     label_stack.push(Some(name.clone()));
 
-                    println!("RECURSE START (Block)");
                     let body = self.parse_expression_impl(reader, label_stack, module)?;
-                    println!("RECURSE END (Block)");
 
                     if let Some(body) = body {
                         label_stack.pop();
@@ -660,9 +660,7 @@ impl BinaryReader {
                     let name = self.make_label_name();
                     label_stack.push(Some(name.clone()));
 
-                    println!("RECURSE START (Loop)");
                     let body = self.parse_expression_impl(reader, label_stack, module)?;
-                    println!("RECURSE END (Loop)");
 
                     if let Some(body) = body {
                         label_stack.pop();
@@ -688,17 +686,12 @@ impl BinaryReader {
                     let name = self.make_label_name();
                     label_stack.push(Some(name.clone()));
 
-                    println!("RECURSE START (If true)");
                     let if_true = self
                         .parse_expression_impl(reader, label_stack, module)?
                         .ok_or(ParseError::UnexpectedEof)?;
-                    println!("RECURSE END (If true)");
 
                     let if_false = if self.last_op_was_else {
-                        println!("RECURSE START (If false)");
-                        let res = self.parse_expression_impl(reader, label_stack, module)?;
-                        println!("RECURSE END (If false)");
-                        res
+                        self.parse_expression_impl(reader, label_stack, module)?
                     } else {
                         None
                     };

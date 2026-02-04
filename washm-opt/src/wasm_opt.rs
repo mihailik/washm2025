@@ -122,6 +122,18 @@ fn main() -> anyhow::Result<()> {
                 .long("print")
                 .action(ArgAction::SetTrue)
                 .help("Print the module to stdout"),
+        )
+        .arg(
+            Arg::new("print-rust")
+                .long("print-rust")
+                .action(ArgAction::SetTrue)
+                .help("Print decompiled Rust code"),
+        )
+        .arg(
+            Arg::new("print-c")
+                .long("print-c")
+                .action(ArgAction::SetTrue)
+                .help("Print decompiled C code"),
         );
 
     // Register all feature flags
@@ -255,6 +267,28 @@ fn main() -> anyhow::Result<()> {
             .to_wat()
             .map_err(|e| anyhow!("WAT generation failed: {}", e))?;
         println!("{}", wat);
+    }
+
+    if matches.get_flag("print-rust") {
+        use washm::decompile::lifter::Lifter;
+        use washm::decompile::printers::rust_printer::RustPrinter;
+
+        let mut lifter = Lifter::new();
+        lifter.run(&mut module);
+
+        let mut printer = RustPrinter::new(&module);
+        println!("{}", printer.print());
+    }
+
+    if matches.get_flag("print-c") {
+        use washm::decompile::lifter::Lifter;
+        use washm::decompile::printers::c_printer::CPrinter;
+
+        let mut lifter = Lifter::new();
+        lifter.run(&mut module);
+
+        let mut printer = CPrinter::new(&module);
+        println!("{}", printer.print());
     }
 
     if let Some(path) = output_path {

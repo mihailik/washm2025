@@ -11,6 +11,8 @@ pub enum Literal {
     V128([u8; 16]),
 }
 
+impl Eq for Literal {}
+
 impl Literal {
     pub fn get_type(&self) -> Type {
         match self {
