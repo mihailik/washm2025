@@ -56,6 +56,21 @@ impl<'m> RustPrinter<'m> {
         format!("v{}", id.index())
     }
 
+    fn is_last_in_func(&self, func: &Function, expr_id: ExpressionId) -> bool {
+        if let FunctionKind::Local { body, .. } = &func.kind {
+            if *body == expr_id {
+                return true;
+            }
+            // Check if it's the last expression in the top-level block
+            match &self.module.expressions[*body].kind {
+                ExpressionKind::Block { list, .. } => list.last() == Some(&expr_id),
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
     pub fn print(&mut self) -> String {
         self.output.clear();
         self.output
@@ -230,14 +245,41 @@ impl<'m> RustPrinter<'m> {
         }
     }
 
-    fn walk_expression_ext(&mut self, func: &Function, expr_id: ExpressionId, is_return: bool) {
+    fn walk_expression_ext(&mut self, func: &Function, expr_id: ExpressionId, is_statement: bool) {
         if self.module.annotations.is_inlined(expr_id) {
             return;
         }
 
+        let expr = &self.module.expressions[expr_id];
+        let is_return =
+            is_statement && self.is_last_in_func(func, expr_id) && func.results != Type::NONE;
+
         self.write_indent();
 
-        let expr = &self.module.expressions[expr_id];
+        // If this expression is in a return position and is printable as an inline
+        // expression, print it as `return <expr>;` and avoid the generic fallback.
+        if is_return {
+            match &expr.kind {
+                ExpressionKind::Const(_)
+                | ExpressionKind::LocalGet { .. }
+                | ExpressionKind::Binary { .. }
+                | ExpressionKind::Unary { .. }
+                | ExpressionKind::GlobalGet { .. }
+                | ExpressionKind::Load { .. }
+                | ExpressionKind::Select { .. }
+                | ExpressionKind::TupleMake { .. }
+                | ExpressionKind::RefFunc { .. }
+                | ExpressionKind::LocalTee { .. }
+                | ExpressionKind::CallIndirect { .. } => {
+                    self.output.push_str("return ");
+                    self.walk_inline_value(func, expr_id);
+                    self.output.push_str(";\n");
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match &expr.kind {
             ExpressionKind::Block { name, list } => {
                 let mut is_if = false;
@@ -455,7 +497,146 @@ impl<'m> RustPrinter<'m> {
                     self.walk_expression_ext(func, cb, false);
                 }
             }
-            ExpressionKind::Throw { tag, operands } => {
+            ExpressionKind::Return { value } => {
+                self.output.push_str("return");
+                if let Some(v) = value {
+                    self.output.push_str(" ");
+                    self.walk_inline_expression(func, *v);
+                }
+                self.output.push_str(";\n");
+            }
+            ExpressionKind::Switch {
+                names,
+                default,
+                condition,
+                value: _,
+            } => {
+                self.output.push_str("match (");
+                self.walk_inline_expression(func, *condition);
+                self.output.push_str(") { /* targets: ");
+                self.output.push_str(&names.join(", "));
+                self.output.push_str(" default: ");
+                self.output.push_str(default);
+                self.output.push_str(" */ }\n");
+            }
+            ExpressionKind::TableSet {
+                table,
+                index,
+                value,
+            } => {
+                self.walk_inline_expression(func, *index);
+                self.output
+                    .push_str(&format!(" /* table {} */ = ", table.index()));
+                self.walk_inline_expression(func, *value);
+                self.output.push_str(";\n");
+            }
+            ExpressionKind::TableGrow {
+                table,
+                value,
+                delta: _,
+            } => {
+                self.output
+                    .push_str(&format!("/* table.grow {} */ ", table.index()));
+                self.walk_inline_expression(func, *value);
+                self.output.push_str(";");
+                self.output.push_str("\n");
+            }
+            ExpressionKind::TableFill {
+                table,
+                dest,
+                value,
+                size,
+            } => {
+                self.output
+                    .push_str(&format!("/* table.fill {} */ ", table.index()));
+                self.walk_inline_expression(func, *dest);
+                self.output.push_str(" = ");
+                self.walk_inline_expression(func, *value);
+                self.output.push_str("; /* size: ");
+                self.walk_inline_expression(func, *size);
+                self.output.push_str(" */\n");
+            }
+            ExpressionKind::TableCopy { .. } => {
+                self.output.push_str("/* table.copy */\n");
+            }
+            ExpressionKind::TableInit { .. } => {
+                self.output.push_str("/* table.init */\n");
+            }
+            ExpressionKind::ElemDrop { segment } => {
+                self.output
+                    .push_str(&format!("/* elem.drop {} */\n", segment.index()));
+            }
+            ExpressionKind::MemoryInit { .. } => {
+                self.output.push_str("/* memory.init */\n");
+            }
+            ExpressionKind::MemoryCopy { .. } => {
+                self.output.push_str("/* memory.copy */\n");
+            }
+            ExpressionKind::MemoryFill { .. } => {
+                self.output.push_str("/* memory.fill */\n");
+            }
+            ExpressionKind::DataDrop { segment } => {
+                self.output
+                    .push_str(&format!("/* data.drop {} */\n", segment.index()));
+            }
+            ExpressionKind::StructSet {
+                type_: _,
+                ptr,
+                index,
+                value,
+            } => {
+                self.walk_inline_expression(func, *ptr);
+                self.output.push_str(&format!(".field{} = ", index));
+                self.walk_inline_expression(func, *value);
+                self.output.push_str(";\n");
+            }
+            ExpressionKind::ArraySet {
+                type_: _,
+                ptr,
+                index,
+                value,
+            } => {
+                self.walk_inline_expression(func, *ptr);
+                self.output.push_str("[");
+                self.walk_inline_expression(func, *index);
+                self.output.push_str("] = ");
+                self.walk_inline_expression(func, *value);
+                self.output.push_str(";\n");
+            }
+            ExpressionKind::Drop { value } => {
+                self.walk_inline_expression(func, *value);
+                self.output.push_str(";\n");
+            }
+            ExpressionKind::Rethrow { target } => {
+                self.output.push_str(&format!("/* rethrow {} */\n", target));
+            }
+            ExpressionKind::RefTest {
+                op: _,
+                value,
+                type_: _,
+            } => {
+                self.output.push_str("/* ref.test */ ");
+                self.walk_inline_expression(func, *value);
+                self.output.push_str(";\n");
+            }
+            ExpressionKind::RefCast {
+                op: _,
+                value,
+                type_: _,
+            } => {
+                self.output.push_str("/* ref.cast */ ");
+                self.walk_inline_expression(func, *value);
+                self.output.push_str(";\n");
+            }
+            ExpressionKind::BrOn {
+                name,
+                op: _,
+                value: _,
+                type_: _,
+            } => {
+                self.output.push_str(&format!("/* br_on {} */\n", name));
+            }
+            ExpressionKind::Throw { tag, operands: _ } => {
                 self.output.push_str(&format!("/* throw {} */\n", tag));
             }
             _ => {
@@ -465,6 +646,199 @@ impl<'m> RustPrinter<'m> {
                 self.output
                     .push_str(&format!("/* unsupported expr: {:?} */", expr.kind));
                 self.output.push_str(";\n");
+            }
+        }
+    }
+
+    fn walk_inline_value(&mut self, func: &Function, expr_id: ExpressionId) {
+        // Like `walk_inline_expression`, but unwraps `LocalTee` and recurses into
+        // child expressions using `walk_inline_value` so temporaries introduced
+        // by the lifter are not printed as `(<tmp> = <val>)`.
+        if let Some(inlined_id) = self.module.annotations.get_inlined_value(expr_id) {
+            self.walk_inline_value(func, inlined_id);
+            return;
+        }
+
+        if let Some(lit) = self.module.annotations.get_constant_global(expr_id) {
+            self.output.push_str(&format!("{} /* global */", lit));
+            return;
+        }
+
+        let expr = &self.module.expressions[expr_id];
+        match &expr.kind {
+            ExpressionKind::Const(lit) => {
+                self.output.push_str(&format!("{}", lit));
+            }
+            ExpressionKind::LocalGet { id } => {
+                let name = self.get_local_name(func, *id, Some(expr_id));
+                self.output.push_str(&name);
+            }
+            ExpressionKind::Binary { op, left, right } => {
+                // For commutative ops like add/mul, prefer a canonical ordering
+                // when both operands are simple locals so output is stable.
+                let commutative = matches!(
+                    op,
+                    crate::ir::ops::BinaryOp::AddInt32
+                        | crate::ir::ops::BinaryOp::AddInt64
+                        | crate::ir::ops::BinaryOp::MulInt32
+                        | crate::ir::ops::BinaryOp::MulInt64
+                );
+
+                // Helper to extract a local id index if this expression is a direct LocalGet
+                // or a LocalTee whose value is a LocalGet
+                let extract_local = |printer: &RustPrinter, id: ExpressionId| -> Option<usize> {
+                    if let ExpressionKind::LocalGet { id: lid } =
+                        &printer.module.expressions[id].kind
+                    {
+                        return Some(lid.index().try_into().unwrap());
+                    }
+                    if let ExpressionKind::LocalTee { value, .. } =
+                        &printer.module.expressions[id].kind
+                    {
+                        if let ExpressionKind::LocalGet { id: lid } =
+                            &printer.module.expressions[*value].kind
+                        {
+                            return Some(lid.index().try_into().unwrap());
+                        }
+                    }
+                    None
+                };
+
+                let left_local_idx = extract_local(self, *left);
+                let right_local_idx = extract_local(self, *right);
+
+                let op_str = match op {
+                    crate::ir::ops::BinaryOp::AddInt32 | crate::ir::ops::BinaryOp::AddInt64 => "+",
+                    crate::ir::ops::BinaryOp::SubInt32 | crate::ir::ops::BinaryOp::SubInt64 => "-",
+                    crate::ir::ops::BinaryOp::MulInt32 | crate::ir::ops::BinaryOp::MulInt64 => "*",
+                    crate::ir::ops::BinaryOp::DivSInt32 | crate::ir::ops::BinaryOp::DivSInt64 => {
+                        "/"
+                    }
+                    crate::ir::ops::BinaryOp::DivUInt32 | crate::ir::ops::BinaryOp::DivUInt64 => {
+                        "/"
+                    }
+                    crate::ir::ops::BinaryOp::EqInt32 | crate::ir::ops::BinaryOp::EqInt64 => "==",
+                    crate::ir::ops::BinaryOp::NeInt32 | crate::ir::ops::BinaryOp::NeInt64 => "!=",
+                    _ => "?",
+                };
+
+                self.output.push_str("(");
+                if commutative {
+                    if let (Some(li), Some(ri)) = (left_local_idx, right_local_idx) {
+                        if li <= ri {
+                            self.walk_inline_value(func, *left);
+                            self.output.push_str(&format!(" {} ", op_str));
+                            self.walk_inline_value(func, *right);
+                        } else {
+                            self.walk_inline_value(func, *right);
+                            self.output.push_str(&format!(" {} ", op_str));
+                            self.walk_inline_value(func, *left);
+                        }
+                    } else {
+                        self.walk_inline_value(func, *left);
+                        self.output.push_str(&format!(" {} ", op_str));
+                        self.walk_inline_value(func, *right);
+                    }
+                } else {
+                    self.walk_inline_value(func, *left);
+                    self.output.push_str(&format!(" {} ", op_str));
+                    self.walk_inline_value(func, *right);
+                }
+                self.output.push_str(")");
+            }
+            ExpressionKind::Unary { op, value } => {
+                let op_str = match op {
+                    crate::ir::ops::UnaryOp::ClzInt32 | crate::ir::ops::UnaryOp::ClzInt64 => "clz",
+                    crate::ir::ops::UnaryOp::CtzInt32 | crate::ir::ops::UnaryOp::CtzInt64 => "ctz",
+                    crate::ir::ops::UnaryOp::PopcntInt32 | crate::ir::ops::UnaryOp::PopcntInt64 => {
+                        "popcnt"
+                    }
+                    _ => "unary",
+                };
+                self.output.push_str(&format!("{}(", op_str));
+                self.walk_inline_value(func, *value);
+                self.output.push_str(")");
+            }
+            ExpressionKind::LocalTee { value, .. } => {
+                self.walk_inline_value(func, *value);
+            }
+            ExpressionKind::GlobalGet { id } => {
+                if let Some(g) = self.module.globals.get(id.cast()) {
+                    self.output.push_str(&g.name);
+                } else {
+                    self.output.push_str(&format!("global_{}", id.index()));
+                }
+            }
+            ExpressionKind::Select {
+                condition,
+                if_true,
+                if_false,
+            } => {
+                self.output.push_str("(");
+                self.walk_inline_value(func, *condition);
+                self.output.push_str(" ? ");
+                self.walk_inline_value(func, *if_true);
+                self.output.push_str(" : ");
+                self.walk_inline_value(func, *if_false);
+                self.output.push_str(")");
+            }
+            ExpressionKind::Load { ptr, .. } => {
+                self.output.push_str("(");
+                self.walk_inline_value(func, *ptr);
+                self.output.push_str(") /* load */");
+            }
+            ExpressionKind::TupleMake { operands } => {
+                self.output.push_str("(");
+                for (i, id) in operands.iter().enumerate() {
+                    if i > 0 {
+                        self.output.push_str(", ");
+                    }
+                    self.walk_inline_value(func, *id);
+                }
+                self.output.push_str(")");
+            }
+            ExpressionKind::RefFunc { func } => {
+                if let Some(f) = self.module.functions.get(*func) {
+                    self.output.push_str(&format!("&{}", f.name));
+                } else {
+                    self.output.push_str("&func");
+                }
+            }
+            ExpressionKind::TableGet { table, index } => {
+                self.output.push_str(&format!("table_{}[", table.index()));
+                self.walk_inline_value(func, *index);
+                self.output.push_str("]");
+            }
+            ExpressionKind::TupleExtract { tuple, index } => {
+                self.output.push_str("/* tuple.extract */ ");
+                self.walk_inline_value(func, *tuple);
+                self.output.push_str(&format!(".{}", index));
+            }
+            ExpressionKind::RefNull { type_: _ } => {
+                self.output.push_str("None /* ref.null */");
+            }
+            ExpressionKind::RefIsNull { value } => {
+                self.output.push_str("(/* ref.is_null */ ");
+                self.walk_inline_value(func, *value);
+                self.output.push_str(")");
+            }
+            ExpressionKind::RefEq { left, right } => {
+                self.walk_inline_value(func, *left);
+                self.output.push_str(" == ");
+                self.walk_inline_value(func, *right);
+            }
+            ExpressionKind::RefAs { op: _, value } => {
+                self.output.push_str("/* ref.as */ ");
+                self.walk_inline_value(func, *value);
+            }
+            ExpressionKind::TableSize { table } => {
+                self.output
+                    .push_str(&format!("table_{}.len()", table.index()));
+            }
+            _ => {
+                // Fallback to the generic inline printer for anything we didn't
+                // explicitly handle here.
+                self.walk_inline_expression(func, expr_id);
             }
         }
     }
@@ -589,6 +963,38 @@ impl<'m> RustPrinter<'m> {
                 } else {
                     self.output.push_str("&func");
                 }
+            }
+            ExpressionKind::StructGet {
+                type_: _,
+                ptr,
+                index,
+                signed: _,
+            } => {
+                self.walk_inline_expression(func, *ptr);
+                self.output.push_str(&format!(".field{}", index));
+            }
+            ExpressionKind::ArrayGet {
+                type_: _,
+                ptr,
+                index,
+                signed: _,
+            } => {
+                self.walk_inline_expression(func, *ptr);
+                self.output.push_str("[");
+                self.walk_inline_expression(func, *index);
+                self.output.push_str("]");
+            }
+            ExpressionKind::ArrayLen { ptr } => {
+                self.walk_inline_expression(func, *ptr);
+                self.output.push_str(".len()");
+            }
+            ExpressionKind::I31Get { i31, signed: _ } => {
+                self.output.push_str("i31_get(");
+                self.walk_inline_expression(func, *i31);
+                self.output.push_str(")");
+            }
+            ExpressionKind::Pop { type_: _ } => {
+                self.output.push_str("/* pop */");
             }
             _ => {
                 self.output.push_str(&format!("/* {:?} */", expr.kind));

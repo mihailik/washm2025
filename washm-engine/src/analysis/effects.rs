@@ -94,8 +94,13 @@ bitflags! {
         const WRITES = Self::MEMORY_WRITE.bits() | Self::GLOBAL_WRITE.bits() | Self::LOCAL_WRITE.bits() | Self::HEAPS_WRITE.bits();
 
         /// Any effect that could affect program semantics if removed.
-        const SIDE_EFFECTS = Self::WRITES.bits() | Self::CALLS.bits() | Self::TRAPS.bits()
-            | Self::THROWS.bits() | Self::BRANCHES.bits() | Self::GROWS.bits();
+        const SIDE_EFFECTS = Self::WRITES.bits()
+            | Self::CALLS.bits()
+            | Self::TRAPS.bits()
+            | Self::MAY_TRAP.bits()
+            | Self::THROWS.bits()
+            | Self::BRANCHES.bits()
+            | Self::GROWS.bits();
     }
 }
 

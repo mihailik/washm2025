@@ -1,12 +1,53 @@
-use similar::{ChangeTag, TextDiff};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use washm::decompile::printers::{CPrinter, RustPrinter};
 use washm::decompile::Lifter;
 use washm::wasm::binary_reader::BinaryReader;
 
-pub fn run_triad_test(source_path_str: &str) {
+pub fn run_triad_test_rust(source_path_str: &str) {
+    let (rust_out, _cpp_out, rust_gold_path, _cpp_gold_path) =
+        generate_roundtrip_outputs(source_path_str);
+
+    // If gold is missing, treat as empty string per spec and rely on string equality to show mismatches
+    let expected = if rust_gold_path.exists() {
+        fs::read_to_string(&rust_gold_path).expect("Failed to read rust gold")
+    } else {
+        String::new()
+    };
+
+    let actual_trimmed = rust_out.trim().replace("\r\n", "\n");
+    let expected_trimmed = expected.trim().replace("\r\n", "\n");
+
+    assert_eq!(
+        expected_trimmed, actual_trimmed,
+        "Rust roundtrip mismatch for {:?}",
+        rust_gold_path
+    );
+}
+
+pub fn run_triad_test_cpp(source_path_str: &str) {
+    let (_rust_out, cpp_out, _rust_gold_path, cpp_gold_path) =
+        generate_roundtrip_outputs(source_path_str);
+
+    // If gold is missing, treat as empty string per spec and rely on string equality to show mismatches
+    let expected = if cpp_gold_path.exists() {
+        fs::read_to_string(&cpp_gold_path).expect("Failed to read cpp gold")
+    } else {
+        String::new()
+    };
+
+    let actual_trimmed = cpp_out.trim().replace("\r\n", "\n");
+    let expected_trimmed = expected.trim().replace("\r\n", "\n");
+
+    assert_eq!(
+        expected_trimmed, actual_trimmed,
+        "C++ roundtrip mismatch for {:?}",
+        cpp_gold_path
+    );
+}
+
+fn generate_roundtrip_outputs(source_path_str: &str) -> (String, String, PathBuf, PathBuf) {
     let source_path = hex_to_path(source_path_str);
     let stem = source_path
         .file_stem()
@@ -25,7 +66,7 @@ pub fn run_triad_test(source_path_str: &str) {
     let status = Command::new("rustc")
         .args([
             "--target",
-            "wasm32-wasip1",
+            "wasm32-unknown-unknown",
             "-O",
             "--crate-type=cdylib",
             "-o",
@@ -58,51 +99,9 @@ pub fn run_triad_test(source_path_str: &str) {
     let rust_out = RustPrinter::new(&module).print();
     let cpp_out = CPrinter::new(&module).print();
 
-    // 4. Compare
-    compare_output(&rust_out, &rust_gold_path, "Rust");
-    compare_output(&cpp_out, &cpp_gold_path, "C++");
+    (rust_out, cpp_out, rust_gold_path, cpp_gold_path)
 }
 
 fn hex_to_path(path_str: &str) -> PathBuf {
     PathBuf::from(path_str)
-}
-
-fn compare_output(actual: &str, gold_path: &Path, lang: &str) {
-    let bless = std::env::var("BLESS").is_ok();
-
-    if !gold_path.exists() || bless {
-        if bless {
-            fs::write(gold_path, actual).expect("Failed to write gold file");
-            println!("Blessed {} for {:?}", lang, gold_path);
-        } else {
-            println!(
-                "--- ACTUAL OUTPUT ({}) ---\n{}\n--- END ACTUAL ---",
-                lang, actual
-            );
-        }
-        // We don't fail if gold doesn't exist yet, to allow bootstrapping new tests
-        return;
-    }
-
-    let expected = fs::read_to_string(gold_path).expect("Failed to read gold file");
-
-    let actual_trimmed = actual.trim().replace("\r\n", "\n");
-    let expected_trimmed = expected.trim().replace("\r\n", "\n");
-
-    if actual_trimmed != expected_trimmed {
-        let diff = TextDiff::from_lines(&expected_trimmed, &actual_trimmed);
-        let mut diff_str = String::new();
-        for change in diff.iter_all_changes() {
-            let sign = match change.tag() {
-                ChangeTag::Delete => "-",
-                ChangeTag::Insert => "+",
-                ChangeTag::Equal => " ",
-            };
-            diff_str.push_str(&format!("{}{}", sign, change));
-        }
-        panic!(
-            "Mismatch in {} output for {:?}\nDIFF:\n{}",
-            lang, gold_path, diff_str
-        );
-    }
 }

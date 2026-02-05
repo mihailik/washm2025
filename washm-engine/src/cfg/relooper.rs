@@ -812,10 +812,11 @@ impl Relooper {
 
         if let Some(next_id) = shape.next {
             let next_expr = self.render_shape(builder, label_var, next_id, in_loop);
+            let next_type = builder.arena[next_expr].type_;
             builder.block(
                 None as Option<&str>,
                 vec![ret, next_expr],
-                crate::ir::BlockType::Empty,
+                crate::ir::BlockType::from(next_type),
             )
         } else {
             ret
@@ -890,7 +891,11 @@ impl Relooper {
         }
 
         if block.processed_branches_out.is_empty() {
-            return builder.block(None as Option<&str>, list, crate::ir::BlockType::Empty);
+            let ty = list
+                .last()
+                .map(|&id| builder.arena[id].type_)
+                .unwrap_or(Type::NONE);
+            return builder.block(None as Option<&str>, list, crate::ir::BlockType::from(ty));
         }
 
         let mut branches_to_render = Vec::new();

@@ -55,6 +55,21 @@ impl<'m> CPrinter<'m> {
         format!("v{}", id.index())
     }
 
+    fn is_last_in_func(&self, func: &Function, expr_id: ExpressionId) -> bool {
+        if let FunctionKind::Local { body, .. } = &func.kind {
+            if *body == expr_id {
+                return true;
+            }
+            // Check if it's the last expression in the top-level block
+            match &self.module.expressions[*body].kind {
+                ExpressionKind::Block { list, .. } => list.last() == Some(&expr_id),
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
     pub fn print(&mut self) -> String {
         self.output.clear();
         self.output
@@ -196,11 +211,36 @@ impl<'m> CPrinter<'m> {
             return;
         }
 
+        let expr = &self.module.expressions[expr_id];
+        let is_return =
+            is_statement && self.is_last_in_func(func, expr_id) && func.results != Type::NONE;
+
         if is_statement {
             self.write_indent();
         }
 
-        let expr = &self.module.expressions[expr_id];
+        // If this expression is in a return position and is printable as an inline
+        // expression, print it as `return <expr>;` and avoid the generic fallback.
+        if is_return {
+            match &expr.kind {
+                ExpressionKind::Const(_)
+                | ExpressionKind::LocalGet { .. }
+                | ExpressionKind::GlobalGet { .. }
+                | ExpressionKind::LocalTee { .. }
+                | ExpressionKind::Binary { .. }
+                | ExpressionKind::Unary { .. }
+                | ExpressionKind::Load { .. }
+                | ExpressionKind::Call { .. }
+                | ExpressionKind::Select { .. } => {
+                    self.output.push_str("return ");
+                    self.walk_inline_expression(func, expr_id);
+                    self.output.push_str(";\n");
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match &expr.kind {
             ExpressionKind::Block { name, list } => {
                 let mut is_if = false;
@@ -655,6 +695,61 @@ impl<'m> CPrinter<'m> {
                 } else {
                     self.output.push_str("&func");
                 }
+            }
+            ExpressionKind::TableGet { table, index } => {
+                self.output.push_str(&format!("table_{}[", table.index()));
+                self.walk_inline_expression(func, *index);
+                self.output.push_str("]");
+            }
+            ExpressionKind::TupleExtract { tuple, index } => {
+                self.output.push_str("/* tuple.extract */ ");
+                self.walk_inline_expression(func, *tuple);
+                self.output.push_str(&format!(".{}", index));
+            }
+            ExpressionKind::RefNull { type_: _ } => {
+                self.output.push_str("NULL /* ref.null */");
+            }
+            ExpressionKind::RefIsNull { value } => {
+                self.output.push_str("(/* ref.is_null */ ");
+                self.walk_inline_expression(func, *value);
+                self.output.push_str(")");
+            }
+            ExpressionKind::RefEq { left, right } => {
+                self.walk_inline_expression(func, *left);
+                self.output.push_str(" == ");
+                self.walk_inline_expression(func, *right);
+            }
+            ExpressionKind::StructGet {
+                type_: _,
+                ptr,
+                index,
+                signed: _,
+            } => {
+                self.walk_inline_expression(func, *ptr);
+                self.output.push_str(&format!(".field{}", index));
+            }
+            ExpressionKind::ArrayGet {
+                type_: _,
+                ptr,
+                index,
+                signed: _,
+            } => {
+                self.walk_inline_expression(func, *ptr);
+                self.output.push_str("[");
+                self.walk_inline_expression(func, *index);
+                self.output.push_str("]");
+            }
+            ExpressionKind::ArrayLen { ptr } => {
+                self.walk_inline_expression(func, *ptr);
+                self.output.push_str(".len()");
+            }
+            ExpressionKind::I31Get { i31, signed: _ } => {
+                self.output.push_str("i31_get(");
+                self.walk_inline_expression(func, *i31);
+                self.output.push_str(")");
+            }
+            ExpressionKind::Pop { type_: _ } => {
+                self.output.push_str("/* pop */");
             }
             _ => {
                 self.output.push_str(&format!("/* {:?} */", expr.kind));

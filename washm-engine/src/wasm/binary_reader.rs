@@ -2891,13 +2891,15 @@ impl BinaryReader {
             .filter(|e| !consumed.contains(e))
             .collect();
 
-        println!("FINAL STACK: {} items", final_stack.len());
-        for (i, expr_id) in final_stack.iter().enumerate() {
-            println!(
-                "  [{}] {:?}: {:?}",
-                i, expr_id, module.expressions[*expr_id].kind
-            );
-        }
+        /*
+                println!("FINAL STACK: {} items", final_stack.len());
+                for (i, expr_id) in final_stack.iter().enumerate() {
+                    println!(
+                        "  [{}] {:?}: {:?}",
+                        i, expr_id, module.expressions[*expr_id].kind
+                    );
+                }
+        */
 
         if final_stack.is_empty() {
             Ok(Some(IrBuilder::new(&mut module.expressions).nop()))

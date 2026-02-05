@@ -74,12 +74,6 @@ fn main() -> anyhow::Result<()> {
                 .help("Pass arguments (e.g. simplify-locals@allow-tee=true)"),
         )
         .arg(
-            Arg::new("all-features")
-                .long("all-features")
-                .action(ArgAction::SetTrue)
-                .help("Enable all features"),
-        )
-        .arg(
             Arg::new("fast-math")
                 .long("fast-math")
                 .action(ArgAction::SetTrue)
@@ -117,9 +111,9 @@ fn main() -> anyhow::Result<()> {
                 .help("Output text format (.wat)"),
         )
         .arg(
-            Arg::new("print")
+            Arg::new("print-wat-arg")
                 .short('p')
-                .long("print")
+                .long("print-wat")
                 .action(ArgAction::SetTrue)
                 .help("Print the module to stdout"),
         )
@@ -262,7 +256,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    if matches.get_flag("print") {
+    if matches.get_flag("print-wat-arg") {
         let wat = module
             .to_wat()
             .map_err(|e| anyhow!("WAT generation failed: {}", e))?;
