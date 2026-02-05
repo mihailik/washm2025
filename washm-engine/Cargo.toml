@@ -27,6 +27,7 @@ wasm-encoder = "0.244.0"
 ahash = "0.8"
 log = "0.4"
 anyhow = "1.0"
+gimli = "0.31"
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }

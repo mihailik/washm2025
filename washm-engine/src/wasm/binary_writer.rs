@@ -802,6 +802,13 @@ impl BinaryWriter {
             }
         }
 
+        for section in &module.custom_sections {
+            encoder.section(&wasm_encoder::CustomSection {
+                name: std::borrow::Cow::Borrowed(&section.name),
+                data: std::borrow::Cow::Borrowed(&section.data),
+            });
+        }
+
         Ok(encoder.finish())
     }
 

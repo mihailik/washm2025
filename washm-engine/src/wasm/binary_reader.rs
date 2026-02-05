@@ -1,8 +1,10 @@
+use crate::collections::id_arena::Id;
 use crate::ir::expression::{ExpressionId, IrBuilder};
 use crate::ir::module::{
     DataSegment, ElementSegment, Export, ExportKind, Function, MemoryLimits, Module, TableLimits,
 };
 use crate::ir::{HeapType, Literal, Type};
+use gimli::{EndianSlice, LittleEndian};
 use std::io;
 use wasmparser::{Operator, OperatorsReader, Parser, Payload, TypeRef, ValType};
 
@@ -20,6 +22,7 @@ pub struct BinaryReader {
     data_ids: Vec<crate::ir::DataId>,
     element_ids: Vec<crate::ir::ElementId>,
     current_func_local_ids: Vec<crate::ir::LocalId>,
+    expr_offsets: std::collections::HashMap<ExpressionId, u32>,
 }
 
 #[derive(Debug)]
@@ -75,6 +78,7 @@ impl BinaryReader {
             data_ids: Vec::new(),
             element_ids: Vec::new(),
             current_func_local_ids: Vec::new(),
+            expr_offsets: std::collections::HashMap::new(),
         }
     }
 
@@ -82,6 +86,11 @@ impl BinaryReader {
         let name = format!("label${}", self.next_label_id);
         self.next_label_id += 1;
         name
+    }
+
+    fn record<T>(&mut self, id: Id<T>, offset: u32) -> Id<T> {
+        self.expr_offsets.insert(id.cast(), offset);
+        id
     }
 
     fn valtype_to_type(ty: ValType) -> Type {
@@ -579,11 +588,86 @@ impl BinaryReader {
                         self.data_ids.push(id);
                     }
                 }
+                Payload::CustomSection(reader) => {
+                    module
+                        .custom_sections
+                        .push(crate::ir::module::CustomSection {
+                            name: reader.name().to_string(),
+                            data: reader.data().to_vec(),
+                        });
+                }
                 _ => {}
             }
         }
 
+        self.apply_dwarf(&mut module);
         Ok(module)
+    }
+
+    fn apply_dwarf(&self, module: &mut Module) {
+        // Prototype: support a test-only helper custom section named ".debug_line.map"
+        // Format: repeated records of little-endian (u32 offset, u32 file_index, u32 line, u32 column)
+        if let Some(s) = module
+            .custom_sections
+            .iter()
+            .find(|s| s.name == ".debug_line.map")
+        {
+            log::info!(
+                "Found .debug_line.map section ({} bytes), applying mappings",
+                s.data.len()
+            );
+            let data = &s.data;
+            if data.len() % 16 != 0 {
+                log::warn!(".debug_line.map has unexpected length: {}", data.len());
+                return;
+            }
+            let mut i = 0;
+            while i < data.len() {
+                let off = u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+                let file_index =
+                    u32::from_le_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]);
+                let line =
+                    u32::from_le_bytes([data[i + 8], data[i + 9], data[i + 10], data[i + 11]]);
+                let column =
+                    u32::from_le_bytes([data[i + 12], data[i + 13], data[i + 14], data[i + 15]]);
+
+                // Find expression with matching offset (exact match)
+                let mut found_expr: Option<ExpressionId> = None;
+                for (expr_id, expr_off) in &self.expr_offsets {
+                    if *expr_off == off {
+                        found_expr = Some(*expr_id);
+                        break;
+                    }
+                }
+
+                if let Some(expr_id) = found_expr {
+                    module.annotations.set_location(
+                        expr_id,
+                        crate::ir::annotation::DebugLocation {
+                            file_index,
+                            line,
+                            column,
+                        },
+                    );
+                } else {
+                    log::warn!("No expression found for offset {}", off);
+                }
+
+                i += 16;
+            }
+        } else if let Some(s) = module
+            .custom_sections
+            .iter()
+            .find(|s| s.name == ".debug_line")
+        {
+            // Real DWARF parsing will go here in Phase 2: parse with gimli and map addresses
+            log::info!("Found .debug_line section ({} bytes)", s.data.len());
+        }
+    }
+
+    /// Expose the expression offset map for testing.
+    pub fn expr_offsets_map(&self) -> &std::collections::HashMap<ExpressionId, u32> {
+        &self.expr_offsets
     }
 
     fn parse_expression(
@@ -605,6 +689,7 @@ impl BinaryReader {
         let mut consumed = std::collections::HashSet::new();
 
         while !reader.eof() {
+            let offset = reader.original_position() as u32;
             let op = reader.read()?;
             match op {
                 Operator::End => {
@@ -616,12 +701,15 @@ impl BinaryReader {
                     break;
                 }
                 Operator::Unreachable => {
-                    let expr = IrBuilder::new(&mut module.expressions).unreachable();
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unreachable(),
+                        offset,
+                    );
                     stack.push(expr);
                     value_stack.push(expr);
                 }
                 Operator::Nop => {
-                    let expr = IrBuilder::new(&mut module.expressions).nop();
+                    let expr = self.record(IrBuilder::new(&mut module.expressions).nop(), offset);
                     stack.push(expr);
                 }
                 Operator::Block { blockty } => {
@@ -633,10 +721,13 @@ impl BinaryReader {
 
                     if let Some(body) = body {
                         label_stack.pop();
-                        let block_expr = IrBuilder::new(&mut module.expressions).block(
-                            Some(name),
-                            vec![body],
-                            result_type,
+                        let block_expr = self.record(
+                            IrBuilder::new(&mut module.expressions).block(
+                                Some(name),
+                                vec![body],
+                                result_type,
+                            ),
+                            offset,
                         );
                         stack.push(block_expr);
                         if result_type != Type::NONE {
@@ -1389,24 +1480,36 @@ impl BinaryReader {
                     value_stack.push(expr);
                 }
                 Operator::I32Const { value } => {
-                    let expr = IrBuilder::new(&mut module.expressions).const_(Literal::I32(value));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).const_(Literal::I32(value)),
+                        offset,
+                    );
                     stack.push(expr);
                     value_stack.push(expr);
                 }
                 Operator::I64Const { value } => {
-                    let expr = IrBuilder::new(&mut module.expressions).const_(Literal::I64(value));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).const_(Literal::I64(value)),
+                        offset,
+                    );
                     stack.push(expr);
                     value_stack.push(expr);
                 }
                 Operator::F32Const { value } => {
-                    let expr = IrBuilder::new(&mut module.expressions)
-                        .const_(Literal::F32(f32::from_bits(value.bits())));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions)
+                            .const_(Literal::F32(f32::from_bits(value.bits()))),
+                        offset,
+                    );
                     stack.push(expr);
                     value_stack.push(expr);
                 }
                 Operator::F64Const { value } => {
-                    let expr = IrBuilder::new(&mut module.expressions)
-                        .const_(Literal::F64(f64::from_bits(value.bits())));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions)
+                            .const_(Literal::F64(f64::from_bits(value.bits()))),
+                        offset,
+                    );
                     stack.push(expr);
                     value_stack.push(expr);
                 }

@@ -417,6 +417,12 @@ pub struct Tag {
     pub type_idx: TypeId,
 }
 
+#[derive(Debug, Clone)]
+pub struct CustomSection {
+    pub name: String,
+    pub data: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Module {
     pub features: FeatureSet,
@@ -430,6 +436,7 @@ pub struct Module {
     pub elements: IdArena<ElementMarker, ElementSegment>, // Element section
     pub data: IdArena<DataMarker, DataSegment>,
     pub tags: IdArena<TagMarker, Tag>,
+    pub custom_sections: Vec<CustomSection>,
     pub type_names: Vec<String>, // Names for types (debug)
     pub annotations: AnnotationStore,
     pub expressions: IdArena<ExpressionMarker, Expression>,
