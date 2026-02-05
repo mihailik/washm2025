@@ -1,4 +1,4 @@
 mod common;
 
-#[washm_testgen_macros::triad_tests]
-mod triad {}
+#[washm_testgen_macros::roundtrip_tests]
+mod roundtrip {}

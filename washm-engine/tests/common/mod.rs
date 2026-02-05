@@ -5,7 +5,7 @@ use washm::decompile::printers::{CPrinter, RustPrinter};
 use washm::decompile::Lifter;
 use washm::wasm::binary_reader::BinaryReader;
 
-pub fn run_triad_test_rust(source_path_str: &str) {
+pub fn run_roundtrip_test_rust(source_path_str: &str) {
     let (rust_out, _cpp_out, rust_gold_path, _cpp_gold_path) =
         generate_roundtrip_outputs(source_path_str);
 
@@ -26,7 +26,7 @@ pub fn run_triad_test_rust(source_path_str: &str) {
     );
 }
 
-pub fn run_triad_test_cpp(source_path_str: &str) {
+pub fn run_roundtrip_test_cpp(source_path_str: &str) {
     let (_rust_out, cpp_out, _rust_gold_path, cpp_gold_path) =
         generate_roundtrip_outputs(source_path_str);
 
