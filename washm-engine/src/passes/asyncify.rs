@@ -246,8 +246,8 @@ pub fn dump_ir(
     expr_id: ExpressionId,
     indent: usize,
 ) {
-    let indent_str = "  ".repeat(indent);
-    eprintln!("{}({:?}) {:?}", indent_str, expr_id, arena[expr_id].kind);
+    let _indent_str = "  ".repeat(indent);
+    // debug: dump removed
     match &arena[expr_id].kind {
         ExpressionKind::Block { list, .. } => {
             for child in list {
@@ -368,7 +368,7 @@ impl Pass for Asyncify {
             if !analyzer.needs_instrumentation(id) {
                 continue;
             }
-            eprintln!("Asyncify: func {} will be instrumented", functions[id].name);
+            // instrumentation log removed
 
             if functions[id].name == "func_10" {
                 let body_id = functions[id].body().unwrap();
@@ -433,10 +433,7 @@ impl ModuleAnalyzer {
         let mut is_bottom_most_runtime = HashSet::new();
 
         for (id, func) in module.functions.iter() {
-            eprintln!(
-                "Asyncify analysis: function {:?} is named {}",
-                id, func.name
-            );
+            // Asyncify analysis log removed
             let mut analyzer = FunctionStateAnalyzer {
                 module,
                 config,
@@ -487,7 +484,7 @@ impl ModuleAnalyzer {
                     changes = true;
                 }
                 if changes {
-                    eprintln!("Asyncify: marking import {} as can_change_state", func.name);
+                    // import marking log removed
                     can_change_state.insert(id);
                 }
             }
@@ -556,26 +553,17 @@ impl<'a> ReadOnlyVisitor for CanChangeStateVisitor<'a> {
         let expression = &arena[expr];
         match &expression.kind {
             ExpressionKind::Loop { .. } => {
-                eprintln!("CanChangeStateVisitor: visiting loop {:?}", expr);
+                // visiting loop
             }
             ExpressionKind::Call { target, .. } => {
-                eprintln!(
-                    "CanChangeStateVisitor: visiting call to {:?} in expr {:?}",
-                    target, expr
-                );
+                // visiting call
                 if self.analyzer.can_change_state.contains(target) {
-                    eprintln!(
-                        "CanChangeStateVisitor: call to {:?} CAN change state",
-                        target
-                    );
+                    // call can change state
                     self.can_change_state = true;
                 }
             }
             ExpressionKind::CallIndirect { .. } if !self.analyzer.ignore_indirect => {
-                eprintln!(
-                    "CanChangeStateVisitor: indirect call CAN change state in expr {:?}",
-                    expr
-                );
+                // indirect call can change state
                 self.can_change_state = true
             }
             _ => {}

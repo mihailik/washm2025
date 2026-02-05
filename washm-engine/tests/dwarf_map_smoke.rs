@@ -1,8 +1,7 @@
 use washm::ir::module::CustomSection as IrCustomSection;
 use washm::wasm::binary_reader::BinaryReader;
 use washm::wasm::binary_writer::BinaryWriter;
-use wasm_encoder::{CustomSection, Module as EncoderModule};
-use wasmparser::Parser;
+// Helper imports removed: not needed in this test
 
 #[test]
 fn dwarf_map_smoke() {
@@ -59,7 +58,7 @@ fn dwarf_map_smoke() {
 
     // Find an expression with DebugLocation annotation
     let mut found = false;
-    for (expr_id, ann) in module3.annotations.clone().into_iter() {
+    for (_, ann) in module3.annotations.clone().into_iter() {
         if let Some(loc) = ann.location {
             if loc.line == 123 {
                 found = true;

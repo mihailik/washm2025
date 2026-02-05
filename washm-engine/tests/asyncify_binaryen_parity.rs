@@ -46,9 +46,9 @@ fn test_asyncify_binaryen_sleep_parity() {
             .expect("factorial-loop export missing");
 
         let func = &module.functions[factorial_loop_id];
-        let body = func.body().expect("factorial-loop missing body");
-        eprintln!("IR BEFORE ASYNCIFY (factorial-loop):");
-        washm::passes::asyncify::dump_ir(&module.expressions, body, 0);
+        let _body = func.body().expect("factorial-loop missing body");
+        // debug: IR before asyncify removed
+        // washm::passes::asyncify::dump_ir(&module.expressions, _body, 0);
     }
 
     let mut asyncify = Asyncify::new(config);
@@ -70,9 +70,9 @@ fn test_asyncify_binaryen_sleep_parity() {
             .expect("factorial-loop export missing");
 
         let func = &module.functions[factorial_loop_id];
-        let body = func.body().expect("factorial-loop missing body");
-        eprintln!("IR AFTER ASYNCIFY (factorial-loop):");
-        washm::passes::asyncify::dump_ir(&module.expressions, body, 0);
+        let _body = func.body().expect("factorial-loop missing body");
+        // debug: IR after asyncify removed
+        // washm::passes::asyncify::dump_ir(&module.expressions, _body, 0);
     }
 
     verify_asyncify_module(&module);

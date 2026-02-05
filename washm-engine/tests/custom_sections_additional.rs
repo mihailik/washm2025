@@ -63,7 +63,7 @@ fn name_and_producers_sections_survive() {
     let mut m = EncoderModule::new();
 
     // Add a name section (writer normally emits one, but we test explicit parsing too)
-    let mut names = NameSection::new();
+    let names = NameSection::new();
     // leave empty but ensure presence
     m.section(&names);
 

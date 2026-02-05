@@ -79,6 +79,113 @@ impl BinaryWriter {
         }
     }
 
+    // Helper: encode a u32 as unsigned LEB128 into bytes
+    fn write_leb_u32(out: &mut Vec<u8>, mut v: u32) {
+        loop {
+            let byte = (v & 0x7F) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(byte);
+                break;
+            } else {
+                out.push(byte | 0x80);
+            }
+        }
+    }
+
+    // Helper: read u32 LEB128 from bytes at offset `p`, returning (value, size_bytes)
+    fn read_leb_u32(bytes: &[u8], p: usize) -> Option<(u32, usize)> {
+        let mut shift = 0u32;
+        let mut result = 0u32;
+        let mut i = 0usize;
+        loop {
+            if p + i >= bytes.len() {
+                return None;
+            }
+            let b = bytes[p + i];
+            result |= ((b & 0x7F) as u32) << shift;
+            i += 1;
+            if (b & 0x80) == 0 {
+                return Some((result, i));
+            }
+            shift += 7;
+            if shift >= 32 {
+                return None;
+            }
+        }
+    }
+
+    // Helper: map wasm_encoder::ValType to its binary byte code
+    fn valtype_to_byte(val: ValType) -> u8 {
+        match val {
+            ValType::I32 => 0x7F,
+            ValType::I64 => 0x7E,
+            ValType::F32 => 0x7D,
+            ValType::F64 => 0x7C,
+            ValType::V128 => 0x7B,
+            ValType::Ref(reft) => {
+                // Distinguish between Func and Extern refs
+                match reft.heap_type {
+                    HeapType::Abstract {
+                        ty: AbstractHeapType::Func,
+                        ..
+                    } => 0x70,
+                    HeapType::Abstract {
+                        ty: AbstractHeapType::Extern,
+                        ..
+                    } => 0x6F,
+                    _ => 0x70,
+                }
+            }
+        }
+    }
+
+    // Finds absolute starts (offsets) for each function body payload (after the size LEB)
+    fn find_code_section_body_starts(bytes: &[u8]) -> Option<Vec<usize>> {
+        // Validate magic and version
+        if bytes.len() < 8 || &bytes[0..4] != b"\0asm" {
+            return None;
+        }
+        let mut p = 8usize; // after header
+        while p < bytes.len() {
+            let id = bytes[p];
+            p += 1;
+            let (section_size, size_len) = Self::read_leb_u32(bytes, p)?;
+            p += size_len;
+            if id == 10u8 {
+                // code section payload begins at p
+                let mut q = p;
+                // read function count
+                let (func_count, cnt_len) = Self::read_leb_u32(bytes, q)?;
+                q += cnt_len;
+                let mut starts = Vec::new();
+                for _ in 0..func_count {
+                    let (body_size, body_size_len) = Self::read_leb_u32(bytes, q)?;
+                    let body_start = q + body_size_len;
+                    starts.push(body_start);
+                    q = body_start + body_size as usize;
+                }
+                return Some(starts);
+            } else {
+                // skip this section
+                p += section_size as usize;
+            }
+        }
+        None
+    }
+
+    fn encode_custom_section(name: &str, payload: &[u8]) -> Vec<u8> {
+        let mut sec: Vec<u8> = Vec::new();
+        sec.push(0u8); // custom section id
+        let mut content: Vec<u8> = Vec::new();
+        Self::write_leb_u32(&mut content, name.len() as u32);
+        content.extend_from_slice(name.as_bytes());
+        content.extend_from_slice(payload);
+        Self::write_leb_u32(&mut sec, content.len() as u32);
+        sec.extend_from_slice(&content);
+        sec
+    }
+
     fn to_val_type(ty: Type) -> ValType {
         if ty == Type::I32 {
             ValType::I32
@@ -471,6 +578,8 @@ impl BinaryWriter {
                         &table_map,
                         &memory_map,
                         &std::collections::HashMap::new(),
+                        None,
+                        None,
                     )?;
                     let init_expr = init_expr_encoder.finish();
                     globals.global(
@@ -558,6 +667,8 @@ impl BinaryWriter {
                     &table_map,
                     &memory_map,
                     &std::collections::HashMap::new(),
+                    None,
+                    None,
                 )?;
                 let offset_expr = offset_expr_encoder.finish();
                 let func_indices: Vec<u32> = segment
@@ -584,6 +695,13 @@ impl BinaryWriter {
         // 10. Code Section
         {
             let mut code = CodeSection::new();
+
+            // For emitting the debug mapping we need to record raw function body bytes
+            // and expression offsets per function (in definition order).
+            let mut func_body_bytes_vecs: Vec<Vec<u8>> = Vec::new();
+            let mut expr_offsets_per_func: Vec<std::collections::HashMap<ExpressionId, u32>> =
+                Vec::new();
+
             for (_, func) in &module.functions {
                 if !func.is_import() {
                     let mut local_map = std::collections::HashMap::<crate::ir::LocalId, u32>::new();
@@ -618,7 +736,19 @@ impl BinaryWriter {
                         }
                     }
 
-                    let mut func_encoder = EncoderFunction::new(locals);
+                    let mut func_encoder = EncoderFunction::new(locals.clone());
+
+                    // Prepare raw func bytes: encode local decls then record instructions
+                    let mut func_bytes: Vec<u8> = Vec::new();
+                    // Encode local decls as vector of (count, valtype)
+                    // number of local groups
+                    Self::write_leb_u32(&mut func_bytes, locals.len() as u32);
+                    for (count, valtype) in &locals {
+                        Self::write_leb_u32(&mut func_bytes, *count);
+                        func_bytes.push(Self::valtype_to_byte(*valtype));
+                    }
+                    let mut expr_offsets: std::collections::HashMap<ExpressionId, u32> =
+                        std::collections::HashMap::new();
 
                     if let Some(body_expr) = func.body() {
                         if !body_expr.is_null() {
@@ -636,15 +766,107 @@ impl BinaryWriter {
                                 &table_map,
                                 &memory_map,
                                 &local_map,
+                                Some(&mut func_bytes),
+                                Some(&mut expr_offsets),
                             )?;
                         }
                     }
+
+                    // Emit End both to encoder and to raw bytes
                     func_encoder.instruction(&Instruction::End);
+                    Instruction::End.encode(&mut func_bytes);
+
                     code.function(&func_encoder);
+
+                    func_body_bytes_vecs.push(func_bytes);
+                    expr_offsets_per_func.push(expr_offsets);
                 }
             }
+
             if !code.is_empty() {
                 encoder.section(&code);
+
+                // After we've written the code section via encoder, we also need to
+                // construct a .debug_line.map custom section based on recorded
+                // expression offsets and module.annotations. We will finish the
+                // module to get bytes and then append a custom section containing
+                // (offset,u32 LE, file_index:u32 LE, line:u32 LE, column:u32 LE) entries.
+                let mut temp_bytes = encoder.finish();
+
+                // Find the code section and function body starts
+                if let Some(body_starts) = Self::find_code_section_body_starts(&temp_bytes) {
+                    // Build records
+                    let mut map_payload: Vec<u8> = Vec::new();
+                    for (func_index, expr_map) in expr_offsets_per_func.iter().enumerate() {
+                        if func_index >= body_starts.len() {
+                            break;
+                        }
+                        let body_start = body_starts[func_index];
+                        for (expr_id, &rel_off) in expr_map {
+                            if let Some(loc) = module.annotations.get_location(*expr_id) {
+                                let abs_off = body_start.wrapping_add(rel_off as usize) as u32;
+                                map_payload.extend(&abs_off.to_le_bytes());
+                                map_payload.extend(&loc.file_index.to_le_bytes());
+                                map_payload.extend(&loc.line.to_le_bytes());
+                                map_payload.extend(&loc.column.to_le_bytes());
+                            }
+                        }
+                    }
+
+                    if !map_payload.is_empty() {
+                        // Append custom section bytes to module bytes
+                        let custom_section =
+                            Self::encode_custom_section(".debug_line.map", &map_payload);
+                        temp_bytes.extend(&custom_section);
+                    }
+
+                    // Also append any custom sections that were present on the Module
+                    for section in &module.custom_sections {
+                        let custom_section =
+                            Self::encode_custom_section(&section.name, &section.data);
+                        temp_bytes.extend(&custom_section);
+                    }
+
+                    // Emit a simple washm-specific global name table so readers can roundtrip
+                    // names even when the standard "name" custom section isn't parsed.
+                    // Format: u32 count, then repeated (u32 len, bytes)
+                    if module.globals.iter().any(|(_, g)| !g.name.is_empty()) {
+                        let mut global_names_payload: Vec<u8> = Vec::new();
+                        let globals_count = module.globals.len() as u32;
+                        global_names_payload.extend(&globals_count.to_le_bytes());
+                        for (_, g) in &module.globals {
+                            let name_bytes = g.name.as_bytes();
+                            global_names_payload.extend(&(name_bytes.len() as u32).to_le_bytes());
+                            global_names_payload.extend(name_bytes);
+                        }
+                        let custom_section = Self::encode_custom_section(
+                            ".washm.global_names",
+                            &global_names_payload,
+                        );
+                        temp_bytes.extend(&custom_section);
+                    }
+
+                    // Emit simple washm-specific function name table so readers can roundtrip
+                    // function names as well.
+                    if module.functions.iter().any(|(_, f)| !f.name.is_empty()) {
+                        let mut func_names_payload: Vec<u8> = Vec::new();
+                        let func_count = module.functions.len() as u32;
+                        func_names_payload.extend(&func_count.to_le_bytes());
+                        for (_, f) in &module.functions {
+                            let name_bytes = f.name.as_bytes();
+                            func_names_payload.extend(&(name_bytes.len() as u32).to_le_bytes());
+                            func_names_payload.extend(name_bytes);
+                        }
+                        let custom_section = Self::encode_custom_section(
+                            ".washm.function_names",
+                            &func_names_payload,
+                        );
+                        temp_bytes.extend(&custom_section);
+                    }
+                }
+
+                // Return combined bytes
+                return Ok(temp_bytes);
             }
         }
 
@@ -666,6 +888,8 @@ impl BinaryWriter {
                     &table_map,
                     &memory_map,
                     &std::collections::HashMap::new(),
+                    None,
+                    None,
                 )?;
                 let offset_expr = offset_expr_encoder.finish();
                 data.active(
@@ -809,6 +1033,23 @@ impl BinaryWriter {
             });
         }
 
+        // Emit simple washm-specific global name table to aid readers that don't
+        // parse the standard "name" custom section.
+        if module.globals.iter().any(|(_, g)| !g.name.is_empty()) {
+            let mut global_names_payload: Vec<u8> = Vec::new();
+            let globals_count = module.globals.len() as u32;
+            global_names_payload.extend(&globals_count.to_le_bytes());
+            for (_, g) in &module.globals {
+                let name_bytes = g.name.as_bytes();
+                global_names_payload.extend(&(name_bytes.len() as u32).to_le_bytes());
+                global_names_payload.extend(name_bytes);
+            }
+            encoder.section(&wasm_encoder::CustomSection {
+                name: std::borrow::Cow::Borrowed(".washm.global_names"),
+                data: std::borrow::Cow::Owned(global_names_payload),
+            });
+        }
+
         Ok(encoder.finish())
     }
 
@@ -826,21 +1067,78 @@ impl BinaryWriter {
         table_map: &std::collections::HashMap<TableId, u32>,
         memory_map: &std::collections::HashMap<MemoryId, u32>,
         local_map: &std::collections::HashMap<crate::ir::LocalId, u32>,
+        // Optional additional output for raw function bytes and expression offsets
+        func_bytes: Option<&mut Vec<u8>>,
+        expr_offsets_out: Option<&mut std::collections::HashMap<ExpressionId, u32>>,
+    ) -> Result<()> {
+        let mut fb = func_bytes;
+        let mut eo = expr_offsets_out;
+        return Self::write_instructions_with_opts(
+            encoder,
+            arena,
+            id,
+            label_stack,
+            func_map,
+            global_map,
+            type_id_map,
+            data_map,
+            element_map,
+            table_map,
+            memory_map,
+            local_map,
+            &mut fb,
+            &mut eo,
+        );
+    }
+
+    fn write_instructions_with_opts<E: InstructionEncoder>(
+        encoder: &mut E,
+        arena: &IdArena<ExpressionMarker, Expression>,
+        id: ExpressionId,
+        label_stack: &mut Vec<Option<String>>,
+        func_map: &std::collections::HashMap<FuncId, u32>,
+        global_map: &std::collections::HashMap<GlobalId, u32>,
+        type_id_map: &std::collections::HashMap<TypeId, u32>,
+        data_map: &std::collections::HashMap<DataId, u32>,
+        element_map: &std::collections::HashMap<ElementId, u32>,
+        table_map: &std::collections::HashMap<TableId, u32>,
+        memory_map: &std::collections::HashMap<MemoryId, u32>,
+        local_map: &std::collections::HashMap<crate::ir::LocalId, u32>,
+        // Optional additional output for raw function bytes and expression offsets
+        func_bytes: &mut Option<&mut Vec<u8>>,
+        expr_offsets_out: &mut Option<&mut std::collections::HashMap<ExpressionId, u32>>,
     ) -> Result<()> {
         let expr = &arena[id];
+
+        // If requested, record offset of this expression relative to function body
+        if let (Some(bytes), Some(map)) = (func_bytes.as_mut(), expr_offsets_out.as_mut()) {
+            map.insert(id, bytes.len() as u32);
+        }
+
+        // Macro to emit an instruction to both the encoder and the optional raw bytes
+        macro_rules! emit_instr {
+            ($instr:expr) => {{
+                let instr = $instr;
+                encoder.instruction(&instr);
+                if let Some(b) = func_bytes.as_mut() {
+                    instr.encode(b);
+                }
+            }};
+        }
+
         match &expr.kind {
             ExpressionKind::Const(lit) => match *lit {
                 Literal::I32(v) => {
-                    encoder.instruction(&Instruction::I32Const(v));
+                    emit_instr!(Instruction::I32Const(v));
                 }
                 Literal::I64(v) => {
-                    encoder.instruction(&Instruction::I64Const(v));
+                    emit_instr!(Instruction::I64Const(v));
                 }
                 Literal::F32(v) => {
-                    encoder.instruction(&Instruction::F32Const(v.into()));
+                    emit_instr!(Instruction::F32Const(v.into()));
                 }
                 Literal::F64(v) => {
-                    encoder.instruction(&Instruction::F64Const(v.into()));
+                    emit_instr!(Instruction::F64Const(v.into()));
                 }
                 Literal::V128(_v) => {
                     return Err(WriteError::UnsupportedFeature(
@@ -853,10 +1151,10 @@ impl BinaryWriter {
                 let idx = local_map.get(&id).ok_or_else(|| {
                     WriteError::InternalError(format!("Local not found: {:?}", id))
                 })?;
-                encoder.instruction(&Instruction::LocalGet(*idx));
+                emit_instr!(Instruction::LocalGet(*idx));
             }
             ExpressionKind::LocalSet { id, value } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *value,
@@ -869,14 +1167,16 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 let idx = local_map.get(id).ok_or_else(|| {
                     WriteError::InternalError(format!("Local not found: {:?}", id))
                 })?;
-                encoder.instruction(&Instruction::LocalSet(*idx));
+                emit_instr!(Instruction::LocalSet(*idx));
             }
             ExpressionKind::LocalTee { id, value } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *value,
@@ -889,23 +1189,25 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 let idx = local_map.get(id).ok_or_else(|| {
                     WriteError::InternalError(format!("Local not found: {:?}", id))
                 })?;
-                encoder.instruction(&Instruction::LocalTee(*idx));
+                emit_instr!(Instruction::LocalTee(*idx));
             }
             ExpressionKind::GlobalGet { id } => {
                 let id = *id;
                 let idx = global_map.get(&id).ok_or_else(|| {
                     WriteError::UnsupportedFeature(format!("Global not found: {:?}", id))
                 })?;
-                encoder.instruction(&Instruction::GlobalGet(*idx));
+                emit_instr!(Instruction::GlobalGet(*idx));
             }
             ExpressionKind::GlobalSet { id, value } => {
                 let id = *id;
                 let value = *value;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     value,
@@ -918,16 +1220,18 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 let idx = global_map.get(&id).ok_or_else(|| {
                     WriteError::UnsupportedFeature(format!("Global not found: {:?}", id))
                 })?;
-                encoder.instruction(&Instruction::GlobalSet(*idx));
+                emit_instr!(Instruction::GlobalSet(*idx));
             }
             ExpressionKind::Binary { op, left, right } => {
                 let left = *left;
                 let right = *right;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     left,
@@ -940,8 +1244,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     right,
@@ -954,6 +1260,8 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
 
                 let instr = match op {
@@ -1037,11 +1345,11 @@ impl BinaryWriter {
                     BinaryOp::LeFloat64 => Instruction::F64Le,
                     BinaryOp::GeFloat64 => Instruction::F64Ge,
                 };
-                encoder.instruction(&instr);
+                emit_instr!(instr);
             }
             ExpressionKind::Unary { op, value } => {
                 let value = *value;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     value,
@@ -1054,6 +1362,8 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 let instr = match op {
                     UnaryOp::EqZInt32 => Instruction::I32Eqz,
@@ -1113,9 +1423,9 @@ impl BinaryWriter {
             }
             ExpressionKind::Block { name, list } => {
                 label_stack.push(name.as_ref().map(|s| s.to_string()));
-                encoder.instruction(&Instruction::Block(Self::to_block_type(expr.type_)));
+                emit_instr!(Instruction::Block(Self::to_block_type(expr.type_)));
                 for &child in list {
-                    Self::write_instructions(
+                    Self::write_instructions_with_opts(
                         encoder,
                         arena,
                         child,
@@ -1128,6 +1438,8 @@ impl BinaryWriter {
                         table_map,
                         memory_map,
                         local_map,
+                        func_bytes,
+                        expr_offsets_out,
                     )?;
                 }
                 encoder.instruction(&Instruction::End);
@@ -1136,8 +1448,8 @@ impl BinaryWriter {
             ExpressionKind::Loop { name, body } => {
                 let body = *body;
                 label_stack.push(name.as_ref().map(|s| s.to_string()));
-                encoder.instruction(&Instruction::Loop(Self::to_block_type(expr.type_)));
-                Self::write_instructions(
+                emit_instr!(Instruction::Loop(Self::to_block_type(expr.type_)));
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     body,
@@ -1150,6 +1462,8 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 encoder.instruction(&Instruction::End);
                 label_stack.pop();
@@ -1163,7 +1477,7 @@ impl BinaryWriter {
                 let condition = *condition;
                 let if_true = *if_true;
                 let if_false = if_false.as_ref().map(|f| *f);
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     condition,
@@ -1176,10 +1490,12 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 label_stack.push(name.as_ref().map(|s| s.to_string()));
-                encoder.instruction(&Instruction::If(Self::to_block_type(expr.type_)));
-                Self::write_instructions(
+                emit_instr!(Instruction::If(Self::to_block_type(expr.type_)));
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     if_true,
@@ -1192,10 +1508,12 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 if let Some(f) = if_false {
-                    encoder.instruction(&Instruction::Else);
-                    Self::write_instructions(
+                    emit_instr!(Instruction::Else);
+                    Self::write_instructions_with_opts(
                         encoder,
                         arena,
                         f,
@@ -1208,6 +1526,8 @@ impl BinaryWriter {
                         table_map,
                         memory_map,
                         local_map,
+                        func_bytes,
+                        expr_offsets_out,
                     )?;
                 }
                 encoder.instruction(&Instruction::End);
@@ -1221,7 +1541,7 @@ impl BinaryWriter {
                 let condition = condition.as_ref().map(|c| *c);
                 let value = value.as_ref().map(|v| *v);
                 if let Some(v) = value {
-                    Self::write_instructions(
+                    Self::write_instructions_with_opts(
                         encoder,
                         arena,
                         v,
@@ -1234,11 +1554,13 @@ impl BinaryWriter {
                         table_map,
                         memory_map,
                         local_map,
+                        func_bytes,
+                        expr_offsets_out,
                     )?;
                 }
                 let depth = Self::find_label_depth(label_stack, name)?;
                 if let Some(c) = condition {
-                    Self::write_instructions(
+                    Self::write_instructions_with_opts(
                         encoder,
                         arena,
                         c,
@@ -1251,16 +1573,18 @@ impl BinaryWriter {
                         table_map,
                         memory_map,
                         local_map,
+                        func_bytes,
+                        expr_offsets_out,
                     )?;
-                    encoder.instruction(&Instruction::BrIf(depth));
+                    emit_instr!(Instruction::BrIf(depth));
                 } else {
-                    encoder.instruction(&Instruction::Br(depth));
+                    emit_instr!(Instruction::Br(depth));
                 }
             }
             ExpressionKind::Return { value } => {
                 let value = value.as_ref().map(|v| *v);
                 if let Some(v) = value {
-                    Self::write_instructions(
+                    Self::write_instructions_with_opts(
                         encoder,
                         arena,
                         v,
@@ -1273,16 +1597,18 @@ impl BinaryWriter {
                         table_map,
                         memory_map,
                         local_map,
+                        func_bytes,
+                        expr_offsets_out,
                     )?;
                 }
-                encoder.instruction(&Instruction::Return);
+                emit_instr!(Instruction::Return);
             }
             ExpressionKind::Unreachable => {
-                encoder.instruction(&Instruction::Unreachable);
+                emit_instr!(Instruction::Unreachable);
             }
             ExpressionKind::Drop { value } => {
                 let value = *value;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     value,
@@ -1295,8 +1621,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::Drop);
+                emit_instr!(Instruction::Drop);
             }
             ExpressionKind::Select {
                 condition,
@@ -1306,7 +1634,7 @@ impl BinaryWriter {
                 let condition = *condition;
                 let if_true = *if_true;
                 let if_false = *if_false;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     if_true,
@@ -1319,8 +1647,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     if_false,
@@ -1333,8 +1663,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     condition,
@@ -1347,8 +1679,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::Select);
+                emit_instr!(Instruction::Select);
             }
             ExpressionKind::Load {
                 bytes,
@@ -1364,7 +1698,7 @@ impl BinaryWriter {
                 let bytes = *bytes;
                 let signed = *signed;
                 let memory = *memory;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     ptr,
@@ -1377,6 +1711,8 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 let memarg = MemArg {
                     offset: offset as u64,
@@ -1385,6 +1721,22 @@ impl BinaryWriter {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
                 };
+                Self::write_instructions_with_opts(
+                    encoder,
+                    arena,
+                    ptr,
+                    label_stack,
+                    func_map,
+                    global_map,
+                    type_id_map,
+                    data_map,
+                    element_map,
+                    table_map,
+                    memory_map,
+                    local_map,
+                    func_bytes,
+                    expr_offsets_out,
+                )?;
                 let instr = match (expr.type_, bytes, signed) {
                     (Type::I32, 4, _) => Instruction::I32Load(memarg),
                     (Type::I32, 1, true) => Instruction::I32Load8S(memarg),
@@ -1418,7 +1770,7 @@ impl BinaryWriter {
                 let align = *align;
                 let bytes = *bytes;
                 let memory = *memory;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     ptr,
@@ -1431,8 +1783,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     value,
@@ -1445,6 +1799,8 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 let memarg = MemArg {
                     offset: offset as u64,
@@ -1474,7 +1830,7 @@ impl BinaryWriter {
                 is_return,
             } => {
                 for &op in operands {
-                    Self::write_instructions(
+                    Self::write_instructions_with_opts(
                         encoder,
                         arena,
                         op,
@@ -1487,19 +1843,21 @@ impl BinaryWriter {
                         table_map,
                         memory_map,
                         local_map,
+                        func_bytes,
+                        expr_offsets_out,
                     )?;
                 }
                 let idx = func_map.get(target).ok_or_else(|| {
                     WriteError::UnsupportedFeature(format!("Function not found: {:?}", target))
                 })?;
                 if *is_return {
-                    encoder.instruction(&Instruction::ReturnCall(*idx));
+                    emit_instr!(Instruction::ReturnCall(*idx));
                 } else {
-                    encoder.instruction(&Instruction::Call(*idx));
+                    emit_instr!(Instruction::Call(*idx));
                 }
             }
             ExpressionKind::Nop => {
-                encoder.instruction(&Instruction::Nop);
+                emit_instr!(Instruction::Nop);
             }
             ExpressionKind::Switch {
                 names,
@@ -1508,7 +1866,7 @@ impl BinaryWriter {
                 value,
             } => {
                 if let Some(v) = value {
-                    Self::write_instructions(
+                    Self::write_instructions_with_opts(
                         encoder,
                         arena,
                         *v,
@@ -1521,9 +1879,11 @@ impl BinaryWriter {
                         table_map,
                         memory_map,
                         local_map,
+                        func_bytes,
+                        expr_offsets_out,
                     )?;
                 }
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *condition,
@@ -1536,13 +1896,15 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 let mut targets = Vec::new();
                 for name in names {
                     targets.push(Self::find_label_depth(label_stack, name)?);
                 }
                 let default_target = Self::find_label_depth(label_stack, default)?;
-                encoder.instruction(&Instruction::BrTable(targets.into(), default_target));
+                emit_instr!(Instruction::BrTable(targets.into(), default_target));
             }
             ExpressionKind::MemorySize { memory } => {
                 let idx = *memory_map.get(memory).ok_or_else(|| {
@@ -1551,7 +1913,7 @@ impl BinaryWriter {
                 encoder.instruction(&Instruction::MemorySize(idx));
             }
             ExpressionKind::MemoryGrow { delta, memory } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *delta,
@@ -1564,11 +1926,13 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 let idx = *memory_map.get(memory).ok_or_else(|| {
                     WriteError::InternalError(format!("Memory not found: {:?}", memory))
                 })?;
-                encoder.instruction(&Instruction::MemoryGrow(idx));
+                emit_instr!(Instruction::MemoryGrow(idx));
             }
             ExpressionKind::CallIndirect {
                 target,
@@ -1577,7 +1941,7 @@ impl BinaryWriter {
                 table,
             } => {
                 for &op in operands {
-                    Self::write_instructions(
+                    Self::write_instructions_with_opts(
                         encoder,
                         arena,
                         op,
@@ -1590,9 +1954,11 @@ impl BinaryWriter {
                         table_map,
                         memory_map,
                         local_map,
+                        func_bytes,
+                        expr_offsets_out,
                     )?;
                 }
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *target,
@@ -1605,6 +1971,8 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
 
                 let idx = *type_id_map
@@ -1614,17 +1982,17 @@ impl BinaryWriter {
                 let table_idx = *table_map.get(table).ok_or_else(|| {
                     WriteError::InternalError(format!("Table not found: {:?}", table))
                 })?;
-                encoder.instruction(&Instruction::CallIndirect {
+                emit_instr!(Instruction::CallIndirect {
                     type_index: idx,
                     table_index: table_idx,
                 });
             }
             ExpressionKind::RefNull { type_ } => {
                 let reftype = Self::to_ref_type(*type_);
-                encoder.instruction(&Instruction::RefNull(reftype.heap_type));
+                emit_instr!(Instruction::RefNull(reftype.heap_type));
             }
             ExpressionKind::RefIsNull { value } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *value,
@@ -1637,17 +2005,19 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::RefIsNull);
+                emit_instr!(Instruction::RefIsNull);
             }
             ExpressionKind::RefFunc { func } => {
                 let idx = func_map.get(func).ok_or_else(|| {
                     WriteError::UnsupportedFeature(format!("Function not found: {:?}", func))
                 })?;
-                encoder.instruction(&Instruction::RefFunc(*idx));
+                emit_instr!(Instruction::RefFunc(*idx));
             }
             ExpressionKind::RefEq { left, right } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *left,
@@ -1660,8 +2030,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *right,
@@ -1674,8 +2046,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::RefEq);
+                emit_instr!(Instruction::RefEq);
             }
             ExpressionKind::MemoryFill {
                 dest,
@@ -1683,7 +2057,7 @@ impl BinaryWriter {
                 size,
                 memory,
             } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *dest,
@@ -1696,8 +2070,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *value,
@@ -1710,8 +2086,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *size,
@@ -1724,8 +2102,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::MemoryFill(
+                emit_instr!(Instruction::MemoryFill(
                     *memory_map.get(memory).ok_or_else(|| {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
@@ -1738,7 +2118,7 @@ impl BinaryWriter {
                 dest_memory,
                 src_memory,
             } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *dest,
@@ -1751,8 +2131,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *src,
@@ -1765,8 +2147,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *size,
@@ -1779,8 +2163,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::MemoryCopy {
+                emit_instr!(Instruction::MemoryCopy {
                     src_mem: *memory_map.get(src_memory).ok_or_else(|| {
                         WriteError::InternalError(format!(
                             "Source memory not found: {:?}",
@@ -1802,7 +2188,7 @@ impl BinaryWriter {
                 size,
                 memory,
             } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *dest,
@@ -1815,8 +2201,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *offset,
@@ -1829,8 +2217,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *size,
@@ -1843,8 +2233,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::MemoryInit {
+                emit_instr!(Instruction::MemoryInit {
                     mem: *memory_map.get(memory).ok_or_else(|| {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
@@ -1854,12 +2246,12 @@ impl BinaryWriter {
                 });
             }
             ExpressionKind::DataDrop { segment } => {
-                encoder.instruction(&Instruction::DataDrop(*data_map.get(segment).ok_or_else(
+                emit_instr!(Instruction::DataDrop(*data_map.get(segment).ok_or_else(
                     || WriteError::InternalError(format!("Data segment not found: {:?}", segment)),
                 )?));
             }
             ExpressionKind::TableGet { table, index } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *index,
@@ -1872,8 +2264,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::TableGet(*table_map.get(table).ok_or_else(
+                emit_instr!(Instruction::TableGet(*table_map.get(table).ok_or_else(
                     || WriteError::InternalError(format!("Table not found: {:?}", table)),
                 )?));
             }
@@ -1882,7 +2276,7 @@ impl BinaryWriter {
                 index,
                 value,
             } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *index,
@@ -1895,8 +2289,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *value,
@@ -1909,13 +2305,15 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::TableSet(*table_map.get(table).ok_or_else(
+                emit_instr!(Instruction::TableSet(*table_map.get(table).ok_or_else(
                     || WriteError::InternalError(format!("Table not found: {:?}", table)),
                 )?));
             }
             ExpressionKind::TableSize { table } => {
-                encoder.instruction(&Instruction::TableSize(*table_map.get(table).ok_or_else(
+                emit_instr!(Instruction::TableSize(*table_map.get(table).ok_or_else(
                     || WriteError::InternalError(format!("Table not found: {:?}", table)),
                 )?));
             }
@@ -1924,7 +2322,7 @@ impl BinaryWriter {
                 delta,
                 value,
             } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *value,
@@ -1937,8 +2335,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *delta,
@@ -1951,8 +2351,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::TableGrow(*table_map.get(table).ok_or_else(
+                emit_instr!(Instruction::TableGrow(*table_map.get(table).ok_or_else(
                     || WriteError::InternalError(format!("Table not found: {:?}", table)),
                 )?));
             }
@@ -1962,7 +2364,7 @@ impl BinaryWriter {
                 value,
                 size,
             } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *dest,
@@ -1975,8 +2377,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *value,
@@ -1989,8 +2393,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *size,
@@ -2003,8 +2409,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::TableFill(*table_map.get(table).ok_or_else(
+                emit_instr!(Instruction::TableFill(*table_map.get(table).ok_or_else(
                     || WriteError::InternalError(format!("Table not found: {:?}", table)),
                 )?));
             }
@@ -2015,7 +2423,7 @@ impl BinaryWriter {
                 src,
                 size,
             } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *dest,
@@ -2028,8 +2436,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *src,
@@ -2042,8 +2452,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *size,
@@ -2056,8 +2468,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::TableCopy {
+                emit_instr!(Instruction::TableCopy {
                     src_table: *table_map.get(src_table).ok_or_else(|| {
                         WriteError::InternalError(format!(
                             "Source table not found: {:?}",
@@ -2079,7 +2493,7 @@ impl BinaryWriter {
                 offset,
                 size,
             } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *dest,
@@ -2092,8 +2506,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *offset,
@@ -2106,8 +2522,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *size,
@@ -2120,8 +2538,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::TableInit {
+                emit_instr!(Instruction::TableInit {
                     table: *table_map.get(table).ok_or_else(|| {
                         WriteError::InternalError(format!("Table not found: {:?}", table))
                     })?,
@@ -2134,7 +2554,7 @@ impl BinaryWriter {
                 });
             }
             ExpressionKind::ElemDrop { segment } => {
-                encoder.instruction(&Instruction::ElemDrop(
+                emit_instr!(Instruction::ElemDrop(
                     *element_map.get(segment).ok_or_else(|| {
                         WriteError::InternalError(format!(
                             "Element segment not found: {:?}",
@@ -2151,7 +2571,7 @@ impl BinaryWriter {
                 value,
                 memory,
             } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *ptr,
@@ -2164,8 +2584,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *value,
@@ -2178,6 +2600,8 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 let arg = MemArg {
                     offset: *offset as u64,
@@ -2196,9 +2620,9 @@ impl BinaryWriter {
                 match op {
                     AtomicOp::Add => {
                         if ty == Type::I32 {
-                            encoder.instruction(&Instruction::I32AtomicRmwAdd(arg));
+                            emit_instr!(Instruction::I32AtomicRmwAdd(arg));
                         } else if ty == Type::I64 {
-                            encoder.instruction(&Instruction::I64AtomicRmwAdd(arg));
+                            emit_instr!(Instruction::I64AtomicRmwAdd(arg));
                         } else {
                             return Err(WriteError::UnsupportedFeature(format!(
                                 "Atomic RMW Add for type {:?}",
@@ -2208,9 +2632,9 @@ impl BinaryWriter {
                     }
                     AtomicOp::Sub => {
                         if ty == Type::I32 {
-                            encoder.instruction(&Instruction::I32AtomicRmwSub(arg));
+                            emit_instr!(Instruction::I32AtomicRmwSub(arg));
                         } else if ty == Type::I64 {
-                            encoder.instruction(&Instruction::I64AtomicRmwSub(arg));
+                            emit_instr!(Instruction::I64AtomicRmwSub(arg));
                         } else {
                             return Err(WriteError::UnsupportedFeature(format!(
                                 "Atomic RMW Sub for type {:?}",
@@ -2220,9 +2644,9 @@ impl BinaryWriter {
                     }
                     AtomicOp::And => {
                         if ty == Type::I32 {
-                            encoder.instruction(&Instruction::I32AtomicRmwAnd(arg));
+                            emit_instr!(Instruction::I32AtomicRmwAnd(arg));
                         } else if ty == Type::I64 {
-                            encoder.instruction(&Instruction::I64AtomicRmwAnd(arg));
+                            emit_instr!(Instruction::I64AtomicRmwAnd(arg));
                         } else {
                             return Err(WriteError::UnsupportedFeature(format!(
                                 "Atomic RMW And for type {:?}",
@@ -2232,9 +2656,9 @@ impl BinaryWriter {
                     }
                     AtomicOp::Or => {
                         if ty == Type::I32 {
-                            encoder.instruction(&Instruction::I32AtomicRmwOr(arg));
+                            emit_instr!(Instruction::I32AtomicRmwOr(arg));
                         } else if ty == Type::I64 {
-                            encoder.instruction(&Instruction::I64AtomicRmwOr(arg));
+                            emit_instr!(Instruction::I64AtomicRmwOr(arg));
                         } else {
                             return Err(WriteError::UnsupportedFeature(format!(
                                 "Atomic RMW Or for type {:?}",
@@ -2244,9 +2668,9 @@ impl BinaryWriter {
                     }
                     AtomicOp::Xor => {
                         if ty == Type::I32 {
-                            encoder.instruction(&Instruction::I32AtomicRmwXor(arg));
+                            emit_instr!(Instruction::I32AtomicRmwXor(arg));
                         } else if ty == Type::I64 {
-                            encoder.instruction(&Instruction::I64AtomicRmwXor(arg));
+                            emit_instr!(Instruction::I64AtomicRmwXor(arg));
                         } else {
                             return Err(WriteError::UnsupportedFeature(format!(
                                 "Atomic RMW Xor for type {:?}",
@@ -2256,9 +2680,9 @@ impl BinaryWriter {
                     }
                     AtomicOp::Xchg => {
                         if ty == Type::I32 {
-                            encoder.instruction(&Instruction::I32AtomicRmwXchg(arg));
+                            emit_instr!(Instruction::I32AtomicRmwXchg(arg));
                         } else if ty == Type::I64 {
-                            encoder.instruction(&Instruction::I64AtomicRmwXchg(arg));
+                            emit_instr!(Instruction::I64AtomicRmwXchg(arg));
                         } else {
                             return Err(WriteError::UnsupportedFeature(format!(
                                 "Atomic RMW Xchg for type {:?}",
@@ -2276,7 +2700,7 @@ impl BinaryWriter {
                 replacement,
                 memory,
             } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *ptr,
@@ -2289,8 +2713,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *expected,
@@ -2303,8 +2729,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *replacement,
@@ -2317,6 +2745,8 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 let arg = MemArg {
                     offset: *offset as u64,
@@ -2333,9 +2763,9 @@ impl BinaryWriter {
                 };
                 let ty = arena[*expected].type_;
                 if ty == Type::I32 {
-                    encoder.instruction(&Instruction::I32AtomicRmwCmpxchg(arg));
+                    emit_instr!(Instruction::I32AtomicRmwCmpxchg(arg));
                 } else if ty == Type::I64 {
-                    encoder.instruction(&Instruction::I64AtomicRmwCmpxchg(arg));
+                    emit_instr!(Instruction::I64AtomicRmwCmpxchg(arg));
                 } else {
                     return Err(WriteError::UnsupportedFeature(format!(
                         "Atomic Cmpxchg for type {:?}",
@@ -2350,7 +2780,7 @@ impl BinaryWriter {
                 expected_type,
                 memory,
             } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *ptr,
@@ -2363,8 +2793,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *expected,
@@ -2377,8 +2809,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *timeout,
@@ -2391,6 +2825,8 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 let arg = MemArg {
                     offset: 0,
@@ -2400,9 +2836,9 @@ impl BinaryWriter {
                     })?,
                 };
                 if *expected_type == Type::I32 {
-                    encoder.instruction(&Instruction::MemoryAtomicWait32(arg));
+                    emit_instr!(Instruction::MemoryAtomicWait32(arg));
                 } else if *expected_type == Type::I64 {
-                    encoder.instruction(&Instruction::MemoryAtomicWait64(arg));
+                    emit_instr!(Instruction::MemoryAtomicWait64(arg));
                 } else {
                     return Err(WriteError::UnsupportedFeature(format!(
                         "Atomic Wait for type {:?}",
@@ -2411,7 +2847,7 @@ impl BinaryWriter {
                 }
             }
             ExpressionKind::AtomicNotify { ptr, count, memory } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *ptr,
@@ -2424,8 +2860,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *count,
@@ -2438,8 +2876,10 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::MemoryAtomicNotify(MemArg {
+                emit_instr!(Instruction::MemoryAtomicNotify(MemArg {
                     offset: 0,
                     align: 2,
                     memory_index: *memory_map.get(memory).ok_or_else(|| {
@@ -2448,10 +2888,10 @@ impl BinaryWriter {
                 }));
             }
             ExpressionKind::AtomicFence => {
-                encoder.instruction(&Instruction::AtomicFence);
+                emit_instr!(Instruction::AtomicFence);
             }
             ExpressionKind::RefAs { op, value } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *value,
@@ -2464,6 +2904,8 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 match op {
                     RefAsOp::NonNull => {
@@ -2485,7 +2927,7 @@ impl BinaryWriter {
             }
             ExpressionKind::TupleMake { operands } => {
                 for operand in operands {
-                    Self::write_instructions(
+                    Self::write_instructions_with_opts(
                         encoder,
                         arena,
                         *operand,
@@ -2498,11 +2940,13 @@ impl BinaryWriter {
                         table_map,
                         memory_map,
                         local_map,
+                        func_bytes,
+                        expr_offsets_out,
                     )?;
                 }
             }
             ExpressionKind::TupleExtract { tuple, index } => {
-                Self::write_instructions(
+                Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *tuple,
@@ -2515,6 +2959,8 @@ impl BinaryWriter {
                     table_map,
                     memory_map,
                     local_map,
+                    func_bytes,
+                    expr_offsets_out,
                 )?;
                 // WASM doesn't have a tuple.extract opcode in the same way,
                 // but some implementations use local.get/set for components.
