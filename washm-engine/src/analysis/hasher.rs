@@ -48,8 +48,8 @@ impl<'a, H: Hasher> ReadOnlyVisitor for DeepHasher<'a, H> {
             ExpressionKind::Block { name, .. } | ExpressionKind::Loop { name, .. } => {
                 name.hash(self.hasher);
             }
-            ExpressionKind::Break { name, .. } => {
-                name.hash(self.hasher);
+            ExpressionKind::Break { target, .. } => {
+                target.hash(self.hasher);
             }
             ExpressionKind::Call {
                 target, is_return, ..

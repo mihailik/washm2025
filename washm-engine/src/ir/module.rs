@@ -437,7 +437,8 @@ pub struct Module {
     pub data: IdArena<DataMarker, DataSegment>,
     pub tags: IdArena<TagMarker, Tag>,
     pub custom_sections: Vec<CustomSection>,
-    pub type_names: Vec<String>, // Names for types (debug)
+    pub type_names: Vec<String>,      // Names for types (debug)
+    pub debug_filenames: Vec<String>, // Global source filenames for DWARF
     pub annotations: AnnotationStore,
     pub expressions: IdArena<ExpressionMarker, Expression>,
     // Dummies for 13-tuple matching

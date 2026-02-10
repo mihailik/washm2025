@@ -133,21 +133,6 @@ impl<'map> Visitor for BranchNameUpdater<'map> {
                     }
                 }
             }
-            ExpressionKind::Break { name, .. } => {
-                if let Some(new_name) = self.name_map.get(name) {
-                    *name = new_name.clone();
-                }
-            }
-            ExpressionKind::Switch { names, default, .. } => {
-                for target in names.iter_mut() {
-                    if let Some(new_name) = self.name_map.get(target.as_str()) {
-                        *target = new_name.clone();
-                    }
-                }
-                if let Some(new_name) = self.name_map.get(default.as_str()) {
-                    *default = new_name.clone();
-                }
-            }
             _ => {}
         }
         self.visit_children(expr_id, arena);

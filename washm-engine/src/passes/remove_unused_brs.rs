@@ -27,7 +27,7 @@ impl Pass for RemoveUnusedBrs {
 
 struct Flow {
     unconditional_breaks: Vec<ExpressionId>,
-    all_targets: HashSet<String>,
+    all_targets: HashSet<ExpressionId>,
     returns: Vec<ExpressionId>,
     falls_through: bool,
 }
@@ -51,9 +51,9 @@ impl Flow {
         }
     }
 
-    fn break_(id: ExpressionId, name: String) -> Self {
+    fn break_(id: ExpressionId, target: ExpressionId) -> Self {
         let mut all_targets = HashSet::new();
-        all_targets.insert(name);
+        all_targets.insert(target);
         Self {
             unconditional_breaks: vec![id],
             all_targets,
@@ -101,47 +101,45 @@ impl BrOptimizer {
                     i += 1;
                 }
 
-                if let Some(block_name) = name.clone() {
-                    let mut still_targetted = false;
-                    let mut j = 0;
-                    while j < current_flow.unconditional_breaks.len() {
-                        let br_id = current_flow.unconditional_breaks[j];
-                        let is_target = if let ExpressionKind::Break {
-                            name: ref br_name,
-                            condition,
-                            ..
+                let block_id = *expr_id;
+                let mut still_targetted = false;
+                let mut j = 0;
+                while j < current_flow.unconditional_breaks.len() {
+                    let br_id = current_flow.unconditional_breaks[j];
+                    let is_target = if let ExpressionKind::Break {
+                        target, condition, ..
+                    } = arena[br_id].kind
+                    {
+                        target == block_id && condition.is_none()
+                    } else {
+                        false
+                    };
+
+                    if is_target {
+                        if let ExpressionKind::Break {
+                            value: Some(val), ..
                         } = arena[br_id].kind
                         {
-                            *br_name == block_name && condition.is_none()
+                            arena[br_id].kind = arena[val].kind.clone();
+                            arena[br_id].type_ = arena[val].type_;
                         } else {
-                            false
-                        };
-
-                        if is_target {
-                            if let ExpressionKind::Break {
-                                value: Some(val), ..
-                            } = arena[br_id].kind
-                            {
-                                // Instead of cloning the expression, we can just replace the break with the value
-                                arena[br_id].kind = arena[val].kind.clone();
-                                arena[br_id].type_ = arena[val].type_;
-                            } else {
-                                arena[br_id].kind = ExpressionKind::Nop;
-                                arena[br_id].type_ = Type::NONE;
-                            }
-                            current_flow.unconditional_breaks.remove(j);
-                            current_flow.falls_through = true;
-                        } else {
-                            still_targetted = true;
-                            j += 1;
+                            arena[br_id].kind = ExpressionKind::Nop;
+                            arena[br_id].type_ = Type::NONE;
                         }
-                    }
-
-                    if !still_targetted && !current_flow.all_targets.contains(&block_name) {
-                        name = None;
+                        current_flow.unconditional_breaks.remove(j);
+                        current_flow.falls_through = true;
                     } else {
-                        current_flow.all_targets.remove(&block_name);
+                        j += 1;
                     }
+                }
+
+                if current_flow.all_targets.contains(&block_id) {
+                    current_flow.all_targets.remove(&block_id);
+                    still_targetted = true;
+                }
+
+                if !still_targetted {
+                    name = None;
                 }
 
                 // Update the block in the arena
@@ -150,25 +148,20 @@ impl BrOptimizer {
                 current_flow
             }
             ExpressionKind::Loop { mut name, mut body } => {
-                let loop_name = name.clone();
+                let loop_id = *expr_id;
                 let mut flow = self.optimize(&mut body, arena);
 
-                if let Some(loop_name_str) = loop_name {
-                    flow.unconditional_breaks.retain(|&br_id| {
-                        if let ExpressionKind::Break {
-                            name: ref br_name, ..
-                        } = arena[br_id].kind
-                        {
-                            return *br_name != loop_name_str;
-                        }
-                        true
-                    });
-
-                    if !flow.all_targets.contains(&loop_name_str) {
-                        name = None;
-                    } else {
-                        flow.all_targets.remove(&loop_name_str);
+                flow.unconditional_breaks.retain(|&br_id| {
+                    if let ExpressionKind::Break { target, .. } = arena[br_id].kind {
+                        return target != loop_id;
                     }
+                    true
+                });
+
+                if flow.all_targets.contains(&loop_id) {
+                    flow.all_targets.remove(&loop_id);
+                } else {
+                    name = None;
                 }
 
                 arena[*expr_id].kind = ExpressionKind::Loop { name, body };
@@ -221,7 +214,7 @@ impl BrOptimizer {
                 flow
             }
             ExpressionKind::Break {
-                name,
+                target,
                 mut condition,
                 mut value,
             } => {
@@ -255,21 +248,21 @@ impl BrOptimizer {
                 }
 
                 arena[*expr_id].kind = ExpressionKind::Break {
-                    name: name.clone(),
+                    target,
                     condition,
                     value,
                 };
 
                 if condition.is_none() {
-                    Flow::break_(*expr_id, name)
+                    Flow::break_(*expr_id, target)
                 } else {
                     let mut flow = Flow::fallthrough();
-                    flow.all_targets.insert(name);
+                    flow.all_targets.insert(target);
                     flow
                 }
             }
             ExpressionKind::Switch {
-                names,
+                targets,
                 default,
                 mut condition,
                 mut value,
@@ -282,13 +275,13 @@ impl BrOptimizer {
 
                 if let ExpressionKind::Const(Literal::I32(idx)) = arena[condition].kind {
                     let idx_usize = idx as usize;
-                    let target = if idx_usize < names.len() {
-                        names[idx_usize].clone()
+                    let target = if idx_usize < targets.len() {
+                        targets[idx_usize]
                     } else {
-                        default.clone()
+                        default
                     };
                     arena[*expr_id].kind = ExpressionKind::Break {
-                        name: target,
+                        target,
                         condition: None,
                         value,
                     };
@@ -297,13 +290,13 @@ impl BrOptimizer {
                 }
 
                 let mut flow = Flow::none();
-                for n in names.iter() {
-                    flow.all_targets.insert(n.clone());
+                for t in targets.iter() {
+                    flow.all_targets.insert(*t);
                 }
-                flow.all_targets.insert(default.clone());
+                flow.all_targets.insert(default);
 
                 arena[*expr_id].kind = ExpressionKind::Switch {
-                    names,
+                    targets,
                     default,
                     condition,
                     value,

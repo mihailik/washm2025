@@ -178,6 +178,7 @@ impl ControlFlowGraph {
 
 #[derive(Clone)]
 struct Scope {
+    expr_id: ExpressionId,
     label: Option<String>,
     break_target: usize,
     continue_target: Option<usize>,
@@ -210,12 +211,12 @@ impl<'a> CFGBuilder<'a> {
 
     fn visit(&mut self, expr_id: ExpressionId) {
         match &self.arena[expr_id].kind {
-            ExpressionKind::Block { name, list } => {
+            ExpressionKind::Block { name: _, list } => {
                 let end_block = self.cfg.add_block();
-                let label = name.clone();
 
                 self.scope_stack.push(Scope {
-                    label,
+                    expr_id,
+                    label: None,
                     break_target: end_block,
                     continue_target: None,
                 });
@@ -228,16 +229,16 @@ impl<'a> CFGBuilder<'a> {
                 self.cfg.add_edge(self.current_block, end_block);
                 self.current_block = end_block;
             }
-            ExpressionKind::Loop { name, body } => {
+            ExpressionKind::Loop { name: _, body } => {
                 let loop_head = self.cfg.add_block();
                 let loop_exit = self.cfg.add_block();
-                let label = name.clone();
 
                 self.cfg.add_edge(self.current_block, loop_head);
                 self.current_block = loop_head;
 
                 self.scope_stack.push(Scope {
-                    label,
+                    expr_id,
+                    label: None,
                     break_target: loop_exit,
                     continue_target: Some(loop_head),
                 });
@@ -282,7 +283,7 @@ impl<'a> CFGBuilder<'a> {
                 self.current_block = merge_block;
             }
             ExpressionKind::Break {
-                name,
+                target,
                 condition,
                 value,
             } => {
@@ -291,12 +292,12 @@ impl<'a> CFGBuilder<'a> {
                 }
                 if let Some(c) = condition {
                     self.visit(*c);
-                    if let Some(target) = self.find_break_target(Some(name)) {
-                        self.cfg.add_edge(self.current_block, target);
+                    if let Some(target_block) = self.find_break_target(*target) {
+                        self.cfg.add_edge(self.current_block, target_block);
                     }
                 } else {
-                    if let Some(target) = self.find_break_target(Some(name)) {
-                        self.cfg.add_edge(self.current_block, target);
+                    if let Some(target_block) = self.find_break_target(*target) {
+                        self.cfg.add_edge(self.current_block, target_block);
                     }
                     let dead = self.cfg.add_block();
                     self.current_block = dead;
@@ -355,15 +356,11 @@ impl<'a> CFGBuilder<'a> {
         }
     }
 
-    fn find_break_target(&self, name: Option<&str>) -> Option<usize> {
-        if let Some(n) = name {
-            for scope in self.scope_stack.iter().rev() {
-                if scope.label.as_deref() == Some(n) {
-                    return scope.continue_target.or(Some(scope.break_target));
-                }
+    fn find_break_target(&self, target: ExpressionId) -> Option<usize> {
+        for scope in self.scope_stack.iter().rev() {
+            if scope.expr_id == target {
+                return scope.continue_target.or(Some(scope.break_target));
             }
-        } else if let Some(scope) = self.scope_stack.last() {
-            return scope.continue_target.or(Some(scope.break_target));
         }
         None
     }

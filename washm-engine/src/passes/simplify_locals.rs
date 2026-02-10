@@ -93,9 +93,9 @@ struct FunctionContext {
     _allow_structure: bool,
     _allow_nesting: bool,
     /// Sinkable traces that exit blocks
-    block_breaks: HashMap<String, Vec<BlockBreak>>,
+    block_breaks: HashMap<ExpressionId, Vec<BlockBreak>>,
     /// Blocks that cannot produce return values
-    unoptimizable_blocks: std::collections::HashSet<String>,
+    unoptimizable_blocks: std::collections::HashSet<ExpressionId>,
     /// Stack of sinkables for if-else branches
     if_stack: Vec<HashMap<crate::ir::LocalId, SinkableInfo>>,
     /// Whether we need a refinalize
@@ -338,14 +338,13 @@ impl SimplifyLocals {
                 self.visit_loop_post(expr_id, ctx, arena);
                 ctx.sinkables = snapshot;
             }
-            ExpressionKind::Break {
-                ref name, value, ..
-            } => {
+            ExpressionKind::Break { target, value, .. } => {
+                let target_id = target;
                 if value.is_some() {
-                    ctx.unoptimizable_blocks.insert(name.clone());
+                    ctx.unoptimizable_blocks.insert(target_id);
                 } else {
                     ctx.block_breaks
-                        .entry(name.clone())
+                        .entry(target_id)
                         .or_default()
                         .push(BlockBreak {
                             br_id: *expr_id,
@@ -372,30 +371,24 @@ impl SimplifyLocals {
         ctx: &mut FunctionContext,
         arena: &mut IdArena<ExpressionMarker, Expression>,
     ) {
-        let (name, hb) = if let ExpressionKind::Block { name, .. } = &arena[*expr_id].kind {
-            let n = name.clone();
-            let hb = n
-                .as_ref()
-                .map(|s| ctx.block_breaks.contains_key(s))
-                .unwrap_or(false);
-            (n, hb)
-        } else {
+        if !matches!(arena[*expr_id].kind, ExpressionKind::Block { .. }) {
             return;
-        };
+        }
+
+        let id = *expr_id;
+        let hb = ctx.block_breaks.contains_key(&id);
 
         if self.allow_structure {
             self.optimize_block_return(*expr_id, ctx, arena);
         }
 
-        if let Some(n) = name {
-            if ctx.unoptimizable_blocks.contains(&n) {
-                ctx.sinkables.clear();
-                ctx.unoptimizable_blocks.remove(&n);
-            }
-            if hb {
-                ctx.sinkables.clear();
-                ctx.block_breaks.remove(&n);
-            }
+        if ctx.unoptimizable_blocks.contains(&id) {
+            ctx.sinkables.clear();
+            ctx.unoptimizable_blocks.remove(&id);
+        }
+        if hb {
+            ctx.sinkables.clear();
+            ctx.block_breaks.remove(&id);
         }
 
         ReFinalize::run(expr_id, arena);
@@ -407,22 +400,16 @@ impl SimplifyLocals {
         ctx: &mut FunctionContext,
         arena: &mut IdArena<ExpressionMarker, Expression>,
     ) {
-        let (name, list_len) = match &arena[expr_id].kind {
-            ExpressionKind::Block { name, list } => (name.clone(), list.len()),
+        let list_len = match &arena[expr_id].kind {
+            ExpressionKind::Block { list, .. } => list.len(),
             _ => return,
         };
 
-        if let Some(ref n) = name {
-            if ctx.unoptimizable_blocks.contains(n) {
-                return;
-            }
+        if ctx.unoptimizable_blocks.contains(&expr_id) {
+            return;
         }
 
-        let breaks = if let Some(ref n) = name {
-            ctx.block_breaks.get(n)
-        } else {
-            None
-        };
+        let breaks = ctx.block_breaks.get(&expr_id);
 
         if breaks.is_none() || breaks.as_ref().unwrap().is_empty() {
             let mut result = None;

@@ -18,7 +18,7 @@ impl Pass for RemoveUnusedNames {
         for (_, func) in functions {
             if let Some(body) = func.body_mut() {
                 let mut visitor = NameOptimizerVisitor {
-                    used_names: HashSet::new(),
+                    used_targets: HashSet::new(),
                 };
                 visitor.visit(body, arena);
             }
@@ -27,7 +27,7 @@ impl Pass for RemoveUnusedNames {
 }
 
 struct NameOptimizerVisitor {
-    used_names: HashSet<String>,
+    used_targets: HashSet<ExpressionId>,
 }
 
 impl Visitor for NameOptimizerVisitor {
@@ -36,38 +36,33 @@ impl Visitor for NameOptimizerVisitor {
         expr_id: &mut ExpressionId,
         arena: &mut IdArena<ExpressionMarker, Expression>,
     ) {
-        let kind = &arena[*expr_id].kind;
-        match kind {
-            ExpressionKind::Block { .. } | ExpressionKind::Loop { .. } => {
-                // Visit children first
-                self.visit_children(expr_id, arena);
+        match &arena[*expr_id].kind {
+            ExpressionKind::Break { target, .. } => {
+                self.used_targets.insert(*target);
+            }
+            ExpressionKind::Switch {
+                targets, default, ..
+            } => {
+                for t in targets {
+                    self.used_targets.insert(*t);
+                }
+                self.used_targets.insert(*default);
+            }
+            _ => {}
+        }
 
-                // Now check if the name of this block/loop was used
-                if let ExpressionKind::Block { ref mut name, .. }
-                | ExpressionKind::Loop { ref mut name, .. } = arena[*expr_id].kind
-                {
-                    if let Some(n) = name.clone() {
-                        if !self.used_names.contains(&n) {
-                            *name = None;
-                        } else {
-                            // Name was used by a break inside, but it shouldn't propagate outside
-                            self.used_names.remove(&n);
-                        }
-                    }
+        self.visit_children(expr_id, arena);
+
+        let id = *expr_id;
+        match &mut arena[id].kind {
+            ExpressionKind::Block { name, .. } | ExpressionKind::Loop { name, .. } => {
+                if !self.used_targets.contains(&id) {
+                    *name = None;
+                } else {
+                    self.used_targets.remove(&id);
                 }
             }
-            ExpressionKind::Break { name, .. } => {
-                self.used_names.insert(name.clone());
-                self.visit_children(expr_id, arena);
-            }
-            ExpressionKind::Switch { names, default, .. } => {
-                for n in names {
-                    self.used_names.insert(n.clone());
-                }
-                self.used_names.insert(default.clone());
-                self.visit_children(expr_id, arena);
-            }
-            _ => self.visit_children(expr_id, arena),
+            _ => {}
         }
     }
 }

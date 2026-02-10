@@ -43,29 +43,27 @@ impl IdentifyIfElse {
     ) {
         let expr = &module.expressions[expr_id];
         match &expr.kind {
-            ExpressionKind::Block { name, list, .. } => {
-                if let Some(label) = name {
-                    if !list.is_empty() {
-                        let first_id = list[0];
-                        if let ExpressionKind::Break {
-                            name: target,
-                            condition: Some(cond),
-                            ..
-                        } = &module.expressions[first_id].kind
-                        {
-                            if target == label {
-                                // Double check with CFG: Does this br_if target the end of this block?
-                                if let Some(&block_id) = cfg.expr_to_block.get(&first_id) {
-                                    let bb = &cfg.blocks[block_id];
-                                    if bb.succs.len() == 2 {
-                                        results.insert(
-                                            expr_id,
-                                            Annotation::If {
-                                                condition: *cond,
-                                                inverted: true,
-                                            },
-                                        );
-                                    }
+            ExpressionKind::Block { list, .. } => {
+                if !list.is_empty() {
+                    let first_id = list[0];
+                    if let ExpressionKind::Break {
+                        target,
+                        condition: Some(cond),
+                        ..
+                    } = &module.expressions[first_id].kind
+                    {
+                        if *target == expr_id {
+                            // Double check with CFG: Does this br_if target the end of this block?
+                            if let Some(&block_id) = cfg.expr_to_block.get(&first_id) {
+                                let bb = &cfg.blocks[block_id];
+                                if bb.succs.len() == 2 {
+                                    results.insert(
+                                        expr_id,
+                                        Annotation::If {
+                                            condition: *cond,
+                                            inverted: true,
+                                        },
+                                    );
                                 }
                             }
                         }

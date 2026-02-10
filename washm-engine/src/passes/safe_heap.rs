@@ -130,8 +130,22 @@ impl Visitor for SafeHeapVisitor {
                     mem_id, bytes_val, signed_val, offset_val, align_val, get_ptr, expr_type,
                 );
 
+                // Preserve any existing child block name if present (search recursively)
+                let mut chosen_name: Option<String> = None;
+                let mut search_stack = vec![set_ptr, bounds_check, new_load];
+                while let Some(id) = search_stack.pop() {
+                    let expr = &arena[id];
+                    if let ExpressionKind::Block {
+                        name: Some(ref n), ..
+                    } = &expr.kind
+                    {
+                        chosen_name = Some(n.clone());
+                        break;
+                    }
+                    expr.kind.for_each_child(|c| search_stack.push(c));
+                }
                 Some(ExpressionKind::Block {
-                    name: None,
+                    name: chosen_name,
                     list: vec![set_ptr, bounds_check, new_load],
                 })
             }
@@ -158,8 +172,22 @@ impl Visitor for SafeHeapVisitor {
                 let new_store =
                     builder.store(mem_id, bytes_val, offset_val, align_val, get_ptr, val_val);
 
+                // Preserve any existing child block name if present (search recursively)
+                let mut chosen_name: Option<String> = None;
+                let mut search_stack = vec![set_ptr, bounds_check, new_store];
+                while let Some(id) = search_stack.pop() {
+                    let expr = &arena[id];
+                    if let ExpressionKind::Block {
+                        name: Some(ref n), ..
+                    } = &expr.kind
+                    {
+                        chosen_name = Some(n.clone());
+                        break;
+                    }
+                    expr.kind.for_each_child(|c| search_stack.push(c));
+                }
                 Some(ExpressionKind::Block {
-                    name: None,
+                    name: chosen_name,
                     list: vec![set_ptr, bounds_check, new_store],
                 })
             }
@@ -168,6 +196,54 @@ impl Visitor for SafeHeapVisitor {
 
         if let Some(kind) = new_node {
             arena[*expr_id].kind = kind;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::expression::IrBuilder;
+    use crate::ir::module::Function;
+    use crate::ir::Literal;
+
+    #[test]
+    fn test_safe_heap_preserves_store_name() {
+        let mut module = Module::new();
+        let mut builder = IrBuilder::new(&mut module.expressions);
+
+        // Create a value block with a name that should be preserved when SafeHeap wraps it
+        let const_val = builder.const_(Literal::I32(42));
+        let inner_block = builder.block(Some("inner"), vec![const_val], Type::I32);
+        let ptr = builder.const_(Literal::I32(0));
+
+        let store = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 1, ptr, inner_block);
+
+        module.add_function(Function::new(
+            "test".to_string(),
+            Type::NONE,
+            Type::NONE,
+            vec![],
+            store,
+        ));
+
+        let mut pass = SafeHeap::new(LocalId::from_raw_parts(0, 0));
+        pass.run(&mut module);
+
+        let func_id = module.functions.ids().next().unwrap();
+        let body_id = module.functions[func_id].body().unwrap();
+
+        // After the pass, the function body should be a block that preserves the 'inner' name
+        if let ExpressionKind::Block { name, list } = &module.expressions[body_id].kind {
+            assert!(
+                name == &Some(String::from("inner"))
+                    || list.iter().any(|&id| match &module.expressions[id].kind {
+                        ExpressionKind::Block { name: Some(n), .. } if n == "inner" => true,
+                        _ => false,
+                    })
+            );
+        } else {
+            panic!("Expected Block, got {:?}", module.expressions[body_id].kind);
         }
     }
 }

@@ -47,7 +47,7 @@ impl ControlFlowGraph {
 struct CFGBuilder<'a> {
     cfg: ControlFlowGraph,
     current_block: BlockId,
-    labels: HashMap<String, BlockId>,
+    targets: HashMap<ExpressionId, BlockId>,
     arena: &'a IdArena<ExpressionMarker, Expression>,
 }
 
@@ -78,7 +78,7 @@ impl<'a> CFGBuilder<'a> {
                 expr_to_block: HashMap::new(),
             },
             current_block: entry_id,
-            labels: HashMap::new(),
+            targets: HashMap::new(),
             arena,
         }
     }
@@ -112,13 +112,10 @@ impl<'a> CFGBuilder<'a> {
         self.cfg.blocks[self.current_block].contents.push(expr_id);
 
         match &self.arena[expr_id].kind {
-            ExpressionKind::Block { name, list } => {
+            ExpressionKind::Block { name: _, list } => {
                 let join_block = self.create_block();
 
-                // Save old label if shadowed
-                let old_label = name
-                    .as_ref()
-                    .and_then(|n| self.labels.insert(n.clone(), join_block));
+                self.targets.insert(expr_id, join_block);
 
                 for &child in list {
                     self.visit(child);
@@ -126,15 +123,6 @@ impl<'a> CFGBuilder<'a> {
 
                 // End of block falls through to join
                 self.add_edge(self.current_block, join_block);
-
-                // Restore label
-                if let Some(n) = name {
-                    if let Some(old) = old_label {
-                        self.labels.insert(n.clone(), old);
-                    } else {
-                        self.labels.remove(n);
-                    }
-                }
 
                 self.current_block = join_block;
             }
@@ -155,10 +143,8 @@ impl<'a> CFGBuilder<'a> {
                 };
                 let join_block = self.create_block();
 
-                // Save old label if shadowed
-                let old_label = name
-                    .as_ref()
-                    .and_then(|n| self.labels.insert(n.clone(), join_block));
+                // Register target for breaks
+                self.targets.insert(expr_id, join_block);
 
                 self.add_edge(entry_block, then_block);
 
@@ -177,18 +163,9 @@ impl<'a> CFGBuilder<'a> {
                     self.add_edge(entry_block, join_block);
                 }
 
-                // Restore label
-                if let Some(n) = name {
-                    if let Some(old) = old_label {
-                        self.labels.insert(n.clone(), old);
-                    } else {
-                        self.labels.remove(n);
-                    }
-                }
-
                 self.current_block = join_block;
             }
-            ExpressionKind::Loop { name, body } => {
+            ExpressionKind::Loop { name: _, body } => {
                 let entry_block = self.current_block;
                 let loop_header = self.create_block();
                 let loop_exit = self.create_block();
@@ -196,9 +173,7 @@ impl<'a> CFGBuilder<'a> {
                 self.add_edge(entry_block, loop_header);
 
                 // For a loop, the label points to the header
-                let old_label = name
-                    .as_ref()
-                    .and_then(|n| self.labels.insert(n.clone(), loop_header));
+                self.targets.insert(expr_id, loop_header);
 
                 self.current_block = loop_header;
                 self.visit(*body);
@@ -206,18 +181,10 @@ impl<'a> CFGBuilder<'a> {
                 // Structural fallthrough to exit
                 self.add_edge(self.current_block, loop_exit);
 
-                if let Some(n) = name {
-                    if let Some(old) = old_label {
-                        self.labels.insert(n.clone(), old);
-                    } else {
-                        self.labels.remove(n);
-                    }
-                }
-
                 self.current_block = loop_exit;
             }
             ExpressionKind::Break {
-                name,
+                target,
                 condition,
                 value,
             } => {
@@ -229,8 +196,8 @@ impl<'a> CFGBuilder<'a> {
                 }
 
                 let entry_block = self.current_block;
-                if let Some(&target) = self.labels.get(name) {
-                    self.add_edge(entry_block, target);
+                if let Some(&target_block) = self.targets.get(target) {
+                    self.add_edge(entry_block, target_block);
                 }
 
                 let next_block = self.create_block();
@@ -255,7 +222,7 @@ impl<'a> CFGBuilder<'a> {
                 self.current_block = next_block;
             }
             ExpressionKind::Switch {
-                names,
+                targets,
                 default,
                 condition,
                 value,
@@ -266,9 +233,9 @@ impl<'a> CFGBuilder<'a> {
                 }
 
                 let entry_block = self.current_block;
-                for name in names.iter().chain(std::iter::once(default)) {
-                    if let Some(&target) = self.labels.get(name) {
-                        self.add_edge(entry_block, target);
+                for target in targets.iter().chain(std::iter::once(default)) {
+                    if let Some(&target_block) = self.targets.get(target) {
+                        self.add_edge(entry_block, target_block);
                     }
                 }
 

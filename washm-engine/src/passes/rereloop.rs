@@ -12,7 +12,7 @@ pub struct Rereloop;
 
 impl Pass for Rereloop {
     fn name(&self) -> &str {
-        "rereloop"
+        "Rereloop"
     }
 
     fn run(&mut self, module: &mut Module) {
@@ -20,6 +20,11 @@ impl Pass for Rereloop {
         for (_, func) in functions {
             if let Some(&mut body) = func.body_mut() {
                 let mut context = ReReloopContext::new(arena);
+
+                // Pre-pass: Find all named blocks/loops and create CFG blocks for them
+                // so that Breaks can always find their targets regardless of traversal order.
+                context.pre_scan_labels(body);
+
                 let entry = context.start_cfg_block();
                 context.stack.push(Task::Triage(body));
 
@@ -67,7 +72,8 @@ struct ReReloopContext<'a> {
     builder: IrBuilder<'a>,
     relooper: Relooper,
     curr_cfg_block: Option<RelooperBlockId>,
-    break_targets: HashMap<String, RelooperBlockId>,
+    break_targets: HashMap<ExpressionId, RelooperBlockId>,
+    label_counts: HashMap<ExpressionId, usize>,
     stack: Vec<Task>,
 }
 
@@ -78,6 +84,7 @@ impl<'a> ReReloopContext<'a> {
             relooper: Relooper::new(),
             curr_cfg_block: None,
             break_targets: HashMap::new(),
+            label_counts: HashMap::new(),
             stack: Vec::new(),
         }
     }
@@ -97,6 +104,41 @@ impl<'a> ReReloopContext<'a> {
     fn start_cfg_block(&mut self) -> RelooperBlockId {
         let block = self.make_cfg_block();
         self.set_curr_cfg_block(block)
+    }
+
+    fn pre_scan_labels(&mut self, expr_id: ExpressionId) {
+        let mut stack = vec![expr_id];
+        let mut visited = std::collections::HashSet::new();
+
+        // Pass 1: find all names
+        while let Some(curr_id) = stack.pop() {
+            if !visited.insert(curr_id) {
+                continue;
+            }
+
+            let expr_kind = self.builder.arena.get(curr_id).unwrap().kind.clone();
+            match &expr_kind {
+                ExpressionKind::Block { .. } | ExpressionKind::Loop { .. } => {
+                    let l = self.make_cfg_block();
+                    self.break_targets.insert(curr_id, l);
+                }
+                ExpressionKind::Break { target, .. } => {
+                    *self.label_counts.entry(*target).or_insert(0) += 1;
+                }
+                ExpressionKind::Switch {
+                    targets, default, ..
+                } => {
+                    for t in targets {
+                        *self.label_counts.entry(*t).or_insert(0) += 1;
+                    }
+                    *self.label_counts.entry(*default).or_insert(0) += 1;
+                }
+                _ => {}
+            }
+            expr_kind.for_each_child(|child| {
+                stack.push(child);
+            });
+        }
     }
 
     fn get_curr_block_list_mut(&mut self) -> &mut Vec<ExpressionId> {
@@ -136,12 +178,11 @@ impl<'a> ReReloopContext<'a> {
                 condition_block,
             } => {
                 let if_true_end = self.curr_cfg_block.unwrap();
-                let after = self.start_cfg_block();
-                self.add_branch(condition_block, after, None);
-
                 let expr = self.builder.arena.get(if_expr_id).unwrap().clone();
                 if let ExpressionKind::If { if_false, .. } = &expr.kind {
                     if let Some(if_false_expr) = *if_false {
+                        let if_false_begin = self.start_cfg_block();
+                        self.add_branch(condition_block, if_false_begin, None);
                         self.stack.push(Task::IfPhase1 {
                             _if_expr_id: if_expr_id,
                             _condition_block: condition_block,
@@ -149,6 +190,8 @@ impl<'a> ReReloopContext<'a> {
                         });
                         self.stack.push(Task::Triage(if_false_expr));
                     } else {
+                        let after = self.start_cfg_block();
+                        self.add_branch(condition_block, after, None);
                         self.add_branch(if_true_end, after, None);
                     }
                 }
@@ -165,21 +208,26 @@ impl<'a> ReReloopContext<'a> {
     fn triage(&mut self, expr_id: ExpressionId) {
         let expr_kind = self.builder.arena.get(expr_id).unwrap().kind.clone();
         match expr_kind {
-            ExpressionKind::Block { name, list } => {
-                if let Some(ref n) = name {
-                    let l = self.make_cfg_block();
-                    self.break_targets.insert(n.clone(), l);
+            ExpressionKind::Block { list, .. } => {
+                let count = self.label_counts.get(&expr_id).cloned().unwrap_or(0);
+                if count > 0 {
+                    let l = *self.break_targets.get(&expr_id).unwrap();
                     self.stack.push(Task::BlockJoin { later: l });
                 }
                 for &child in list.iter().rev() {
                     self.stack.push(Task::Triage(child));
                 }
             }
-            ExpressionKind::Loop { name, body } => {
-                let top = self.start_cfg_block();
-                if let Some(ref n) = name {
-                    self.break_targets.insert(n.clone(), top);
-                }
+            ExpressionKind::Loop { body, .. } => {
+                let before = self.curr_cfg_block.unwrap();
+                let top = if let Some(&t) = self.break_targets.get(&expr_id) {
+                    t
+                } else {
+                    self.start_cfg_block()
+                };
+                self.set_curr_cfg_block(top);
+                self.add_branch(before, top, None);
+
                 let after = self.make_cfg_block();
                 self.stack.push(Task::BlockJoin { later: after });
                 self.stack.push(Task::Triage(body));
@@ -198,22 +246,28 @@ impl<'a> ReReloopContext<'a> {
                 self.stack.push(Task::Triage(if_true));
             }
             ExpressionKind::Break {
-                name, condition, ..
+                target, condition, ..
             } => {
+                let target_id = target;
                 let before = self.curr_cfg_block.unwrap();
-                let target = *self
-                    .break_targets
-                    .get(&name)
-                    .expect("Break target not found");
-                self.relooper.add_branch(before, target, condition, None);
-                if condition.is_some() {
-                    self.start_cfg_block();
+                let target = match self.break_targets.get(&target_id) {
+                    Some(&t) => t,
+                    None => {
+                        panic!("Break target not found: {:?}", target_id);
+                    }
+                };
+                if let Some(cond) = condition {
+                    let next = self.make_cfg_block();
+                    self.relooper.add_branch(before, target, Some(cond), None);
+                    self.relooper.add_branch(before, next, None, None);
+                    self.set_curr_cfg_block(next);
                 } else {
+                    self.relooper.add_branch(before, target, None, None);
                     self.stop_control_flow();
                 }
             }
             ExpressionKind::Switch {
-                names,
+                targets,
                 default,
                 condition,
                 ..
@@ -225,18 +279,15 @@ impl<'a> ReReloopContext<'a> {
                     block.switch_condition = Some(condition);
                 }
 
-                let mut target_values: HashMap<String, Vec<u32>> = HashMap::new();
-                for (i, name) in names.iter().enumerate() {
-                    target_values
-                        .entry(name.clone())
-                        .or_default()
-                        .push(i as u32);
+                let mut target_values: HashMap<ExpressionId, Vec<u32>> = HashMap::new();
+                for (i, t) in targets.iter().enumerate() {
+                    target_values.entry(*t).or_default().push(i as u32);
                 }
 
-                for (name, values) in &target_values {
+                for (t_id, values) in &target_values {
                     let target = *self
                         .break_targets
-                        .get(name)
+                        .get(t_id)
                         .expect("Switch target not found");
                     self.relooper
                         .add_switch_branch(before, target, values.clone(), None);

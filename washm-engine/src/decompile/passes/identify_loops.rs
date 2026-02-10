@@ -56,16 +56,14 @@ impl<'a> ReadOnlyVisitor for LoopVisitor<'a> {
             if let ExpressionKind::Block { list, .. } = &arena[*body].kind {
                 if let Some(last_id) = list.last() {
                     if let ExpressionKind::Break {
-                        name: br_name,
+                        target,
                         condition: Some(_),
                         ..
                     } = &arena[*last_id].kind
                     {
-                        if let Some(loop_name) = name {
-                            if br_name == loop_name {
-                                self.loop_annotations.push((expr, LoopType::DoWhile));
-                                detected = true;
-                            }
+                        if *target == expr {
+                            self.loop_annotations.push((expr, LoopType::DoWhile));
+                            detected = true;
                         }
                     }
                 }

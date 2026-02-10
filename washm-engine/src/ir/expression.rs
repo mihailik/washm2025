@@ -65,7 +65,7 @@ pub enum ExpressionKind {
         body: ExpressionId,
     },
     Break {
-        name: String,
+        target: ExpressionId,
         condition: Option<ExpressionId>,
         value: Option<ExpressionId>,
     },
@@ -99,8 +99,8 @@ pub enum ExpressionKind {
     },
     Nop,
     Switch {
-        names: Vec<String>,          // List of target labels
-        default: String,             // Default label
+        targets: Vec<ExpressionId>,  // List of target labels
+        default: ExpressionId,       // Default label
         condition: ExpressionId,     // Index
         value: Option<ExpressionId>, // Value passing (nullable)
     },
@@ -329,14 +329,14 @@ pub enum ExpressionKind {
         body: ExpressionId,
         catch_tags: Vec<String>,
         catch_bodies: Vec<ExpressionId>,
-        delegate: Option<String>,
+        delegate: Option<ExpressionId>,
     },
     Throw {
         tag: String,
         operands: Vec<ExpressionId>,
     },
     Rethrow {
-        target: String,
+        target: ExpressionId,
     },
     RefTest {
         op: crate::ir::ops::RefTestOp,
@@ -349,7 +349,7 @@ pub enum ExpressionKind {
         type_: Type,
     },
     BrOn {
-        name: String,
+        target: ExpressionId,
         op: crate::ir::ops::BrOnOp,
         value: ExpressionId,
         type_: Type,
@@ -1035,15 +1035,15 @@ impl<'a> IrBuilder<'a> {
 
     pub fn switch(
         &mut self,
-        names: Vec<String>,
-        default: String,
+        targets: Vec<ExpressionId>,
+        default: ExpressionId,
         condition: ExpressionId,
         value: Option<ExpressionId>,
     ) -> ExpressionId {
         Expression::alloc(
             self.arena,
             ExpressionKind::Switch {
-                names,
+                targets,
                 default,
                 condition,
                 value,
@@ -1095,26 +1095,19 @@ impl<'a> IrBuilder<'a> {
 
     pub fn break_(
         &mut self,
-        name: impl LabelName,
+        target: ExpressionId,
         condition: Option<ExpressionId>,
         value: Option<ExpressionId>,
-        type_: impl Into<BlockType>,
+        type_: Type,
     ) -> ExpressionId {
-        let name = name.to_option_string();
-        let name = name.unwrap_or_default();
-        let type_ = type_.into();
-        let actual_type = match type_ {
-            BlockType::Empty => Type::NONE,
-            BlockType::Type(t) => t,
-        };
         Expression::alloc(
             self.arena,
             ExpressionKind::Break {
-                name,
+                target,
                 condition,
                 value,
             },
-            actual_type,
+            type_,
         )
     }
 
@@ -1732,7 +1725,7 @@ impl<'a> IrBuilder<'a> {
 
     pub fn br_on(
         &mut self,
-        name: String,
+        target: ExpressionId,
         op: crate::ir::ops::BrOnOp,
         value: ExpressionId,
         type_: Type,
@@ -1740,7 +1733,7 @@ impl<'a> IrBuilder<'a> {
         Expression::alloc(
             self.arena,
             ExpressionKind::BrOn {
-                name,
+                target,
                 op,
                 value,
                 type_,
@@ -1816,11 +1809,11 @@ impl ExpressionKind {
                 body: builder.deep_clone(*body),
             },
             ExpressionKind::Break {
-                name,
+                target,
                 condition,
                 value,
             } => ExpressionKind::Break {
-                name: name.clone(),
+                target: *target,
                 condition: condition.map(|e| builder.deep_clone(e)),
                 value: value.map(|e| builder.deep_clone(e)),
             },
@@ -1872,13 +1865,13 @@ impl ExpressionKind {
             },
             ExpressionKind::Nop => ExpressionKind::Nop,
             ExpressionKind::Switch {
-                names,
+                targets,
                 default,
                 condition,
                 value,
             } => ExpressionKind::Switch {
-                names: names.clone(),
-                default: default.clone(),
+                targets: targets.clone(),
+                default: *default,
                 condition: builder.deep_clone(*condition),
                 value: value.map(|e| builder.deep_clone(e)),
             },
@@ -2224,12 +2217,12 @@ impl ExpressionKind {
                 type_: *type_,
             },
             ExpressionKind::BrOn {
-                name,
+                target,
                 op,
                 value,
                 type_,
             } => ExpressionKind::BrOn {
-                name: name.clone(),
+                target: *target,
                 op: *op,
                 value: builder.deep_clone(*value),
                 type_: *type_,

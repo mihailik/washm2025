@@ -289,8 +289,8 @@ impl<'m> CPrinter<'m> {
                     // Only emit an end label if some Break targets this block name
                     let mut found = false;
                     for (_id, expr) in self.module.expressions.iter() {
-                        if let ExpressionKind::Break { name: bn, .. } = &expr.kind {
-                            if bn == n {
+                        if let ExpressionKind::Break { target, .. } = &expr.kind {
+                            if *target == expr_id {
                                 found = true;
                                 break;
                             }
@@ -368,22 +368,18 @@ impl<'m> CPrinter<'m> {
                 self.output.push_str("}\n");
             }
             ExpressionKind::Break {
-                name,
+                target,
                 condition,
                 value,
             } => {
-                // Lower breaks to goto labels for C output. Use sanitized <name>_end labels
-                if name.is_empty() {
-                    // Unnamed break; fall back to comment
-                    if let Some(v) = value {
-                        self.output.push_str("/* break with value: ");
-                        self.walk_inline_expression(func, *v);
-                        self.output.push_str(" */;\n");
-                    } else {
-                        self.output.push_str("/* break */;\n");
-                    }
-                } else {
-                    let safe = Self::sanitize_label(name);
+                let target_name = match &self.module.expressions[*target].kind {
+                    ExpressionKind::Block { name, .. } => name.clone(),
+                    ExpressionKind::Loop { name, .. } => name.clone(),
+                    _ => None,
+                };
+
+                if let Some(name) = target_name {
+                    let safe = Self::sanitize_label(&name);
                     let label = format!("{}_end", safe);
                     if let Some(cond) = condition {
                         self.output.push_str("if (");
@@ -408,6 +404,15 @@ impl<'m> CPrinter<'m> {
                             self.output.push_str(&label);
                             self.output.push_str(";\n");
                         }
+                    }
+                } else {
+                    // Unnamed break; fall back to comment
+                    if let Some(v) = value {
+                        self.output.push_str("/* break with value: ");
+                        self.walk_inline_expression(func, *v);
+                        self.output.push_str(" */;\n");
+                    } else {
+                        self.output.push_str("/* break */;\n");
                     }
                 }
             }
@@ -501,7 +506,7 @@ impl<'m> CPrinter<'m> {
                 self.output.push_str(";\n");
             }
             ExpressionKind::Switch {
-                names,
+                targets,
                 default,
                 condition,
                 value: _,
@@ -509,9 +514,9 @@ impl<'m> CPrinter<'m> {
                 self.output.push_str("switch (");
                 self.walk_inline_expression(func, *condition);
                 self.output.push_str(") { /* targets: ");
-                self.output.push_str(&names.join(", "));
+                self.output.push_str(&format!("{:?}", targets));
                 self.output.push_str(" default: ");
-                self.output.push_str(default);
+                self.output.push_str(&format!("{:?}", default));
                 self.output.push_str(" */ }\n");
             }
             ExpressionKind::CallIndirect {
@@ -601,6 +606,7 @@ impl<'m> CPrinter<'m> {
             ExpressionKind::Binary { op, left, right } => {
                 self.output.push_str("(");
                 self.walk_inline_expression(func, *left);
+                // TODO: create a data structure for operator strings, and look up from there instead of this massive verbose match
                 let op_str = match op {
                     crate::ir::ops::BinaryOp::AddInt32 | crate::ir::ops::BinaryOp::AddInt64 => "+",
                     crate::ir::ops::BinaryOp::SubInt32 | crate::ir::ops::BinaryOp::SubInt64 => "-",
@@ -608,8 +614,53 @@ impl<'m> CPrinter<'m> {
                     crate::ir::ops::BinaryOp::DivSInt32 | crate::ir::ops::BinaryOp::DivSInt64 => {
                         "/"
                     }
+                    crate::ir::ops::BinaryOp::DivUInt32 | crate::ir::ops::BinaryOp::DivUInt64 => {
+                        "/"
+                    }
+                    crate::ir::ops::BinaryOp::RemSInt32 | crate::ir::ops::BinaryOp::RemSInt64 => {
+                        "%"
+                    }
+                    crate::ir::ops::BinaryOp::RemUInt32 | crate::ir::ops::BinaryOp::RemUInt64 => {
+                        "%"
+                    }
                     crate::ir::ops::BinaryOp::EqInt32 | crate::ir::ops::BinaryOp::EqInt64 => "==",
+                    crate::ir::ops::BinaryOp::EqFloat32 | crate::ir::ops::BinaryOp::EqFloat64 => {
+                        "=="
+                    }
                     crate::ir::ops::BinaryOp::NeInt32 | crate::ir::ops::BinaryOp::NeInt64 => "!=",
+                    crate::ir::ops::BinaryOp::NeFloat32 | crate::ir::ops::BinaryOp::NeFloat64 => {
+                        "!="
+                    }
+                    crate::ir::ops::BinaryOp::LtSInt32 | crate::ir::ops::BinaryOp::LtSInt64 => "<",
+                    crate::ir::ops::BinaryOp::LtUInt32 | crate::ir::ops::BinaryOp::LtUInt64 => "<",
+                    crate::ir::ops::BinaryOp::LtFloat32 | crate::ir::ops::BinaryOp::LtFloat64 => {
+                        "<"
+                    }
+                    crate::ir::ops::BinaryOp::LeSInt32 | crate::ir::ops::BinaryOp::LeSInt64 => "<=",
+                    crate::ir::ops::BinaryOp::LeUInt32 | crate::ir::ops::BinaryOp::LeUInt64 => "<=",
+                    crate::ir::ops::BinaryOp::LeFloat32 | crate::ir::ops::BinaryOp::LeFloat64 => {
+                        "<="
+                    }
+                    crate::ir::ops::BinaryOp::GtSInt32 | crate::ir::ops::BinaryOp::GtSInt64 => ">",
+                    crate::ir::ops::BinaryOp::GtUInt32 | crate::ir::ops::BinaryOp::GtUInt64 => ">",
+                    crate::ir::ops::BinaryOp::GtFloat32 | crate::ir::ops::BinaryOp::GtFloat64 => {
+                        ">"
+                    }
+                    crate::ir::ops::BinaryOp::GeSInt32 | crate::ir::ops::BinaryOp::GeSInt64 => ">=",
+                    crate::ir::ops::BinaryOp::GeUInt32 | crate::ir::ops::BinaryOp::GeUInt64 => ">=",
+                    crate::ir::ops::BinaryOp::GeFloat32 | crate::ir::ops::BinaryOp::GeFloat64 => {
+                        ">="
+                    }
+                    crate::ir::ops::BinaryOp::AndInt32 | crate::ir::ops::BinaryOp::AndInt64 => "&",
+                    crate::ir::ops::BinaryOp::OrInt32 | crate::ir::ops::BinaryOp::OrInt64 => "|",
+                    crate::ir::ops::BinaryOp::XorInt32 | crate::ir::ops::BinaryOp::XorInt64 => "^",
+                    crate::ir::ops::BinaryOp::ShlInt32 | crate::ir::ops::BinaryOp::ShlInt64 => "<<",
+                    crate::ir::ops::BinaryOp::ShrSInt32 | crate::ir::ops::BinaryOp::ShrSInt64 => {
+                        ">>"
+                    }
+                    crate::ir::ops::BinaryOp::ShrUInt32 | crate::ir::ops::BinaryOp::ShrUInt64 => {
+                        ">>"
+                    }
                     _ => "?",
                 };
                 self.output.push_str(&format!(" {} ", op_str));

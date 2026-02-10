@@ -1,12 +1,14 @@
 use crate::collections::id_arena::Id;
-use crate::ir::expression::{ExpressionId, IrBuilder};
+use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, IrBuilder};
 use crate::ir::module::{
     DataSegment, ElementSegment, Export, ExportKind, Function, MemoryLimits, Module, TableLimits,
 };
 use crate::ir::{HeapType, Literal, Type};
 use gimli::{EndianSlice, LittleEndian};
 use std::io;
-use wasmparser::{Operator, OperatorsReader, Parser, Payload, TypeRef, ValType};
+use wasmparser::{
+    Name, NameSectionReader, Operator, OperatorsReader, Parser, Payload, TypeRef, ValType,
+};
 
 pub struct BinaryReader {
     types: Vec<(Vec<Type>, Vec<Type>)>,
@@ -22,7 +24,12 @@ pub struct BinaryReader {
     data_ids: Vec<crate::ir::DataId>,
     element_ids: Vec<crate::ir::ElementId>,
     current_func_local_ids: Vec<crate::ir::LocalId>,
+    current_func_local_types: Vec<crate::ir::Type>,
+    current_func_body_start: Option<usize>,
+    body_starts: Vec<u64>,
     expr_offsets: std::collections::HashMap<ExpressionId, u32>,
+    expr_to_func: std::collections::HashMap<ExpressionId, usize>,
+    current_function_index: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -78,18 +85,38 @@ impl BinaryReader {
             data_ids: Vec::new(),
             element_ids: Vec::new(),
             current_func_local_ids: Vec::new(),
+            current_func_local_types: Vec::new(),
+            current_func_body_start: None,
+            body_starts: Vec::new(),
             expr_offsets: std::collections::HashMap::new(),
+            expr_to_func: std::collections::HashMap::new(),
+            current_function_index: None,
         }
     }
 
     fn make_label_name(&mut self) -> String {
-        let name = format!("label${}", self.next_label_id);
+        let name = format!("L_{}", self.next_label_id);
         self.next_label_id += 1;
         name
     }
 
     fn record<T>(&mut self, id: Id<T>, offset: u32) -> Id<T> {
-        self.expr_offsets.insert(id.cast(), offset);
+        let rel_off = if let Some(start) = self.current_func_body_start {
+            if offset >= start as u32 {
+                offset - start as u32
+            } else {
+                offset
+            }
+        } else {
+            offset
+        };
+        // Use 1-based offsets so that recorded expression offsets are never zero.
+        // This avoids ambiguous zero offsets and matches writer expectations.
+        let one_based = rel_off.saturating_add(1u32);
+        self.expr_offsets.insert(id.cast(), one_based);
+        if let Some(idx) = self.current_function_index {
+            self.expr_to_func.insert(id.cast(), idx);
+        }
         id
     }
 
@@ -184,6 +211,9 @@ impl BinaryReader {
     }
 
     pub fn parse_module(&mut self, data: &[u8]) -> Result<Module> {
+        self.expr_offsets.clear();
+        self.expr_to_func.clear();
+        self.body_starts.clear();
         let mut module = Module::new();
         let mut function_section = Vec::new();
         let mut import_count = 0;
@@ -251,7 +281,7 @@ impl BinaryReader {
                                 let results = Self::types_to_type(&func_type.1);
 
                                 let mut func = crate::ir::module::Function::new_import(
-                                    field_name.to_string(),
+                                    String::new(),
                                     module_name.to_string(),
                                     field_name.to_string(),
                                     params,
@@ -275,7 +305,7 @@ impl BinaryReader {
                                     maximum: table_type.maximum.map(|m| m as u32),
                                 };
                                 let id = module.add_table(crate::ir::module::Table {
-                                    name: field_name.to_string(),
+                                    name: String::new(),
                                     limits,
                                     kind: crate::ir::module::TableKind::Import {
                                         module: module_name.to_string(),
@@ -290,7 +320,7 @@ impl BinaryReader {
                                     maximum: memory_type.maximum.map(|m| m as u32),
                                 };
                                 let id = module.add_memory(crate::ir::module::Memory {
-                                    name: field_name.to_string(),
+                                    name: String::new(),
                                     limits,
                                     kind: crate::ir::module::MemoryKind::Import {
                                         module: module_name.to_string(),
@@ -303,7 +333,7 @@ impl BinaryReader {
                                 let ty = Self::valtype_to_type(global_type.content_type);
                                 let mutable = global_type.mutable;
                                 let id = module.add_global(crate::ir::module::Global {
-                                    name: field_name.to_string(),
+                                    name: String::new(),
                                     type_: ty,
                                     mutable,
                                     kind: crate::ir::module::GlobalKind::Import {
@@ -344,7 +374,7 @@ impl BinaryReader {
                         }
 
                         let id = module.add_function(Function {
-                            name: format!("func_{}", i),
+                            name: String::new(),
                             params,
                             results,
                             type_idx: Some(self.type_ids[type_idx as usize]),
@@ -362,7 +392,7 @@ impl BinaryReader {
                     for (i, table) in reader.into_iter().enumerate() {
                         let table = table?;
                         let id = module.add_table(crate::ir::module::Table {
-                            name: format!("table_{}", i),
+                            name: String::new(),
                             limits: TableLimits {
                                 element_type: Self::valtype_to_type(ValType::Ref(
                                     table.ty.element_type,
@@ -379,7 +409,7 @@ impl BinaryReader {
                     for (i, memory) in reader.into_iter().enumerate() {
                         let memory = memory?;
                         let id = module.add_memory(crate::ir::module::Memory {
-                            name: format!("memory_{}", i),
+                            name: String::new(),
                             limits: MemoryLimits {
                                 initial: memory.initial as u32,
                                 maximum: memory.maximum.map(|m| m as u32),
@@ -399,7 +429,7 @@ impl BinaryReader {
                             global.init_expr.get_operators_reader(),
                             &mut module,
                         )?;
-                        let name = format!("global_{}", i);
+                        let name = String::new();
 
                         let id = module.add_global(crate::ir::module::Global {
                             name,
@@ -505,11 +535,18 @@ impl BinaryReader {
                     }
                 }
                 Payload::CodeSectionEntry(body) => {
+                    let start = body.range().start;
+                    self.body_starts.push(start as u64);
                     let func_id = self.func_ids[import_count + code_entry_count];
+                    // Record the current function index (global index including imports)
+                    self.current_function_index = Some(import_count + code_entry_count);
+                    // Record the start of the function body (including size LEB) to allow relative offsets
+                    // consistent with DWARF absolute offsets in the Code section.
+                    self.current_func_body_start = Some(start);
                     code_entry_count += 1;
 
                     // 1. First, get the locals and update the local_ids mapping
-                    let (var_types, mapping) = {
+                    let (var_types, mapping, full_types) = {
                         let func = module.get_function(func_id).unwrap();
                         let mut var_types = Vec::new();
                         let mut reader = body.get_locals_reader()?;
@@ -522,18 +559,22 @@ impl BinaryReader {
                         }
 
                         let mut mapping = Vec::new();
+                        let mut full_types = Vec::new();
 
                         // FIX: We need the actual LocalIds for parameters.
                         match &func.kind {
                             crate::ir::module::FunctionKind::Local { param_ids, .. } => {
                                 mapping.extend_from_slice(param_ids);
+                                full_types.extend(func.params.tuple_elements());
                             }
                             crate::ir::module::FunctionKind::Import(_) => {
                                 // This shouldn't happen for CodeSectionEntry
                             }
                         }
 
-                        (var_types, mapping)
+                        full_types.extend_from_slice(&var_types);
+
+                        (var_types, mapping, full_types)
                     };
 
                     // Add locals to function and complete the mapping
@@ -546,6 +587,7 @@ impl BinaryReader {
                         }
                     }
                     self.current_func_local_ids = mapping;
+                    self.current_func_local_types = full_types;
 
                     // 2. Now parse the expression with mutable access to module
                     let expr = self.parse_expression(body.get_operators_reader()?, &mut module)?;
@@ -557,6 +599,9 @@ impl BinaryReader {
                             *mut_body = e;
                         }
                     }
+                    // Clear current function index now that we've parsed the body
+                    self.current_function_index = None;
+                    self.current_func_body_start = None;
                 }
                 Payload::DataSection(reader) => {
                     for data in reader {
@@ -589,10 +634,76 @@ impl BinaryReader {
                     }
                 }
                 Payload::CustomSection(reader) => {
+                    let name = reader.name();
+                    if name == "name" {
+                        let name_reader = NameSectionReader::new(wasmparser::BinaryReader::new(
+                            reader.data(),
+                            reader.data_offset(),
+                        ));
+                        for subsection in name_reader {
+                            if let Ok(subsection) = subsection {
+                                match subsection {
+                                    Name::Function(map) => {
+                                        for entry in map {
+                                            if let Ok(naming) = entry {
+                                                if let Some(&id) =
+                                                    self.func_ids.get(naming.index as usize)
+                                                {
+                                                    if let Some(f) = module.functions.get_mut(id) {
+                                                        f.name = naming.name.to_string();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Name::Global(map) => {
+                                        for entry in map {
+                                            if let Ok(naming) = entry {
+                                                if let Some(&id) =
+                                                    self.global_ids.get(naming.index as usize)
+                                                {
+                                                    if let Some(g) = module.globals.get_mut(id) {
+                                                        g.name = naming.name.to_string();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Name::Table(map) => {
+                                        for entry in map {
+                                            if let Ok(naming) = entry {
+                                                if let Some(&id) =
+                                                    self.table_ids.get(naming.index as usize)
+                                                {
+                                                    if let Some(t) = module.tables.get_mut(id) {
+                                                        t.name = naming.name.to_string();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Name::Memory(map) => {
+                                        for entry in map {
+                                            if let Ok(naming) = entry {
+                                                if let Some(&id) =
+                                                    self.memory_ids.get(naming.index as usize)
+                                                {
+                                                    if let Some(m) = module.memories.get_mut(id) {
+                                                        m.name = naming.name.to_string();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
                     module
                         .custom_sections
                         .push(crate::ir::module::CustomSection {
-                            name: reader.name().to_string(),
+                            name: name.to_string(),
                             data: reader.data().to_vec(),
                         });
                 }
@@ -600,165 +711,107 @@ impl BinaryReader {
             }
         }
 
-        self.apply_dwarf(&mut module);
+        self.apply_dwarf(&mut module, data);
         Ok(module)
     }
 
-    fn apply_dwarf(&self, module: &mut Module) {
-        // Apply washm-specific global name table if present. This allows
-        // writer -> reader roundtrips of globals even if the standard "name"
-        // custom section is not parsed by the reader.
-        if let Some(s) = module
-            .custom_sections
+    fn apply_dwarf(&self, module: &mut Module, data: &[u8]) {
+        let num_imports = module
+            .functions
             .iter()
-            .find(|s| s.name == ".washm.global_names")
-        {
-            let data = &s.data;
-            let mut i = 0usize;
-            if data.len() >= 4 {
-                let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-                i += 4;
-                let mut names = Vec::new();
-                for _ in 0..count {
-                    if i + 4 > data.len() {
-                        break;
-                    }
-                    let len = u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]])
-                        as usize;
-                    i += 4;
-                    if i + len > data.len() {
-                        break;
-                    }
-                    let name = String::from_utf8_lossy(&data[i..i + len]).to_string();
-                    i += len;
-                    names.push(name);
-                }
+            .filter(|(_, f)| f.is_import())
+            .count();
 
-                // Apply names to existing global entries in module (in insertion order)
-                if !names.is_empty() {
-                    let (_, _, _, globals, _, _, _, _, _, _, _, _, _) = module.parts_mut();
-                    let ids: Vec<_> = globals.iter().map(|(id, _)| id).collect();
-                    for (idx, name) in names.into_iter().enumerate() {
-                        if let Some(id) = ids.get(idx) {
-                            if let Some(g) = globals.get_mut(*id) {
-                                g.name = name;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Apply washm-specific function name table if present so we can
-        // roundtrip function names even if the standard "name" custom
-        // section isn't parsed by the reader.
-        if let Some(s) = module
-            .custom_sections
-            .iter()
-            .find(|s| s.name == ".washm.function_names")
-        {
-            let data = &s.data;
-            let mut i = 0usize;
-            if data.len() >= 4 {
-                let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-                i += 4;
-                let mut names = Vec::new();
-                for _ in 0..count {
-                    if i + 4 > data.len() {
-                        break;
-                    }
-                    let len = u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]])
-                        as usize;
-                    i += 4;
-                    if i + len > data.len() {
-                        break;
-                    }
-                    let name = String::from_utf8_lossy(&data[i..i + len]).to_string();
-                    i += len;
-                    names.push(name);
-                }
-
-                // Apply names to existing function entries in module (in insertion order)
-                if !names.is_empty() {
-                    let (_, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
-                    let ids: Vec<_> = functions.iter().map(|(id, _)| id).collect();
-                    for (idx, name) in names.into_iter().enumerate() {
-                        if let Some(id) = ids.get(idx) {
-                            if let Some(f) = functions.get_mut(*id) {
-                                f.name = name;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Prototype: support a test-only helper custom section named ".debug_line.map"
-        // Format: repeated records of little-endian (u32 offset, u32 file_index, u32 line, u32 column)
-        if let Some(s) = module
-            .custom_sections
-            .iter()
-            .find(|s| s.name == ".debug_line.map")
-        {
-            log::info!(
-                "Found .debug_line.map section ({} bytes), applying mappings",
-                s.data.len()
+        // Build mapping of absolute offsets for expressions
+        log::debug!(
+            "apply_dwarf: expr_offsets.len={} expr_to_func.len={} body_starts={:?}",
+            self.expr_offsets.len(),
+            self.expr_to_func.len(),
+            self.body_starts
+        );
+        let mut func_to_offsets: std::collections::HashMap<usize, Vec<(u32, ExpressionId)>> =
+            std::collections::HashMap::new();
+        for (&expr_id, &off) in &self.expr_offsets {
+            log::debug!(
+                "apply_dwarf: expr {:?} off {} func_to {:?}",
+                expr_id,
+                off,
+                self.expr_to_func.get(&expr_id)
             );
-            let data = &s.data;
-            if data.len() % 16 != 0 {
-                log::warn!(".debug_line.map has unexpected length: {}", data.len());
-                return;
-            }
-            let mut i = 0;
-            while i < data.len() {
-                let off = u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
-                let file_index =
-                    u32::from_le_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]);
-                let line =
-                    u32::from_le_bytes([data[i + 8], data[i + 9], data[i + 10], data[i + 11]]);
-                let column =
-                    u32::from_le_bytes([data[i + 12], data[i + 13], data[i + 14], data[i + 15]]);
-
-                // Find expression with matching offset (exact match)
-                let mut found_expr: Option<ExpressionId> = None;
-                for (expr_id, expr_off) in &self.expr_offsets {
-                    if *expr_off == off {
-                        found_expr = Some(*expr_id);
-                        break;
-                    }
+            if let Some(&func_idx) = self.expr_to_func.get(&expr_id) {
+                if func_idx < num_imports {
+                    continue;
                 }
+                let local_func_idx = func_idx - num_imports;
+                let body_start = self.body_starts.get(local_func_idx).copied().unwrap_or(0) as u32;
 
-                if let Some(expr_id) = found_expr {
-                    module.annotations.set_location(
-                        expr_id,
-                        crate::ir::annotation::DebugLocation {
-                            file_index,
-                            line,
-                            column,
-                        },
-                    );
-                } else {
-                    log::warn!("No expression found for offset {}", off);
-                }
-
-                i += 16;
+                // All recorded offsets are relative to the start of the function entry (at the LEB)
+                let abs_off = body_start + off;
+                func_to_offsets
+                    .entry(func_idx)
+                    .or_default()
+                    .push((abs_off, expr_id));
             }
-        } else if let Some(s) = module
+        }
+        for offsets in func_to_offsets.values_mut() {
+            offsets.sort_by_key(|&(off, _)| off);
+        }
+        for (func_idx, offsets) in &func_to_offsets {
+            log::debug!("func_to_offsets[{}] => {:?}", func_idx, offsets);
+        }
+
+        if let Some(s) = module
             .custom_sections
             .iter()
             .find(|s| s.name == ".debug_line")
         {
-            log::info!(
+            log::debug!(
                 "Found .debug_line section ({} bytes), attempting full DWARF parse",
                 s.data.len()
             );
+
+            let body_starts = &self.body_starts;
+            let mut applied = 0usize;
+
+            // (line_program_offset, local_file_index) -> global_file_index
+            let mut global_file_map: std::collections::HashMap<(u64, u64), u32> =
+                std::collections::HashMap::new();
+
+            let mut func_to_offsets: std::collections::HashMap<usize, Vec<(u32, ExpressionId)>> =
+                std::collections::HashMap::new();
+            for (&expr_id, &off) in &self.expr_offsets {
+                if let Some(&func_idx) = self.expr_to_func.get(&expr_id) {
+                    if func_idx < num_imports {
+                        continue;
+                    }
+                    let local_func_idx = func_idx - num_imports;
+                    let body_start = body_starts.get(local_func_idx).copied().unwrap_or(0) as u32;
+
+                    // All recorded offsets are now relative to the start of local_decls (body_start)
+                    let abs_off = body_start + off;
+                    func_to_offsets
+                        .entry(func_idx)
+                        .or_default()
+                        .push((abs_off, expr_id));
+                }
+            }
+            for offsets in func_to_offsets.values_mut() {
+                offsets.sort_by_key(|&(off, _)| off);
+            }
+
             // Build a Dwarf object from available sections in module.custom_sections.
             use gimli::SectionId;
 
             let mut section_map: std::collections::HashMap<&str, Vec<u8>> =
                 std::collections::HashMap::new();
+            // Prefer the first-seen section for a given name (writer-generated sections are
+            // appended before original compiled DWARF sections) so we inspect writer-emitted
+            // DWARF instead of being overwritten by pre-existing DWARF data from compiled
+            // input modules.
             for sec in &module.custom_sections {
-                section_map.insert(sec.name.as_str(), sec.data.clone());
+                section_map
+                    .entry(sec.name.as_str())
+                    .or_insert_with(|| sec.data.clone());
             }
 
             // Loader closure: supply EndianSlice readers for sections we have; otherwise empty slice.
@@ -770,62 +823,198 @@ impl BinaryReader {
 
             match gimli::read::Dwarf::load(loader) {
                 Ok(dwarf) => {
-                    let mut applied = 0usize;
                     let mut units = dwarf.units();
+                    let mut unit_count = 0;
                     while let Ok(Some(header)) = units.next() {
+                        unit_count += 1;
                         if let Ok(unit) = dwarf.unit(header) {
+                            log::debug!(
+                                "Processing DWARF unit {}, addr_size={}",
+                                unit_count,
+                                unit.header.address_size()
+                            );
                             let addr_size = unit.header.address_size();
-                            // Walk DIEs to find DW_AT_stmt_list
                             let mut entries = unit.entries();
                             while let Ok(Some((_depth, entry))) = entries.next_dfs() {
                                 if let Ok(Some(attr)) = entry.attr(gimli::DW_AT_stmt_list) {
                                     if let gimli::AttributeValue::DebugLineRef(line_off) =
                                         attr.value()
                                     {
+                                        let lp_off = line_off.0 as u64;
                                         if let Ok(program) = dwarf
                                             .debug_line
                                             .program(line_off, addr_size, None, None)
                                         {
                                             let mut rows = program.rows();
-                                            while let Ok(Some((_h, row))) = rows.next_row() {
+                                            // Collect (address, global_idx, line) tuples from the program rows
+                                            let mut rows_vec =
+                                                Vec::<(u64, u32, Option<u32>)>::new();
+                                            while let Ok(Some((header, row))) = rows.next_row() {
+                                                if row.end_sequence() {
+                                                    continue;
+                                                }
                                                 let address = row.address();
                                                 if address == 0 {
                                                     continue;
                                                 }
-                                                let addr32 = address as u32;
 
-                                                // Find nearest-lower matching expression offset
-                                                let mut best: Option<(ExpressionId, u32)> = None;
-                                                for (expr_id, &off) in &self.expr_offsets {
-                                                    if off <= addr32 {
-                                                        match best {
-                                                            None => best = Some((*expr_id, off)),
-                                                            Some((_, best_off)) => {
-                                                                if off > best_off {
-                                                                    best = Some((*expr_id, off))
+                                                // Capture or resolve the global filename index
+                                                let local_idx_raw = row.file_index();
+                                                if local_idx_raw == 0 {
+                                                    continue;
+                                                }
+
+                                                let global_idx = *global_file_map
+                                                    .entry((lp_off, local_idx_raw))
+                                                    .or_insert_with(|| {
+                                                        let new_idx =
+                                                            module.debug_filenames.len() as u32;
+                                                        let mut name_found = String::new();
+                                                        if let Some(file_entry) = header.file(local_idx_raw.into()) {
+                                                            let mut path = String::new();
+                                                            let dir_idx = file_entry.directory_index();
+                                                            if dir_idx > 0 {
+                                                                if let Some(dir_attr) =
+                                                                    header.directory(dir_idx.into())
+                                                                {
+                                                                    if let Ok(dir_name) = dwarf
+                                                                        .attr_string(
+                                                                            &unit, dir_attr,
+                                                                        )
+                                                                    {
+                                                                        path.push_str(
+                                                                            &dir_name
+                                                                                .to_string_lossy(),
+                                                                        );
+                                                                        path.push('/');
+                                                                    }
+                                                                }
+                                                            }
+                                                            if let Ok(name) = dwarf.attr_string(
+                                                                &unit,
+                                                                file_entry.path_name(),
+                                                            ) {
+                                                                path.push_str(
+                                                                    &name.to_string_lossy(),
+                                                                );
+                                                            }
+                                                            name_found = path;
+                                                        }
+                                                        if name_found.is_empty() {
+                                                            name_found = format!("file{}", local_idx_raw);
+                                                        }
+                                                        log::debug!("DWARF: mapped (lp_off={}, local_idx={}) -> global_idx={} ({})", lp_off, local_idx_raw, new_idx, name_found);
+                                                        module.debug_filenames.push(name_found);
+                                                        new_idx
+                                                    });
+
+                                                let line_num = row.line().map(|n| n.get() as u32);
+
+                                                rows_vec.push((address, global_idx, line_num));
+                                            }
+                                            log::debug!(
+                                                "Collected {} rows from line program",
+                                                rows_vec.len()
+                                            );
+                                            for (address, global_idx, line_num) in rows_vec {
+                                                let addr32 = address as u32;
+                                                // Find which function this address belongs to using body_starts
+                                                log::debug!(
+                                                    "Processing row: addr={} global_idx={}",
+                                                    address,
+                                                    global_idx
+                                                );
+                                                let local_func_idx = match body_starts
+                                                    .binary_search(&(address as u64))
+                                                {
+                                                    Ok(idx) => idx,
+                                                    Err(idx) => {
+                                                        if idx > 0 {
+                                                            idx - 1
+                                                        } else {
+                                                            continue;
+                                                        }
+                                                    }
+                                                };
+                                                let func_idx = local_func_idx + num_imports;
+                                                log::debug!(
+                                                    "Row belongs to local_func_idx={} func_idx={}",
+                                                    local_func_idx,
+                                                    func_idx
+                                                );
+
+                                                if let Some(offsets) =
+                                                    func_to_offsets.get(&func_idx)
+                                                {
+                                                    log::debug!(
+                                                        "Offsets for func {}: {:?}",
+                                                        func_idx,
+                                                        offsets
+                                                    );
+                                                    // Find nearest-lower matching expression offset using binary search
+                                                    let best_idx = match offsets
+                                                        .binary_search_by_key(&addr32, |&(o, _)| o)
+                                                    {
+                                                        Ok(idx) => {
+                                                            log::debug!(
+                                                                "Exact match at idx {}",
+                                                                idx
+                                                            );
+                                                            Some(idx)
+                                                        }
+                                                        Err(idx) => {
+                                                            log::debug!(
+                                                                "binary_search insertion idx {}",
+                                                                idx
+                                                            );
+                                                            if idx > 0 {
+                                                                Some(idx - 1)
+                                                            } else {
+                                                                // Fallback: if the first recorded expression offset is exactly one
+                                                                // greater than the row address (off-by-one discrepancy due to
+                                                                // one-based vs zero-based offsets), treat it as a match.
+                                                                if !offsets.is_empty() {
+                                                                    let (first_off, _eid) =
+                                                                        offsets[0];
+                                                                    if first_off == addr32 + 1 {
+                                                                        log::debug!("Applying fallback match: first_off == addr+1 ({} == {})", first_off, addr32 + 1);
+                                                                        Some(0)
+                                                                    } else {
+                                                                        None
+                                                                    }
+                                                                } else {
+                                                                    None
                                                                 }
                                                             }
                                                         }
-                                                    }
-                                                }
+                                                    };
 
-                                                if let Some((expr_id, _)) = best {
-                                                    // NOTE: extracting actual (file,line,column) from `row` is left as
-                                                    // a follow-up. Some gimli APIs return NonZero types and have
-                                                    // varied return types across versions; for now, annotate with
-                                                    // zero-valued placeholders to indicate a successful mapping.
-                                                    let file_index = 0u32;
-                                                    let line = 0u32;
-                                                    let column = 0u32;
-                                                    module.annotations.set_location(
-                                                        expr_id,
-                                                        crate::ir::annotation::DebugLocation {
-                                                            file_index,
-                                                            line,
-                                                            column,
-                                                        },
-                                                    );
-                                                    applied += 1;
+                                                    if let Some(idx) = best_idx {
+                                                        let (abs_off, expr_id) = offsets[idx];
+                                                        log::debug!(
+                                                            "Best match abs_off={} expr_id={:?}",
+                                                            abs_off,
+                                                            expr_id
+                                                        );
+
+                                                        if addr32 >= abs_off
+                                                            || abs_off == addr32.saturating_add(1)
+                                                        {
+                                                            let line = line_num;
+
+                                                            module.annotations.set_location(
+                                                                expr_id,
+                                                                crate::ir::annotation::DebugLocation {
+                                                                    file_index: global_idx,
+                                                                    line: line.unwrap_or(0u32),
+                                                                    column: 0u32,
+                                                                },
+                                                            );
+                                                            applied += 1;
+                                                        }
+                                                    }
+                                                } else {
+                                                    log::debug!("No offsets for func {}", func_idx);
                                                 }
                                             }
                                         }
@@ -864,19 +1053,210 @@ impl BinaryReader {
     ) -> Result<Option<ExpressionId>> {
         let mut stack = Vec::new();
         let mut value_stack = Vec::new();
-        let mut consumed = std::collections::HashSet::new();
+        let mut consumed = Box::new(std::collections::HashSet::new());
+
+        // Iterative control frames to avoid recursion (blocks/loops/ifs).
+        #[derive(Debug)]
+        enum FrameKind {
+            Block,
+            Loop,
+            If {
+                condition: ExpressionId,
+                if_true: Option<ExpressionId>,
+                seen_else: bool,
+            },
+        }
+        struct Frame {
+            kind: FrameKind,
+            name: String,
+            expression_id: ExpressionId,
+            result_type: Type,
+            start_stack_len: usize,
+            start_value_stack_len: usize,
+            start_offset: u32,
+        }
+        let mut frames: Vec<Frame> = Vec::new();
+
+        // Note: we implement finalization inline where needed to avoid borrow conflicts.
 
         while !reader.eof() {
             let offset = reader.original_position() as u32;
             let op = reader.read()?;
             match op {
                 Operator::End => {
-                    self.last_op_was_else = false;
-                    break;
+                    // If no open control frames, End means end of this expression scope.
+                    if frames.is_empty() {
+                        self.last_op_was_else = false;
+                        break;
+                    }
+
+                    // Close the topmost frame.
+                    let frame = frames.pop().unwrap();
+                    // finalize the expressions that belong to this frame
+                    let body_expr = {
+                        let final_stack: Vec<ExpressionId> = stack[frame.start_stack_len..]
+                            .iter()
+                            .copied()
+                            .filter(|e| !consumed.contains(e))
+                            .collect();
+                        if final_stack.is_empty() {
+                            self.record(
+                                IrBuilder::new(&mut module.expressions).nop(),
+                                frame.start_offset,
+                            )
+                        } else if final_stack.len() > 1 {
+                            let result_type = final_stack
+                                .last()
+                                .map(|&e| module.expressions[e].type_)
+                                .unwrap_or(Type::NONE);
+                            self.record(
+                                IrBuilder::new(&mut module.expressions).block(
+                                    Some(String::new()),
+                                    final_stack,
+                                    result_type,
+                                ),
+                                frame.start_offset,
+                            )
+                        } else {
+                            final_stack[0]
+                        }
+                    };
+
+                    match frame.kind {
+                        FrameKind::Block => {
+                            label_stack.pop();
+                            module.expressions[frame.expression_id].kind = ExpressionKind::Block {
+                                name: Some(frame.name),
+                                list: vec![body_expr],
+                            };
+                            module.expressions[frame.expression_id].type_ = frame.result_type;
+                            let block_expr = self.record(frame.expression_id, frame.start_offset);
+                            stack.push(block_expr);
+                            if frame.result_type != Type::NONE {
+                                value_stack.push(block_expr);
+                            }
+                        }
+                        FrameKind::Loop => {
+                            label_stack.pop();
+                            module.expressions[frame.expression_id].kind = ExpressionKind::Loop {
+                                name: Some(frame.name),
+                                body: body_expr,
+                            };
+                            module.expressions[frame.expression_id].type_ = frame.result_type;
+                            let loop_expr = self.record(frame.expression_id, frame.start_offset);
+                            stack.push(loop_expr);
+                            if frame.result_type != Type::NONE {
+                                value_stack.push(loop_expr);
+                            }
+                        }
+                        FrameKind::If {
+                            condition,
+                            if_true,
+                            seen_else,
+                        } => {
+                            label_stack.pop();
+                            let if_expr_final = if !seen_else {
+                                self.record(
+                                    module.expressions.alloc(Expression {
+                                        type_: frame.result_type,
+                                        kind: ExpressionKind::If {
+                                            name: None,
+                                            condition,
+                                            if_true: body_expr,
+                                            if_false: None,
+                                        },
+                                    }),
+                                    frame.start_offset,
+                                )
+                            } else {
+                                let if_true_expr = if_true.expect("if_true must be present");
+                                self.record(
+                                    module.expressions.alloc(Expression {
+                                        type_: frame.result_type,
+                                        kind: ExpressionKind::If {
+                                            name: None,
+                                            condition,
+                                            if_true: if_true_expr,
+                                            if_false: Some(body_expr),
+                                        },
+                                    }),
+                                    frame.start_offset,
+                                )
+                            };
+
+                            module.expressions[frame.expression_id].kind = ExpressionKind::Block {
+                                name: Some(frame.name),
+                                list: vec![if_expr_final],
+                            };
+                            module.expressions[frame.expression_id].type_ = frame.result_type;
+                            let if_wrapper = self.record(frame.expression_id, frame.start_offset);
+                            stack.push(if_wrapper);
+                            if frame.result_type != Type::NONE {
+                                value_stack.push(if_wrapper);
+                            }
+                        }
+                    }
                 }
                 Operator::Else => {
-                    self.last_op_was_else = true;
-                    break;
+                    // If Else occurs at top-level (no enclosing If frame to handle it), behave like before.
+                    if frames.is_empty() {
+                        self.last_op_was_else = true;
+                        break;
+                    }
+
+                    // Only valid inner Else if the topmost frame is an If.
+                    if let Some(top) = frames.last_mut() {
+                        match &mut top.kind {
+                            FrameKind::If {
+                                condition: _,
+                                if_true,
+                                seen_else,
+                            } => {
+                                // finalize the then-branch which is the current accumulated expressions
+                                let then_expr = {
+                                    let final_stack: Vec<ExpressionId> = stack
+                                        [top.start_stack_len..]
+                                        .iter()
+                                        .copied()
+                                        .filter(|e| !consumed.contains(e))
+                                        .collect();
+                                    if final_stack.is_empty() {
+                                        self.record(
+                                            IrBuilder::new(&mut module.expressions).nop(),
+                                            top.start_offset,
+                                        )
+                                    } else if final_stack.len() > 1 {
+                                        let result_type = final_stack
+                                            .last()
+                                            .map(|&e| module.expressions[e].type_)
+                                            .unwrap_or(Type::NONE);
+                                        self.record(
+                                            IrBuilder::new(&mut module.expressions).block(
+                                                Some(String::new()),
+                                                final_stack,
+                                                result_type,
+                                            ),
+                                            top.start_offset,
+                                        )
+                                    } else {
+                                        final_stack[0]
+                                    }
+                                };
+                                *if_true = Some(then_expr);
+                                *seen_else = true;
+                                // start collecting else-branch expressions from current stack len
+                                top.start_stack_len = stack.len();
+                                // indicate an else was seen
+                                self.last_op_was_else = true;
+                                continue; // continue parsing else branch
+                            }
+                            _ => {
+                                // Else not associated with an If; preserve old behavior
+                                self.last_op_was_else = true;
+                                break;
+                            }
+                        }
+                    }
                 }
                 Operator::Unreachable => {
                     let expr = self.record(
@@ -893,167 +1273,135 @@ impl BinaryReader {
                 Operator::Block { blockty } => {
                     let result_type = self.blocktype_to_type(blockty);
                     let name = self.make_label_name();
+                    let expression_id = module.expressions.alloc(Expression {
+                        type_: result_type,
+                        kind: ExpressionKind::Nop,
+                    });
                     label_stack.push(Some(name.clone()));
-
-                    let body = self.parse_expression_impl(reader, label_stack, module)?;
-
-                    if let Some(body) = body {
-                        label_stack.pop();
-                        let block_expr = self.record(
-                            IrBuilder::new(&mut module.expressions).block(
-                                Some(name),
-                                vec![body],
-                                result_type,
-                            ),
-                            offset,
-                        );
-                        stack.push(block_expr);
-                        if result_type != Type::NONE {
-                            value_stack.push(block_expr);
-                        }
-                    } else {
-                        label_stack.pop();
-                        let block_expr = IrBuilder::new(&mut module.expressions).block(
-                            Some(name),
-                            vec![],
-                            result_type,
-                        );
-                        stack.push(block_expr);
-                        if result_type != Type::NONE {
-                            value_stack.push(block_expr);
-                        }
-                    }
+                    frames.push(Frame {
+                        kind: FrameKind::Block,
+                        name,
+                        expression_id,
+                        result_type,
+                        start_stack_len: stack.len(),
+                        start_value_stack_len: value_stack.len(),
+                        start_offset: offset,
+                    });
                 }
                 Operator::Loop { blockty } => {
                     let result_type = self.blocktype_to_type(blockty);
                     let name = self.make_label_name();
+                    let expression_id = module.expressions.alloc(Expression {
+                        type_: result_type,
+                        kind: ExpressionKind::Nop,
+                    });
                     label_stack.push(Some(name.clone()));
-
-                    let body = self.parse_expression_impl(reader, label_stack, module)?;
-
-                    if let Some(body) = body {
-                        label_stack.pop();
-                        let loop_expr = IrBuilder::new(&mut module.expressions).loop_(
-                            Some(name),
-                            body,
-                            result_type,
-                        );
-                        stack.push(loop_expr);
-                        if result_type != Type::NONE {
-                            value_stack.push(loop_expr);
-                        }
-                    } else {
-                        label_stack.pop();
-                        return Err(ParseError::UnexpectedEof);
-                    }
+                    frames.push(Frame {
+                        kind: FrameKind::Loop,
+                        name,
+                        expression_id,
+                        result_type,
+                        start_stack_len: stack.len(),
+                        start_value_stack_len: value_stack.len(),
+                        start_offset: offset,
+                    });
                 }
                 Operator::If { blockty } => {
                     let result_type = self.blocktype_to_type(blockty);
                     let condition = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     consumed.insert(condition);
-
                     let name = self.make_label_name();
+                    let expression_id = module.expressions.alloc(Expression {
+                        type_: result_type,
+                        kind: ExpressionKind::Nop,
+                    });
                     label_stack.push(Some(name.clone()));
-
-                    let if_true = self
-                        .parse_expression_impl(reader, label_stack, module)?
-                        .ok_or(ParseError::UnexpectedEof)?;
-
-                    let if_false = if self.last_op_was_else {
-                        self.parse_expression_impl(reader, label_stack, module)?
-                    } else {
-                        None
-                    };
-
-                    label_stack.pop();
-                    let if_expr = IrBuilder::new(&mut module.expressions).if_(
-                        "",
-                        condition,
-                        if_true,
-                        if_false,
+                    frames.push(Frame {
+                        kind: FrameKind::If {
+                            condition,
+                            if_true: None,
+                            seen_else: false,
+                        },
+                        name,
+                        expression_id,
                         result_type,
-                    );
-
-                    let if_wrapper = IrBuilder::new(&mut module.expressions).block(
-                        Some(name),
-                        vec![if_expr],
-                        result_type,
-                    );
-                    stack.push(if_wrapper);
-                    if result_type != Type::NONE {
-                        value_stack.push(if_wrapper);
-                    }
+                        start_stack_len: stack.len(),
+                        start_value_stack_len: value_stack.len(),
+                        start_offset: offset,
+                    });
                 }
                 Operator::Br { relative_depth } => {
-                    let target_idx = label_stack.len() as i32 - 1 - relative_depth as i32;
-                    let label = if target_idx >= 0 {
-                        label_stack[target_idx as usize]
-                            .as_deref()
-                            .unwrap_or("unnamed")
+                    let depth = relative_depth as usize;
+                    let target = if depth < frames.len() {
+                        frames[frames.len() - 1 - depth].expression_id
                     } else {
-                        "invalid"
+                        panic!("Invalid break depth");
                     };
 
                     let value = value_stack.pop();
                     if let Some(v) = value {
                         consumed.insert(v);
                     }
-                    let break_expr = IrBuilder::new(&mut module.expressions).break_(
-                        label.to_string(),
-                        None,
-                        value,
-                        Type::UNREACHABLE,
+                    let break_expr = self.record(
+                        IrBuilder::new(&mut module.expressions).break_(
+                            target,
+                            None,
+                            value,
+                            Type::UNREACHABLE,
+                        ),
+                        offset,
                     );
                     stack.push(break_expr);
                     value_stack.push(break_expr);
                 }
                 Operator::BrIf { relative_depth } => {
-                    let target_idx = label_stack.len() as i32 - 1 - relative_depth as i32;
-                    let label = if target_idx >= 0 {
-                        label_stack[target_idx as usize]
-                            .as_deref()
-                            .unwrap_or("unnamed")
+                    let depth = relative_depth as usize;
+                    let target = if depth < frames.len() {
+                        frames[frames.len() - 1 - depth].expression_id
                     } else {
-                        "invalid"
+                        panic!("Invalid break depth");
                     };
 
                     let condition = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     consumed.insert(condition);
                     let value = value_stack.pop();
-                    if let Some(v) = value {
+                    let ty = if let Some(v) = value {
                         consumed.insert(v);
-                    }
-                    let break_expr = IrBuilder::new(&mut module.expressions).break_(
-                        label.to_string(),
-                        Some(condition),
-                        value,
-                        Type::I32,
+                        module.expressions[v].type_
+                    } else {
+                        Type::NONE
+                    };
+                    let break_expr = self.record(
+                        IrBuilder::new(&mut module.expressions).break_(
+                            target,
+                            Some(condition),
+                            value,
+                            ty,
+                        ),
+                        offset,
                     );
                     stack.push(break_expr);
-                    value_stack.push(break_expr);
+                    if ty != Type::NONE {
+                        value_stack.push(break_expr);
+                    }
                 }
                 Operator::BrTable { targets } => {
-                    let mut names = Vec::with_capacity(targets.len() as usize);
+                    let mut target_ids = Vec::with_capacity(targets.len() as usize);
                     for depth in targets.targets() {
                         let depth = depth?;
-                        let target_idx = label_stack.len() as i32 - 1 - depth as i32;
-                        let label = if target_idx >= 0 {
-                            label_stack[target_idx as usize]
-                                .as_deref()
-                                .unwrap_or("unnamed")
+                        let target = if (depth as usize) < frames.len() {
+                            frames[frames.len() - 1 - (depth as usize)].expression_id
                         } else {
-                            "invalid"
+                            panic!("Invalid branch depth");
                         };
-                        names.push(label.to_string());
+                        target_ids.push(target);
                     }
+
                     let default_depth = targets.default();
-                    let target_idx = label_stack.len() as i32 - 1 - default_depth as i32;
-                    let default = if target_idx >= 0 {
-                        label_stack[target_idx as usize]
-                            .as_deref()
-                            .unwrap_or("unnamed")
+                    let default_target = if (default_depth as usize) < frames.len() {
+                        frames[frames.len() - 1 - (default_depth as usize)].expression_id
                     } else {
-                        "invalid"
+                        panic!("Invalid branch depth");
                     };
 
                     let condition = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
@@ -1066,11 +1414,14 @@ impl BinaryReader {
                         None
                     };
 
-                    let switch_expr = IrBuilder::new(&mut module.expressions).switch(
-                        names,
-                        default.to_string(),
-                        condition,
-                        value,
+                    let switch_expr = self.record(
+                        IrBuilder::new(&mut module.expressions).switch(
+                            target_ids,
+                            default_target,
+                            condition,
+                            value,
+                        ),
+                        offset,
                     );
                     stack.push(switch_expr);
                     value_stack.push(switch_expr);
@@ -1080,14 +1431,18 @@ impl BinaryReader {
                     if let Some(v) = value {
                         consumed.insert(v);
                     }
-                    let return_expr = IrBuilder::new(&mut module.expressions).return_(value);
+                    let return_expr = self.record(
+                        IrBuilder::new(&mut module.expressions).return_(value),
+                        offset,
+                    );
                     stack.push(return_expr);
                     value_stack.push(return_expr);
                 }
                 Operator::Drop => {
                     let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     consumed.insert(value);
-                    let drop_expr = IrBuilder::new(&mut module.expressions).drop(value);
+                    let drop_expr =
+                        self.record(IrBuilder::new(&mut module.expressions).drop(value), offset);
                     stack.push(drop_expr);
                 }
                 Operator::Select => {
@@ -1098,11 +1453,14 @@ impl BinaryReader {
                     let if_true = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     consumed.insert(if_true);
                     let result_type = module.expressions[if_true].type_;
-                    let select_expr = IrBuilder::new(&mut module.expressions).select(
-                        condition,
-                        if_true,
-                        if_false,
-                        result_type,
+                    let select_expr = self.record(
+                        IrBuilder::new(&mut module.expressions).select(
+                            condition,
+                            if_true,
+                            if_false,
+                            result_type,
+                        ),
+                        offset,
                     );
                     stack.push(select_expr);
                     value_stack.push(select_expr);
@@ -1134,11 +1492,14 @@ impl BinaryReader {
 
                     let result_type = Self::types_to_type(&func_type.1);
 
-                    let call_expr = IrBuilder::new(&mut module.expressions).call(
-                        func_id,
-                        operands,
-                        result_type,
-                        false,
+                    let call_expr = self.record(
+                        IrBuilder::new(&mut module.expressions).call(
+                            func_id,
+                            operands,
+                            result_type,
+                            false,
+                        ),
+                        offset,
                     );
                     stack.push(call_expr);
                     if result_type != Type::NONE {
@@ -1178,12 +1539,15 @@ impl BinaryReader {
                         .copied()
                         .ok_or(ParseError::InvalidIndex("call_indirect table", table_index))?;
 
-                    let call_expr = IrBuilder::new(&mut module.expressions).call_indirect(
-                        table_id,
-                        target,
-                        operands,
-                        type_id,
-                        result_type,
+                    let call_expr = self.record(
+                        IrBuilder::new(&mut module.expressions).call_indirect(
+                            table_id,
+                            target,
+                            operands,
+                            type_id,
+                            result_type,
+                        ),
+                        offset,
                     );
                     stack.push(call_expr);
                     if result_type != Type::NONE {
@@ -1196,7 +1560,15 @@ impl BinaryReader {
                         .get(local_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("local.get", local_index))?;
-                    let expr = IrBuilder::new(&mut module.expressions).local_get(id, Type::I32);
+                    let ty = self
+                        .current_func_local_types
+                        .get(local_index as usize)
+                        .copied()
+                        .unwrap_or(Type::I32);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).local_get(id, ty),
+                        offset,
+                    );
                     stack.push(expr);
                     value_stack.push(expr);
                 }
@@ -1208,7 +1580,10 @@ impl BinaryReader {
                         .ok_or(ParseError::InvalidIndex("local.set", local_index))?;
                     let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     consumed.insert(value);
-                    stack.push(IrBuilder::new(&mut module.expressions).local_set(id, value));
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).local_set(id, value),
+                        offset,
+                    ));
                 }
                 Operator::LocalTee { local_index } => {
                     let id = self
@@ -1218,9 +1593,15 @@ impl BinaryReader {
                         .ok_or(ParseError::InvalidIndex("local.tee", local_index))?;
                     let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     consumed.insert(value);
-                    let value_type = module.expressions[value].type_;
-                    let expr =
-                        IrBuilder::new(&mut module.expressions).local_tee(id, value, value_type);
+                    let ty = self
+                        .current_func_local_types
+                        .get(local_index as usize)
+                        .copied()
+                        .unwrap_or(Type::I32);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).local_tee(id, value, ty),
+                        offset,
+                    );
                     stack.push(expr);
                     value_stack.push(expr);
                 }
@@ -1230,7 +1611,11 @@ impl BinaryReader {
                         .get(global_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidSection)?;
-                    let expr = IrBuilder::new(&mut module.expressions).global_get(id, Type::I32);
+                    let ty = module.globals[id].type_;
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).global_get(id, ty),
+                        offset,
+                    );
                     stack.push(expr);
                     value_stack.push(expr);
                 }
@@ -1242,397 +1627,529 @@ impl BinaryReader {
                         .ok_or(ParseError::InvalidSection)?;
                     let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     consumed.insert(value);
-                    stack.push(IrBuilder::new(&mut module.expressions).global_set(id, value));
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).global_set(id, value),
+                        offset,
+                    ));
                 }
                 Operator::I32Load { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        4,
-                        false,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::I32,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            4,
+                            false,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Load { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        8,
-                        false,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::I64,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            8,
+                            false,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Load { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        4,
-                        false,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::F32,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            4,
+                            false,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Load { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        8,
-                        false,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::F64,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            8,
+                            false,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Load8S { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        1,
-                        true,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::I32,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            1,
+                            true,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Load8U { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        1,
-                        false,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::I32,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            1,
+                            false,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Load16S { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        2,
-                        true,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::I32,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            2,
+                            true,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Load16U { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        2,
-                        false,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::I32,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            2,
+                            false,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Load8S { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        1,
-                        true,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::I64,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            1,
+                            true,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Load8U { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        1,
-                        false,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::I64,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            1,
+                            false,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Load16S { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        2,
-                        true,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::I64,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            2,
+                            true,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Load16U { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        2,
-                        false,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::I64,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            2,
+                            false,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Load32S { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        4,
-                        true,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::I64,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            4,
+                            true,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Load32U { memarg } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).load(
-                        memory,
-                        4,
-                        false,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        Type::I64,
-                    ));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).load(
+                            memory,
+                            4,
+                            false,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Store { memarg } => {
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).store(
-                        memory,
-                        4,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        value,
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).store(
+                            memory,
+                            4,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            value,
+                        ),
+                        offset,
                     ));
                 }
                 Operator::I64Store { memarg } => {
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).store(
-                        memory,
-                        8,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        value,
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).store(
+                            memory,
+                            8,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            value,
+                        ),
+                        offset,
                     ));
                 }
                 Operator::F32Store { memarg } => {
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).store(
-                        memory,
-                        4,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        value,
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).store(
+                            memory,
+                            4,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            value,
+                        ),
+                        offset,
                     ));
                 }
                 Operator::F64Store { memarg } => {
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).store(
-                        memory,
-                        8,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        value,
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).store(
+                            memory,
+                            8,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            value,
+                        ),
+                        offset,
                     ));
                 }
                 Operator::I32Store8 { memarg } => {
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).store(
-                        memory,
-                        1,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        value,
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).store(
+                            memory,
+                            1,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            value,
+                        ),
+                        offset,
                     ));
                 }
                 Operator::I32Store16 { memarg } => {
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).store(
-                        memory,
-                        2,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        value,
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).store(
+                            memory,
+                            2,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            value,
+                        ),
+                        offset,
                     ));
                 }
                 Operator::I64Store8 { memarg } => {
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).store(
-                        memory,
-                        1,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        value,
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).store(
+                            memory,
+                            1,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            value,
+                        ),
+                        offset,
                     ));
                 }
                 Operator::I64Store16 { memarg } => {
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).store(
-                        memory,
-                        2,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        value,
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).store(
+                            memory,
+                            2,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            value,
+                        ),
+                        offset,
                     ));
                 }
                 Operator::I64Store32 { memarg } => {
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
                     let memory = self
                         .memory_ids
                         .first()
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", 0))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).store(
-                        memory,
-                        4,
-                        memarg.offset as u32,
-                        memarg.align as u32,
-                        ptr,
-                        value,
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).store(
+                            memory,
+                            4,
+                            memarg.offset as u32,
+                            memarg.align as u32,
+                            ptr,
+                            value,
+                        ),
+                        offset,
                     ));
                 }
                 Operator::MemorySize { mem, .. } => {
@@ -1641,7 +2158,10 @@ impl BinaryReader {
                         .get(mem as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", mem))?;
-                    let expr = IrBuilder::new(&mut module.expressions).memory_size(memory);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).memory_size(memory),
+                        offset,
+                    );
                     stack.push(expr);
                     value_stack.push(expr);
                 }
@@ -1653,7 +2173,10 @@ impl BinaryReader {
                         .get(mem as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", mem))?;
-                    let expr = IrBuilder::new(&mut module.expressions).memory_grow(memory, delta);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).memory_grow(memory, delta),
+                        offset,
+                    );
                     stack.push(expr);
                     value_stack.push(expr);
                 }
@@ -1696,11 +2219,14 @@ impl BinaryReader {
                     consumed.insert(right);
                     let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     consumed.insert(left);
-                    let expr = IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::AddInt32,
-                        left,
-                        right,
-                        Type::I32,
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::AddInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
                     );
                     stack.push(expr);
                     value_stack.push(expr);
@@ -1710,11 +2236,14 @@ impl BinaryReader {
                     consumed.insert(right);
                     let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     consumed.insert(left);
-                    let expr = IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::SubInt32,
-                        left,
-                        right,
-                        Type::I32,
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::SubInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
                     );
                     stack.push(expr);
                     value_stack.push(expr);
@@ -1724,335 +2253,558 @@ impl BinaryReader {
                     consumed.insert(right);
                     let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     consumed.insert(left);
-                    let expr = IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::MulInt32,
-                        left,
-                        right,
-                        Type::I32,
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::MulInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
                     );
                     stack.push(expr);
                     value_stack.push(expr);
                 }
                 Operator::I32DivS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::DivSInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::DivSInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32DivU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::DivUInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::DivUInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32RemS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::RemSInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::RemSInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32RemU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::RemUInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::RemUInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32And => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::AndInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::AndInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Or => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::OrInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::OrInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Xor => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::XorInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::XorInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Shl => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::ShlInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::ShlInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32ShrS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::ShrSInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::ShrSInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32ShrU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::ShrUInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::ShrUInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Rotl => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::RotLInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::RotLInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Rotr => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::RotRInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::RotRInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Add => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::AddInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::AddInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Sub => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::SubInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::SubInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Mul => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::MulInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::MulInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64DivS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::DivSInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::DivSInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64DivU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::DivUInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::DivUInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64RemS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::RemSInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::RemSInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64RemU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::RemUInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::RemUInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64And => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::AndInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::AndInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Or => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::OrInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::OrInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Xor => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::XorInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::XorInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Shl => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::ShlInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::ShlInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64ShrS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::ShrSInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::ShrSInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64ShrU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::ShrUInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::ShrUInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Rotl => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::RotLInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::RotLInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Rotr => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::RotRInt64,
-                        left,
-                        right,
-                        Type::I64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::RotRInt64,
+                            left,
+                            right,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Eq => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::EqInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::EqInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Ne => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::NeInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::NeInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32LtS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::LtSInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::LtSInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32LtU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::LtUInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::LtUInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32GtS => {
                     let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     consumed.insert(right);
                     let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     consumed.insert(left);
-                    let expr = IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::GtSInt32,
-                        left,
-                        right,
-                        Type::I32,
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::GtSInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
                     );
                     stack.push(expr);
                     value_stack.push(expr);
@@ -2062,790 +2814,1355 @@ impl BinaryReader {
                     consumed.insert(right);
                     let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
                     consumed.insert(left);
-                    let expr = IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::GtUInt32,
-                        left,
-                        right,
-                        Type::I32,
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::GtUInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
                     );
                     stack.push(expr);
                     value_stack.push(expr);
                 }
                 Operator::I32LeS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::LeSInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::LeSInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32LeU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::LeUInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::LeUInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32GeS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::GeSInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::GeSInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32GeU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::GeUInt32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::GeUInt32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Eq => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::EqInt64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::EqInt64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Ne => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::NeInt64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::NeInt64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64LtS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::LtSInt64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::LtSInt64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64LtU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::LtUInt64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::LtUInt64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64GtS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::GtSInt64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::GtSInt64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64GtU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::GtUInt64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::GtUInt64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64LeS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::LeSInt64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::LeSInt64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64LeU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::LeUInt64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::LeUInt64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64GeS => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::GeSInt64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::GeSInt64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64GeU => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::GeUInt64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::GeUInt64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Add => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::AddFloat32,
-                        left,
-                        right,
-                        Type::F32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::AddFloat32,
+                            left,
+                            right,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Sub => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::SubFloat32,
-                        left,
-                        right,
-                        Type::F32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::SubFloat32,
+                            left,
+                            right,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Mul => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::MulFloat32,
-                        left,
-                        right,
-                        Type::F32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::MulFloat32,
+                            left,
+                            right,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Div => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::DivFloat32,
-                        left,
-                        right,
-                        Type::F32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::DivFloat32,
+                            left,
+                            right,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Min => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::MinFloat32,
-                        left,
-                        right,
-                        Type::F32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::MinFloat32,
+                            left,
+                            right,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Max => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::MaxFloat32,
-                        left,
-                        right,
-                        Type::F32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::MaxFloat32,
+                            left,
+                            right,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Copysign => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::CopySignFloat32,
-                        left,
-                        right,
-                        Type::F32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::CopySignFloat32,
+                            left,
+                            right,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Add => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::AddFloat64,
-                        left,
-                        right,
-                        Type::F64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::AddFloat64,
+                            left,
+                            right,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Sub => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::SubFloat64,
-                        left,
-                        right,
-                        Type::F64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::SubFloat64,
+                            left,
+                            right,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Mul => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::MulFloat64,
-                        left,
-                        right,
-                        Type::F64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::MulFloat64,
+                            left,
+                            right,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Div => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::DivFloat64,
-                        left,
-                        right,
-                        Type::F64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::DivFloat64,
+                            left,
+                            right,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Min => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::MinFloat64,
-                        left,
-                        right,
-                        Type::F64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::MinFloat64,
+                            left,
+                            right,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Max => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::MaxFloat64,
-                        left,
-                        right,
-                        Type::F64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::MaxFloat64,
+                            left,
+                            right,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Copysign => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::CopySignFloat64,
-                        left,
-                        right,
-                        Type::F64,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::CopySignFloat64,
+                            left,
+                            right,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Eq => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::EqFloat32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::EqFloat32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Ne => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::NeFloat32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::NeFloat32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Lt => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::LtFloat32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::LtFloat32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Gt => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::GtFloat32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::GtFloat32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Le => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::LeFloat32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::LeFloat32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Ge => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::GeFloat32,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::GeFloat32,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Eq => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::EqFloat64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::EqFloat64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Ne => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::NeFloat64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::NeFloat64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Lt => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::LtFloat64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::LtFloat64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Gt => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::GtFloat64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::GtFloat64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Le => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::LeFloat64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::LeFloat64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Ge => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).binary(
-                        crate::ir::ops::BinaryOp::GeFloat64,
-                        left,
-                        right,
-                        Type::I32,
-                    ));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).binary(
+                            crate::ir::ops::BinaryOp::GeFloat64,
+                            left,
+                            right,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Clz => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ClzInt32,
-                        val,
-                        Type::I32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ClzInt32,
+                            val,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Ctz => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::CtzInt32,
-                        val,
-                        Type::I32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::CtzInt32,
+                            val,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Popcnt => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::PopcntInt32,
-                        val,
-                        Type::I32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::PopcntInt32,
+                            val,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32Eqz => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::EqZInt32,
-                        val,
-                        Type::I32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::EqZInt32,
+                            val,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Clz => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ClzInt64,
-                        val,
-                        Type::I64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ClzInt64,
+                            val,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Ctz => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::CtzInt64,
-                        val,
-                        Type::I64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::CtzInt64,
+                            val,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Popcnt => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::PopcntInt64,
-                        val,
-                        Type::I64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::PopcntInt64,
+                            val,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64Eqz => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::EqZInt64,
-                        val,
-                        Type::I32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::EqZInt64,
+                            val,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Abs => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::AbsFloat32,
-                        val,
-                        Type::F32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::AbsFloat32,
+                            val,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Neg => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::NegFloat32,
-                        val,
-                        Type::F32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::NegFloat32,
+                            val,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Ceil => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::CeilFloat32,
-                        val,
-                        Type::F32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::CeilFloat32,
+                            val,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Floor => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::FloorFloat32,
-                        val,
-                        Type::F32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::FloorFloat32,
+                            val,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Trunc => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::TruncFloat32,
-                        val,
-                        Type::F32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::TruncFloat32,
+                            val,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Nearest => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::NearestFloat32,
-                        val,
-                        Type::F32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::NearestFloat32,
+                            val,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32Sqrt => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::SqrtFloat32,
-                        val,
-                        Type::F32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::SqrtFloat32,
+                            val,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Abs => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::AbsFloat64,
-                        val,
-                        Type::F64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::AbsFloat64,
+                            val,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Neg => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::NegFloat64,
-                        val,
-                        Type::F64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::NegFloat64,
+                            val,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Ceil => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::CeilFloat64,
-                        val,
-                        Type::F64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::CeilFloat64,
+                            val,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Floor => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::FloorFloat64,
-                        val,
-                        Type::F64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::FloorFloat64,
+                            val,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Trunc => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::TruncFloat64,
-                        val,
-                        Type::F64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::TruncFloat64,
+                            val,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Nearest => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::NearestFloat64,
-                        val,
-                        Type::F64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::NearestFloat64,
+                            val,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64Sqrt => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::SqrtFloat64,
-                        val,
-                        Type::F64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::SqrtFloat64,
+                            val,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32WrapI64 => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::WrapInt64,
-                        val,
-                        Type::I32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::WrapInt64,
+                            val,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64ExtendI32S => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ExtendSInt32,
-                        val,
-                        Type::I64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ExtendSInt32,
+                            val,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64ExtendI32U => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ExtendUInt32,
-                        val,
-                        Type::I64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ExtendUInt32,
+                            val,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32TruncF32S => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::TruncSFloat32ToInt32,
-                        val,
-                        Type::I32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::TruncSFloat32ToInt32,
+                            val,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32TruncF32U => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::TruncUFloat32ToInt32,
-                        val,
-                        Type::I32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::TruncUFloat32ToInt32,
+                            val,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32TruncF64S => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::TruncSFloat64ToInt32,
-                        val,
-                        Type::I32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::TruncSFloat64ToInt32,
+                            val,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32TruncF64U => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::TruncUFloat64ToInt32,
-                        val,
-                        Type::I32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::TruncUFloat64ToInt32,
+                            val,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64TruncF32S => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::TruncSFloat32ToInt64,
-                        val,
-                        Type::I64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::TruncSFloat32ToInt64,
+                            val,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64TruncF32U => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::TruncUFloat32ToInt64,
-                        val,
-                        Type::I64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::TruncUFloat32ToInt64,
+                            val,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64TruncF64S => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::TruncSFloat64ToInt64,
-                        val,
-                        Type::I64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::TruncSFloat64ToInt64,
+                            val,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64TruncF64U => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::TruncUFloat64ToInt64,
-                        val,
-                        Type::I64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::TruncUFloat64ToInt64,
+                            val,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32ConvertI32S => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ConvertSInt32ToFloat32,
-                        val,
-                        Type::F32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ConvertSInt32ToFloat32,
+                            val,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32ConvertI32U => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ConvertUInt32ToFloat32,
-                        val,
-                        Type::F32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ConvertUInt32ToFloat32,
+                            val,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32ConvertI64S => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ConvertSInt64ToFloat32,
-                        val,
-                        Type::F32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ConvertSInt64ToFloat32,
+                            val,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32ConvertI64U => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ConvertUInt64ToFloat32,
-                        val,
-                        Type::F32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ConvertUInt64ToFloat32,
+                            val,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64ConvertI32S => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ConvertSInt32ToFloat64,
-                        val,
-                        Type::F64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ConvertSInt32ToFloat64,
+                            val,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64ConvertI32U => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ConvertUInt32ToFloat64,
-                        val,
-                        Type::F64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ConvertUInt32ToFloat64,
+                            val,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64ConvertI64S => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ConvertSInt64ToFloat64,
-                        val,
-                        Type::F64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ConvertSInt64ToFloat64,
+                            val,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64ConvertI64U => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ConvertUInt64ToFloat64,
-                        val,
-                        Type::F64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ConvertUInt64ToFloat64,
+                            val,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32DemoteF64 => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::DemoteFloat64,
-                        val,
-                        Type::F32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::DemoteFloat64,
+                            val,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64PromoteF32 => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::PromoteFloat32,
-                        val,
-                        Type::F64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::PromoteFloat32,
+                            val,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I32ReinterpretF32 => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ReinterpretFloat32,
-                        val,
-                        Type::I32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ReinterpretFloat32,
+                            val,
+                            Type::I32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I64ReinterpretF64 => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ReinterpretFloat64,
-                        val,
-                        Type::I64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ReinterpretFloat64,
+                            val,
+                            Type::I64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F32ReinterpretI32 => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ReinterpretInt32,
-                        val,
-                        Type::F32,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ReinterpretInt32,
+                            val,
+                            Type::F32,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::F64ReinterpretI64 => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).unary(
-                        crate::ir::ops::UnaryOp::ReinterpretInt64,
-                        val,
-                        Type::F64,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).unary(
+                            crate::ir::ops::UnaryOp::ReinterpretInt64,
+                            val,
+                            Type::F64,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::DataDrop { data_index } => {
                     let id = self
@@ -2853,12 +4170,18 @@ impl BinaryReader {
                         .get(data_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("data_drop", data_index))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).data_drop(id));
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).data_drop(id),
+                        offset,
+                    ));
                 }
                 Operator::MemoryInit { data_index, mem } => {
-                    let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let src = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let dest = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let size = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(size);
+                    let src = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(src);
+                    let dest = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(dest);
                     let memory = self
                         .memory_ids
                         .get(mem as usize)
@@ -2870,14 +4193,20 @@ impl BinaryReader {
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory_init data", data_index))?;
                     stack.push(
-                        IrBuilder::new(&mut module.expressions)
-                            .memory_init(memory, data_id, dest, src, size),
+                        self.record(
+                            IrBuilder::new(&mut module.expressions)
+                                .memory_init(memory, data_id, dest, src, size),
+                            offset,
+                        ),
                     );
                 }
                 Operator::MemoryCopy { dst_mem, src_mem } => {
-                    let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let src = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let dest = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let size = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(size);
+                    let src = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(src);
+                    let dest = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(dest);
                     let dst_id = self
                         .memory_ids
                         .get(dst_mem as usize)
@@ -2889,22 +4218,31 @@ impl BinaryReader {
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", src_mem))?;
                     stack.push(
-                        IrBuilder::new(&mut module.expressions)
-                            .memory_copy(dst_id, src_id, dest, src, size),
+                        self.record(
+                            IrBuilder::new(&mut module.expressions)
+                                .memory_copy(dst_id, src_id, dest, src, size),
+                            offset,
+                        ),
                     );
                 }
                 Operator::MemoryFill { mem } => {
-                    let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let dest = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let size = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(size);
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let dest = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(dest);
                     let memory = self
                         .memory_ids
                         .get(mem as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("memory", mem))?;
                     stack.push(
-                        IrBuilder::new(&mut module.expressions)
-                            .memory_fill(memory, dest, value, size),
+                        self.record(
+                            IrBuilder::new(&mut module.expressions)
+                                .memory_fill(memory, dest, value, size),
+                            offset,
+                        ),
                     );
                 }
                 Operator::RefNull { hty } => {
@@ -2922,11 +4260,20 @@ impl BinaryReader {
                         },
                         _ => Type::ANYREF,
                     };
-                    stack.push(IrBuilder::new(&mut module.expressions).ref_null(ty));
+                    let expr =
+                        self.record(IrBuilder::new(&mut module.expressions).ref_null(ty), offset);
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::RefIsNull => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).ref_is_null(val));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).ref_is_null(val),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::RefFunc { function_index } => {
                     let func_id = self
@@ -2934,36 +4281,55 @@ impl BinaryReader {
                         .get(function_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("function", function_index))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).ref_func(func_id));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).ref_func(func_id),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::RefEq => {
-                    let right = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let left = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).ref_eq(left, right));
+                    let right = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(right);
+                    let left = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(left);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).ref_eq(left, right),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::TableGet { table } => {
-                    let index = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let index = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(index);
                     let table_id = self
                         .table_ids
                         .get(table as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table", table))?;
                     let ty = module.tables[table_id].limits.element_type;
-                    stack.push(
+                    let expr = self.record(
                         IrBuilder::new(&mut module.expressions).table_get(table_id, index, ty),
+                        offset,
                     );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::TableSet { table } => {
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let index = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let index = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(index);
                     let table_id = self
                         .table_ids
                         .get(table as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table", table))?;
-                    stack.push(
+                    stack.push(self.record(
                         IrBuilder::new(&mut module.expressions).table_set(table_id, index, value),
-                    );
+                        offset,
+                    ));
                 }
                 Operator::TableSize { table } => {
                     let table_id = self
@@ -2971,41 +4337,60 @@ impl BinaryReader {
                         .get(table as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table", table))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).table_size(table_id));
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).table_size(table_id),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::TableGrow { table } => {
-                    let delta = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let delta = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(delta);
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
                     let table_id = self
                         .table_ids
                         .get(table as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table", table))?;
-                    stack.push(
+                    let expr = self.record(
                         IrBuilder::new(&mut module.expressions).table_grow(table_id, value, delta),
+                        offset,
                     );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::TableFill { table } => {
-                    let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let dest = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let size = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(size);
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let dest = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(dest);
                     let table_id = self
                         .table_ids
                         .get(table as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table", table))?;
                     stack.push(
-                        IrBuilder::new(&mut module.expressions)
-                            .table_fill(table_id, dest, value, size),
+                        self.record(
+                            IrBuilder::new(&mut module.expressions)
+                                .table_fill(table_id, dest, value, size),
+                            offset,
+                        ),
                     );
                 }
                 Operator::TableCopy {
                     dst_table,
                     src_table,
                 } => {
-                    let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let src = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let dest = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let size = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(size);
+                    let src = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(src);
+                    let dest = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(dest);
                     let dst_id = self
                         .table_ids
                         .get(dst_table as usize)
@@ -3017,14 +4402,20 @@ impl BinaryReader {
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table", src_table))?;
                     stack.push(
-                        IrBuilder::new(&mut module.expressions)
-                            .table_copy(dst_id, src_id, dest, src, size),
+                        self.record(
+                            IrBuilder::new(&mut module.expressions)
+                                .table_copy(dst_id, src_id, dest, src, size),
+                            offset,
+                        ),
                     );
                 }
                 Operator::TableInit { elem_index, table } => {
-                    let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let offset = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let dest = stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    let size = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(size);
+                    let offset_val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(offset_val);
+                    let dest = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(dest);
                     let table_id = self
                         .table_ids
                         .get(table as usize)
@@ -3036,8 +4427,11 @@ impl BinaryReader {
                         .copied()
                         .ok_or(ParseError::InvalidIndex("table_init elem", elem_index))?;
                     stack.push(
-                        IrBuilder::new(&mut module.expressions)
-                            .table_init(table_id, elem_id, dest, offset, size),
+                        self.record(
+                            IrBuilder::new(&mut module.expressions)
+                                .table_init(table_id, elem_id, dest, offset_val, size),
+                            offset,
+                        ),
                     );
                 }
                 Operator::ElemDrop { elem_index } => {
@@ -3046,19 +4440,38 @@ impl BinaryReader {
                         .get(elem_index as usize)
                         .copied()
                         .ok_or(ParseError::InvalidIndex("elem_drop", elem_index))?;
-                    stack.push(IrBuilder::new(&mut module.expressions).elem_drop(id));
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).elem_drop(id),
+                        offset,
+                    ));
                 }
                 Operator::RefI31 => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).i31_new(val));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr =
+                        self.record(IrBuilder::new(&mut module.expressions).i31_new(val), offset);
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I31GetS => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).i31_get(val, true));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).i31_get(val, true),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::I31GetU => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).i31_get(val, false));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).i31_get(val, false),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::StructNew { struct_type_index } => {
                     let ty = self
@@ -3069,102 +4482,159 @@ impl BinaryReader {
                     let param_count = ty.0.len();
                     let mut operands = Vec::with_capacity(param_count);
                     for _ in 0..param_count {
-                        operands.push(stack.pop().ok_or(ParseError::UnexpectedEof)?);
+                        let op = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                        consumed.insert(op);
+                        operands.push(op);
                     }
                     operands.reverse();
-                    stack.push(
+                    let expr = self.record(
                         IrBuilder::new(&mut module.expressions)
                             .struct_new(Type::new(HeapType::STRUCT, true), operands),
+                        offset,
                     );
+                    stack.push(expr);
+                    value_stack.push(expr);
                     // TODO: refine type
                 }
                 Operator::StructGet {
                     struct_type_index: _,
                     field_index,
                 } => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).struct_get(
-                        Type::new(HeapType::STRUCT, true),
-                        ptr,
-                        field_index,
-                        true,
-                        Type::ANYREF,
-                    )); // TODO: refine types
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).struct_get(
+                            Type::new(HeapType::STRUCT, true),
+                            ptr,
+                            field_index,
+                            true,
+                            Type::ANYREF,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::StructSet {
                     struct_type_index: _,
                     field_index,
                 } => {
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).struct_set(
-                        Type::new(HeapType::STRUCT, true),
-                        ptr,
-                        field_index,
-                        value,
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).struct_set(
+                            Type::new(HeapType::STRUCT, true),
+                            ptr,
+                            field_index,
+                            value,
+                        ),
+                        offset,
                     ));
                 }
                 Operator::ArrayNew {
                     array_type_index: _,
                 } => {
-                    let size = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).array_new(
-                        Type::new(HeapType::ARRAY, true),
-                        size,
-                        None,
-                    ));
+                    let size = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(size);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).array_new(
+                            Type::new(HeapType::ARRAY, true),
+                            size,
+                            None,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::ArrayGet {
                     array_type_index: _,
                 } => {
-                    let index = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).array_get(
-                        Type::new(HeapType::ARRAY, true),
-                        ptr,
-                        index,
-                        true,
-                        Type::ANYREF,
-                    ));
+                    let index = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(index);
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).array_get(
+                            Type::new(HeapType::ARRAY, true),
+                            ptr,
+                            index,
+                            true,
+                            Type::ANYREF,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::ArraySet {
                     array_type_index: _,
                 } => {
-                    let value = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let index = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).array_set(
-                        Type::new(HeapType::ARRAY, true),
-                        ptr,
-                        index,
-                        value,
+                    let value = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(value);
+                    let index = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(index);
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
+                    stack.push(self.record(
+                        IrBuilder::new(&mut module.expressions).array_set(
+                            Type::new(HeapType::ARRAY, true),
+                            ptr,
+                            index,
+                            value,
+                        ),
+                        offset,
                     ));
                 }
                 Operator::ArrayLen => {
-                    let ptr = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).array_len(ptr));
+                    let ptr = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(ptr);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).array_len(ptr),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 Operator::RefTestNonNull { hty: _ } | Operator::RefTestNullable { hty: _ } => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).ref_test(
-                        crate::ir::ops::RefTestOp::Ref,
-                        val,
-                        Type::ANYREF,
-                    ));
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).ref_test(
+                            crate::ir::ops::RefTestOp::Ref,
+                            val,
+                            Type::ANYREF,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                     // TODO
                 }
                 Operator::RefCastNonNull { hty: _ } | Operator::RefCastNullable { hty: _ } => {
-                    let val = stack.pop().ok_or(ParseError::UnexpectedEof)?;
-                    stack.push(IrBuilder::new(&mut module.expressions).ref_cast(
-                        crate::ir::ops::RefCastOp::Cast,
-                        val,
-                        Type::ANYREF,
-                    )); // TODO
+                    let val = value_stack.pop().ok_or(ParseError::UnexpectedEof)?;
+                    consumed.insert(val);
+                    let expr = self.record(
+                        IrBuilder::new(&mut module.expressions).ref_cast(
+                            crate::ir::ops::RefCastOp::Cast,
+                            val,
+                            Type::ANYREF,
+                        ),
+                        offset,
+                    );
+                    stack.push(expr);
+                    value_stack.push(expr);
                 }
                 _ => {
                     // Skip unknown opcodes for now
                 }
             }
+        }
+
+        if !frames.is_empty() {
+            return Err(ParseError::UnexpectedEof);
         }
 
         let mut final_stack: Vec<ExpressionId> = stack
@@ -3183,19 +4653,21 @@ impl BinaryReader {
         */
 
         if final_stack.is_empty() {
-            Ok(Some(IrBuilder::new(&mut module.expressions).nop()))
+            Ok(Some(
+                self.record(IrBuilder::new(&mut module.expressions).nop(), 0),
+            ))
         } else if final_stack.len() > 1 {
             let result_type = final_stack
                 .last()
                 .map(|&e| module.expressions[e].type_)
                 .unwrap_or(Type::NONE);
-            Ok(Some(IrBuilder::new(&mut module.expressions).block(
-                "",
-                final_stack,
-                result_type,
+            Ok(Some(self.record(
+                IrBuilder::new(&mut module.expressions).block("", final_stack, result_type),
+                0,
             )))
         } else {
-            Ok(final_stack.pop())
+            let res = final_stack.pop();
+            Ok(res)
         }
     }
 }

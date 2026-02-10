@@ -1,4 +1,5 @@
 use washm::passes::asyncify::{Asyncify, AsyncifyConfig};
+use washm::passes::vacuum::Vacuum;
 use washm::passes::Pass;
 
 fn run_asyncify(wat: &str, imports: Vec<&str>) -> String {
@@ -21,6 +22,8 @@ fn run_asyncify_bytes(wat: &str, imports: Vec<&str>) -> Vec<u8> {
 
     let mut asyncify = Asyncify::new(config);
     asyncify.run(&mut module);
+    // Run Vacuum to collapse and propagate names after instrumentation so the writer can resolve labels
+    Vacuum.run(&mut module);
 
     // debug: module IR globals before write removed
 

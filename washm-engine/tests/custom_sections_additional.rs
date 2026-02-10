@@ -188,3 +188,34 @@ fn passes_preserve_custom_sections() {
         "custom section was removed by pass"
     );
 }
+
+#[test]
+fn writer_emits_standard_function_names() {
+    // Ensure writer emits our function names in the standard 'name' section
+    let mut reader = BinaryReader::new();
+    let wasm = wat::parse_str("(module (func) (func))").expect("wat");
+    let mut module = reader.parse_module(&wasm).expect("parse");
+
+    // Assign names explicitly
+    let ids: Vec<_> = module.functions.iter().map(|(id, _)| id.cast()).collect();
+    for (i, id) in ids.into_iter().enumerate() {
+        if let Some(f) = module.get_function_mut(id) {
+            f.name = format!("fn{}", i);
+        }
+    }
+
+    let mut writer = BinaryWriter::new();
+    let out = writer.write_module(&module).expect("write");
+
+    let mut found = false;
+    for payload in Parser::new(0).parse_all(&out) {
+        let payload = payload.expect("parser");
+        if let wasmparser::Payload::CustomSection(s) = payload {
+            if s.name() == "name" {
+                found = true;
+                break;
+            }
+        }
+    }
+    assert!(found, "Standard 'name' section was not emitted");
+}

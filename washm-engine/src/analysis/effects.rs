@@ -1,30 +1,30 @@
-// Effect analysis for WebAssembly expressions.
-//
-// This module provides the foundational types for reasoning about side effects
-// in WebAssembly expressions. Effects are used by optimization passes to
-// determine whether it is safe to reorder, eliminate, or move instructions.
-//
-// ## Design Philosophy
-//
-// In Rust, we leverage the type system to make effect analysis more precise
-// and harder to misuse than the C++ counterpart. Effects are represented as
-// bitflags, allowing efficient composition and querying.
-//
-// ## Usage
-//
-// ```rust
-// use washm::analysis::effects::{Effect, EffectAnalyzer};
-// use washm::ir::expression::{IrBuilder, ExpressionId};
-// use washm::ir::{Literal, Type};
-//
-// // Assuming you have an arena
-// let mut builder = IrBuilder::new(&mut arena);
-// let expr = builder.unreachable();
-//
-// let effect = EffectAnalyzer::analyze(expr, &arena);
-// assert!(effect.may_trap());
-// assert!(effect.transfers_control());
-// ```
+//! Effect analysis for WebAssembly expressions.
+//!
+//! This module provides the foundational types for reasoning about side effects
+//! in WebAssembly expressions. Effects are used by optimization passes to
+//! determine whether it is safe to reorder, eliminate, or move instructions.
+//!
+//! ## Design Philosophy
+//!
+//! In Rust, we leverage the type system to make effect analysis more precise
+//! and harder to misuse than the C++ counterpart. Effects are represented as
+//! bitflags, allowing efficient composition and querying.
+//!
+//! ## Usage
+//!
+//! ```rust
+//! use washm::analysis::effects::{Effect, EffectAnalyzer};
+//! use washm::ir::expression::{IrBuilder, ExpressionId};
+//! use washm::ir::{Literal, Type};
+//!
+//! // Assuming you have an arena
+//! let mut builder = IrBuilder::new(&mut arena);
+//! let expr = builder.unreachable();
+//!
+//! let effect = EffectAnalyzer::analyze(expr, &arena);
+//! assert!(effect.may_trap());
+//! assert!(effect.transfers_control());
+//! ```
 
 use crate::collections::IdArena;
 use crate::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};

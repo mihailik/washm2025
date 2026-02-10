@@ -5,7 +5,12 @@ use crate::ir::ops::{AtomicOp, BinaryOp, RefAsOp, UnaryOp};
 use crate::ir::{DataId, ElementId, FuncId, GlobalId, MemoryId, TableId, TypeId};
 use crate::ir::{Literal, Type};
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::io;
+
+thread_local! {
+    static LABEL_ID_STACK: RefCell<Vec<Option<ExpressionId>>> = RefCell::new(Vec::new());
+}
 use wasm_encoder::{
     AbstractHeapType, CodeSection, ConstExpr, DataCountSection, DataSection, ElementSection,
     Encode, ExportKind, ExportSection, Function as EncoderFunction, FunctionSection, GlobalSection,
@@ -46,7 +51,7 @@ impl InstructionEncoder for ConstExprEncoder {
 }
 
 pub struct BinaryWriter {
-    _label_stack: Vec<Option<String>>, // Stack of label names for depth calculation
+    _scope_stack: Vec<ExpressionId>, // Stack of block/loop IDs for depth calculation
 }
 
 #[derive(Debug)]
@@ -75,7 +80,7 @@ impl Default for BinaryWriter {
 impl BinaryWriter {
     pub fn new() -> Self {
         Self {
-            _label_stack: Vec::new(),
+            _scope_stack: Vec::new(),
         }
     }
 
@@ -140,38 +145,22 @@ impl BinaryWriter {
         }
     }
 
-    // Finds absolute starts (offsets) for each function body payload (after the size LEB)
+    // Finds absolute starts (offsets) for each function body payload (at the size LEB)
     fn find_code_section_body_starts(bytes: &[u8]) -> Option<Vec<usize>> {
-        // Validate magic and version
-        if bytes.len() < 8 || &bytes[0..4] != b"\0asm" {
-            return None;
-        }
-        let mut p = 8usize; // after header
-        while p < bytes.len() {
-            let id = bytes[p];
-            p += 1;
-            let (section_size, size_len) = Self::read_leb_u32(bytes, p)?;
-            p += size_len;
-            if id == 10u8 {
-                // code section payload begins at p
-                let mut q = p;
-                // read function count
-                let (func_count, cnt_len) = Self::read_leb_u32(bytes, q)?;
-                q += cnt_len;
-                let mut starts = Vec::new();
-                for _ in 0..func_count {
-                    let (body_size, body_size_len) = Self::read_leb_u32(bytes, q)?;
-                    let body_start = q + body_size_len;
-                    starts.push(body_start);
-                    q = body_start + body_size as usize;
+        let mut results = Vec::new();
+        for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+            match payload {
+                Ok(wasmparser::Payload::CodeSectionEntry(body)) => {
+                    results.push(body.range().start);
                 }
-                return Some(starts);
-            } else {
-                // skip this section
-                p += section_size as usize;
+                _ => {}
             }
         }
-        None
+        if results.is_empty() {
+            None
+        } else {
+            Some(results)
+        }
     }
 
     fn encode_custom_section(name: &str, payload: &[u8]) -> Vec<u8> {
@@ -692,15 +681,14 @@ impl BinaryWriter {
             });
         }
 
+        // For emitting the debug mapping we need to record raw function body bytes
+        // and expression offsets per function (in definition order).
+        let mut expr_offsets_per_func: Vec<std::collections::HashMap<ExpressionId, u32>> =
+            Vec::new();
+
         // 10. Code Section
         {
             let mut code = CodeSection::new();
-
-            // For emitting the debug mapping we need to record raw function body bytes
-            // and expression offsets per function (in definition order).
-            let mut func_body_bytes_vecs: Vec<Vec<u8>> = Vec::new();
-            let mut expr_offsets_per_func: Vec<std::collections::HashMap<ExpressionId, u32>> =
-                Vec::new();
 
             for (_, func) in &module.functions {
                 if !func.is_import() {
@@ -752,12 +740,12 @@ impl BinaryWriter {
 
                     if let Some(body_expr) = func.body() {
                         if !body_expr.is_null() {
-                            let mut label_stack = vec![None];
+                            let mut scope_stack = Vec::new();
                             Self::write_instructions(
                                 &mut func_encoder,
                                 &module.expressions,
                                 body_expr,
-                                &mut label_stack,
+                                &mut scope_stack,
                                 &func_map,
                                 &global_map,
                                 &type_id_map,
@@ -778,95 +766,12 @@ impl BinaryWriter {
 
                     code.function(&func_encoder);
 
-                    func_body_bytes_vecs.push(func_bytes);
                     expr_offsets_per_func.push(expr_offsets);
                 }
             }
 
             if !code.is_empty() {
                 encoder.section(&code);
-
-                // After we've written the code section via encoder, we also need to
-                // construct a .debug_line.map custom section based on recorded
-                // expression offsets and module.annotations. We will finish the
-                // module to get bytes and then append a custom section containing
-                // (offset,u32 LE, file_index:u32 LE, line:u32 LE, column:u32 LE) entries.
-                let mut temp_bytes = encoder.finish();
-
-                // Find the code section and function body starts
-                if let Some(body_starts) = Self::find_code_section_body_starts(&temp_bytes) {
-                    // Build records
-                    let mut map_payload: Vec<u8> = Vec::new();
-                    for (func_index, expr_map) in expr_offsets_per_func.iter().enumerate() {
-                        if func_index >= body_starts.len() {
-                            break;
-                        }
-                        let body_start = body_starts[func_index];
-                        for (expr_id, &rel_off) in expr_map {
-                            if let Some(loc) = module.annotations.get_location(*expr_id) {
-                                let abs_off = body_start.wrapping_add(rel_off as usize) as u32;
-                                map_payload.extend(&abs_off.to_le_bytes());
-                                map_payload.extend(&loc.file_index.to_le_bytes());
-                                map_payload.extend(&loc.line.to_le_bytes());
-                                map_payload.extend(&loc.column.to_le_bytes());
-                            }
-                        }
-                    }
-
-                    if !map_payload.is_empty() {
-                        // Append custom section bytes to module bytes
-                        let custom_section =
-                            Self::encode_custom_section(".debug_line.map", &map_payload);
-                        temp_bytes.extend(&custom_section);
-                    }
-
-                    // Also append any custom sections that were present on the Module
-                    for section in &module.custom_sections {
-                        let custom_section =
-                            Self::encode_custom_section(&section.name, &section.data);
-                        temp_bytes.extend(&custom_section);
-                    }
-
-                    // Emit a simple washm-specific global name table so readers can roundtrip
-                    // names even when the standard "name" custom section isn't parsed.
-                    // Format: u32 count, then repeated (u32 len, bytes)
-                    if module.globals.iter().any(|(_, g)| !g.name.is_empty()) {
-                        let mut global_names_payload: Vec<u8> = Vec::new();
-                        let globals_count = module.globals.len() as u32;
-                        global_names_payload.extend(&globals_count.to_le_bytes());
-                        for (_, g) in &module.globals {
-                            let name_bytes = g.name.as_bytes();
-                            global_names_payload.extend(&(name_bytes.len() as u32).to_le_bytes());
-                            global_names_payload.extend(name_bytes);
-                        }
-                        let custom_section = Self::encode_custom_section(
-                            ".washm.global_names",
-                            &global_names_payload,
-                        );
-                        temp_bytes.extend(&custom_section);
-                    }
-
-                    // Emit simple washm-specific function name table so readers can roundtrip
-                    // function names as well.
-                    if module.functions.iter().any(|(_, f)| !f.name.is_empty()) {
-                        let mut func_names_payload: Vec<u8> = Vec::new();
-                        let func_count = module.functions.len() as u32;
-                        func_names_payload.extend(&func_count.to_le_bytes());
-                        for (_, f) in &module.functions {
-                            let name_bytes = f.name.as_bytes();
-                            func_names_payload.extend(&(name_bytes.len() as u32).to_le_bytes());
-                            func_names_payload.extend(name_bytes);
-                        }
-                        let custom_section = Self::encode_custom_section(
-                            ".washm.function_names",
-                            &func_names_payload,
-                        );
-                        temp_bytes.extend(&custom_section);
-                    }
-                }
-
-                // Return combined bytes
-                return Ok(temp_bytes);
             }
         }
 
@@ -1026,31 +931,109 @@ impl BinaryWriter {
             }
         }
 
+        let mut original_dwarf_sections: Vec<(String, Vec<u8>)> = Vec::new();
         for section in &module.custom_sections {
+            // Collect original DWARF sections to re-emit later if our generator doesn't
+            // produce a replacement. This avoids duplication when we *do* generate DWARF.
+            if section.name == ".debug_line"
+                || section.name == ".debug_info"
+                || section.name == ".debug_abbrev"
+                || section.name == ".debug_str"
+                || section.name == ".debug_ranges"
+                || section.name == ".debug_loc"
+                || section.name == ".debug_pubnames"
+                || section.name == ".debug_pubtypes"
+            {
+                original_dwarf_sections.push((section.name.clone(), section.data.clone()));
+                continue;
+            }
             encoder.section(&wasm_encoder::CustomSection {
                 name: std::borrow::Cow::Borrowed(&section.name),
                 data: std::borrow::Cow::Borrowed(&section.data),
             });
         }
 
-        // Emit simple washm-specific global name table to aid readers that don't
-        // parse the standard "name" custom section.
-        if module.globals.iter().any(|(_, g)| !g.name.is_empty()) {
-            let mut global_names_payload: Vec<u8> = Vec::new();
-            let globals_count = module.globals.len() as u32;
-            global_names_payload.extend(&globals_count.to_le_bytes());
-            for (_, g) in &module.globals {
-                let name_bytes = g.name.as_bytes();
-                global_names_payload.extend(&(name_bytes.len() as u32).to_le_bytes());
-                global_names_payload.extend(name_bytes);
+        let mut temp_bytes = encoder.finish();
+
+        // Emit DWARF-backed sections (eg. .debug_line) generated from annotations
+        if let Some(body_starts) = Self::find_code_section_body_starts(&temp_bytes) {
+            log::debug!(
+                "BinaryWriter: found {} body_starts: {:?}",
+                body_starts.len(),
+                body_starts
+            );
+            log::debug!(
+                "BinaryWriter: expr_offsets_per_func count: {}",
+                expr_offsets_per_func.len()
+            );
+            for (i, map) in expr_offsets_per_func.iter().enumerate() {
+                log::debug!("  func {}: {} expr offsets", i, map.len());
             }
-            encoder.section(&wasm_encoder::CustomSection {
-                name: std::borrow::Cow::Borrowed(".washm.global_names"),
-                data: std::borrow::Cow::Owned(global_names_payload),
-            });
+            use crate::wasm::dwarf_writer;
+            let dwarf_secs: std::collections::HashMap<String, Vec<u8>> =
+                dwarf_writer::emit_dwarf_sections(module, &body_starts, &expr_offsets_per_func);
+            log::debug!("BinaryWriter: emitted {} DWARF sections", dwarf_secs.len());
+
+            // Compute which generated DWARF sections actually have content.
+            let generated_nonempty: std::collections::HashSet<String> = dwarf_secs
+                .iter()
+                .filter(|(_, data)| !data.is_empty())
+                .map(|(n, _)| n.clone())
+                .collect();
+
+            if generated_nonempty.is_empty() {
+                // No regenerated DWARF content — re-emit original DWARF sections we previously skipped
+                for (name, data) in original_dwarf_sections {
+                    log::debug!(
+                        "BinaryWriter: re-emitting original DWARF section {} ({} bytes)",
+                        name,
+                        data.len()
+                    );
+                    let custom_section = Self::encode_custom_section(&name, &data);
+                    temp_bytes.extend(&custom_section);
+                }
+            } else {
+                // Emit generated DWARF sections that have content
+                for name in &generated_nonempty {
+                    let data = dwarf_secs.get(name).unwrap();
+                    log::debug!(
+                        "BinaryWriter: adding custom section {} ({} bytes)",
+                        name,
+                        data.len()
+                    );
+                    let custom_section = Self::encode_custom_section(name, data);
+                    temp_bytes.extend(&custom_section);
+                }
+
+                // Re-emit any original DWARF sections not replaced by generated non-empty ones.
+                for (name, data) in original_dwarf_sections {
+                    if !generated_nonempty.contains(&name) {
+                        log::debug!(
+                            "BinaryWriter: preserving original DWARF section {} ({} bytes)",
+                            name,
+                            data.len()
+                        );
+                        let custom_section = Self::encode_custom_section(&name, &data);
+                        temp_bytes.extend(&custom_section);
+                    }
+                }
+            }
+        } else {
+            log::debug!("BinaryWriter: NO code section body_starts found!");
+            // No code bodies to regenerate DWARF from — re-emit original DWARF sections
+            // that were preserved above.
+            for (name, data) in original_dwarf_sections {
+                log::debug!(
+                    "BinaryWriter: re-emitting original DWARF section {} ({} bytes)",
+                    name,
+                    data.len()
+                );
+                let custom_section = Self::encode_custom_section(&name, &data);
+                temp_bytes.extend(&custom_section);
+            }
         }
 
-        Ok(encoder.finish())
+        Ok(temp_bytes)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1058,7 +1041,7 @@ impl BinaryWriter {
         encoder: &mut E,
         arena: &IdArena<ExpressionMarker, Expression>,
         id: ExpressionId,
-        label_stack: &mut Vec<Option<String>>,
+        scope_stack: &mut Vec<ExpressionId>,
         func_map: &std::collections::HashMap<FuncId, u32>,
         global_map: &std::collections::HashMap<GlobalId, u32>,
         type_id_map: &std::collections::HashMap<TypeId, u32>,
@@ -1077,7 +1060,7 @@ impl BinaryWriter {
             encoder,
             arena,
             id,
-            label_stack,
+            scope_stack,
             func_map,
             global_map,
             type_id_map,
@@ -1095,7 +1078,7 @@ impl BinaryWriter {
         encoder: &mut E,
         arena: &IdArena<ExpressionMarker, Expression>,
         id: ExpressionId,
-        label_stack: &mut Vec<Option<String>>,
+        scope_stack: &mut Vec<ExpressionId>,
         func_map: &std::collections::HashMap<FuncId, u32>,
         global_map: &std::collections::HashMap<GlobalId, u32>,
         type_id_map: &std::collections::HashMap<TypeId, u32>,
@@ -1109,6 +1092,33 @@ impl BinaryWriter {
         expr_offsets_out: &mut Option<&mut std::collections::HashMap<ExpressionId, u32>>,
     ) -> Result<()> {
         let expr = &arena[id];
+
+        // Cycle detection: fail early instead of recursing infinitely
+        thread_local! {
+            static WRITE_STACK: std::cell::RefCell<Vec<ExpressionId>> = std::cell::RefCell::new(Vec::new());
+        }
+        struct WriteGuard(Option<ExpressionId>);
+        impl Drop for WriteGuard {
+            fn drop(&mut self) {
+                if let Some(_) = self.0 {
+                    WRITE_STACK.with(|s| {
+                        let mut v = s.borrow_mut();
+                        v.pop();
+                    });
+                }
+            }
+        }
+        // Detect cycles: if `id` is already on the stack, bail out with an informative error
+        let already_on_stack = WRITE_STACK.with(|s| s.borrow().contains(&id));
+        if already_on_stack {
+            return Err(WriteError::InternalError(format!(
+                "Expression cycle detected at {:?}",
+                id
+            )));
+        }
+        // push and ensure pop on function exit
+        WRITE_STACK.with(|s| s.borrow_mut().push(id));
+        let _guard = WriteGuard(Some(id));
 
         // If requested, record offset of this expression relative to function body
         if let (Some(bytes), Some(map)) = (func_bytes.as_mut(), expr_offsets_out.as_mut()) {
@@ -1158,7 +1168,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *value,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1180,7 +1190,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *value,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1211,7 +1221,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     value,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1235,7 +1245,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     left,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1251,7 +1261,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     right,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1353,7 +1363,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     value,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1419,17 +1429,17 @@ impl BinaryWriter {
                     UnaryOp::ExtendS16Int64 => Instruction::I64Extend16S,
                     UnaryOp::ExtendS32Int64 => Instruction::I64Extend32S,
                 };
-                encoder.instruction(&instr);
+                emit_instr!(instr);
             }
-            ExpressionKind::Block { name, list } => {
-                label_stack.push(name.as_ref().map(|s| s.to_string()));
+            ExpressionKind::Block { name: _, list } => {
+                scope_stack.push(id);
                 emit_instr!(Instruction::Block(Self::to_block_type(expr.type_)));
                 for &child in list {
                     Self::write_instructions_with_opts(
                         encoder,
                         arena,
                         child,
-                        label_stack,
+                        scope_stack,
                         func_map,
                         global_map,
                         type_id_map,
@@ -1442,18 +1452,18 @@ impl BinaryWriter {
                         expr_offsets_out,
                     )?;
                 }
-                encoder.instruction(&Instruction::End);
-                label_stack.pop();
+                emit_instr!(Instruction::End);
+                scope_stack.pop();
             }
-            ExpressionKind::Loop { name, body } => {
+            ExpressionKind::Loop { name: _, body } => {
                 let body = *body;
-                label_stack.push(name.as_ref().map(|s| s.to_string()));
+                scope_stack.push(id);
                 emit_instr!(Instruction::Loop(Self::to_block_type(expr.type_)));
                 Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     body,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1465,11 +1475,11 @@ impl BinaryWriter {
                     func_bytes,
                     expr_offsets_out,
                 )?;
-                encoder.instruction(&Instruction::End);
-                label_stack.pop();
+                emit_instr!(Instruction::End);
+                scope_stack.pop();
             }
             ExpressionKind::If {
-                name,
+                name: _,
                 condition,
                 if_true,
                 if_false,
@@ -1481,7 +1491,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     condition,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1493,13 +1503,13 @@ impl BinaryWriter {
                     func_bytes,
                     expr_offsets_out,
                 )?;
-                label_stack.push(name.as_ref().map(|s| s.to_string()));
+                scope_stack.push(id);
                 emit_instr!(Instruction::If(Self::to_block_type(expr.type_)));
                 Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     if_true,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1517,7 +1527,7 @@ impl BinaryWriter {
                         encoder,
                         arena,
                         f,
-                        label_stack,
+                        scope_stack,
                         func_map,
                         global_map,
                         type_id_map,
@@ -1530,14 +1540,15 @@ impl BinaryWriter {
                         expr_offsets_out,
                     )?;
                 }
-                encoder.instruction(&Instruction::End);
-                label_stack.pop();
+                emit_instr!(Instruction::End);
+                scope_stack.pop();
             }
             ExpressionKind::Break {
-                name,
+                target,
                 condition,
                 value,
             } => {
+                let target = *target;
                 let condition = condition.as_ref().map(|c| *c);
                 let value = value.as_ref().map(|v| *v);
                 if let Some(v) = value {
@@ -1545,7 +1556,7 @@ impl BinaryWriter {
                         encoder,
                         arena,
                         v,
-                        label_stack,
+                        scope_stack,
                         func_map,
                         global_map,
                         type_id_map,
@@ -1558,13 +1569,24 @@ impl BinaryWriter {
                         expr_offsets_out,
                     )?;
                 }
-                let depth = Self::find_label_depth(label_stack, name)?;
+
+                let depth = scope_stack
+                    .iter()
+                    .rev()
+                    .position(|&x| x == target)
+                    .ok_or_else(|| {
+                        WriteError::LabelNotFound(format!(
+                            "Target {:?} not in scope stack: {:?}",
+                            target, scope_stack
+                        ))
+                    })? as u32;
+
                 if let Some(c) = condition {
                     Self::write_instructions_with_opts(
                         encoder,
                         arena,
                         c,
-                        label_stack,
+                        scope_stack,
                         func_map,
                         global_map,
                         type_id_map,
@@ -1588,7 +1610,7 @@ impl BinaryWriter {
                         encoder,
                         arena,
                         v,
-                        label_stack,
+                        scope_stack,
                         func_map,
                         global_map,
                         type_id_map,
@@ -1612,7 +1634,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     value,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1638,7 +1660,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     if_true,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1654,7 +1676,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     if_false,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1670,7 +1692,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     condition,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1702,7 +1724,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     ptr,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1721,22 +1743,6 @@ impl BinaryWriter {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
                 };
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    ptr,
-                    label_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
                 let instr = match (expr.type_, bytes, signed) {
                     (Type::I32, 4, _) => Instruction::I32Load(memarg),
                     (Type::I32, 1, true) => Instruction::I32Load8S(memarg),
@@ -1752,9 +1758,12 @@ impl BinaryWriter {
                     (Type::I64, 4, false) => Instruction::I64Load32U(memarg),
                     (Type::F32, 4, _) => Instruction::F32Load(memarg),
                     (Type::F64, 8, _) => Instruction::F64Load(memarg),
-                    _ => return Err(WriteError::InvalidExpression),
+                    (Type::V128, 16, _) => Instruction::V128Load(memarg), // SIMD v128 loads
+                    _ => {
+                        return Err(WriteError::InvalidExpression);
+                    }
                 };
-                encoder.instruction(&instr);
+                emit_instr!(instr);
             }
             ExpressionKind::Store {
                 bytes,
@@ -1774,7 +1783,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     ptr,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1790,7 +1799,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     value,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1820,9 +1829,12 @@ impl BinaryWriter {
                     (Type::I64, 4) => Instruction::I64Store32(memarg),
                     (Type::F32, 4) => Instruction::F32Store(memarg),
                     (Type::F64, 8) => Instruction::F64Store(memarg),
-                    _ => return Err(WriteError::InvalidExpression),
+                    (Type::V128, 16) => Instruction::V128Store(memarg), // SIMD v128 stores
+                    _ => {
+                        return Err(WriteError::InvalidExpression);
+                    }
                 };
-                encoder.instruction(&instr);
+                emit_instr!(instr);
             }
             ExpressionKind::Call {
                 target,
@@ -1834,7 +1846,7 @@ impl BinaryWriter {
                         encoder,
                         arena,
                         op,
-                        label_stack,
+                        scope_stack,
                         func_map,
                         global_map,
                         type_id_map,
@@ -1860,7 +1872,7 @@ impl BinaryWriter {
                 emit_instr!(Instruction::Nop);
             }
             ExpressionKind::Switch {
-                names,
+                targets,
                 default,
                 condition,
                 value,
@@ -1870,7 +1882,7 @@ impl BinaryWriter {
                         encoder,
                         arena,
                         *v,
-                        label_stack,
+                        scope_stack,
                         func_map,
                         global_map,
                         type_id_map,
@@ -1887,7 +1899,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *condition,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1899,25 +1911,47 @@ impl BinaryWriter {
                     func_bytes,
                     expr_offsets_out,
                 )?;
-                let mut targets = Vec::new();
-                for name in names {
-                    targets.push(Self::find_label_depth(label_stack, name)?);
+                let mut target_depths = Vec::new();
+                for &target in targets {
+                    let depth = scope_stack
+                        .iter()
+                        .rev()
+                        .position(|&x| x == target)
+                        .ok_or_else(|| {
+                            WriteError::LabelNotFound(format!(
+                                "Target {:?} not in scope stack",
+                                target
+                            ))
+                        })? as u32;
+                    target_depths.push(depth);
                 }
-                let default_target = Self::find_label_depth(label_stack, default)?;
-                emit_instr!(Instruction::BrTable(targets.into(), default_target));
+                let default_target_depth = scope_stack
+                    .iter()
+                    .rev()
+                    .position(|&x| x == *default)
+                    .ok_or_else(|| {
+                        WriteError::LabelNotFound(format!(
+                            "Target {:?} not in scope stack",
+                            default
+                        ))
+                    })? as u32;
+                emit_instr!(Instruction::BrTable(
+                    target_depths.into(),
+                    default_target_depth
+                ));
             }
             ExpressionKind::MemorySize { memory } => {
                 let idx = *memory_map.get(memory).ok_or_else(|| {
                     WriteError::InternalError(format!("Memory not found: {:?}", memory))
                 })?;
-                encoder.instruction(&Instruction::MemorySize(idx));
+                emit_instr!(Instruction::MemorySize(idx));
             }
             ExpressionKind::MemoryGrow { delta, memory } => {
                 Self::write_instructions_with_opts(
                     encoder,
                     arena,
                     *delta,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1945,7 +1979,7 @@ impl BinaryWriter {
                         encoder,
                         arena,
                         op,
-                        label_stack,
+                        scope_stack,
                         func_map,
                         global_map,
                         type_id_map,
@@ -1962,7 +1996,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *target,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -1996,7 +2030,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *value,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2021,7 +2055,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *left,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2037,7 +2071,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *right,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2061,7 +2095,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *dest,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2077,7 +2111,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *value,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2093,7 +2127,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *size,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2122,7 +2156,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *dest,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2138,7 +2172,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *src,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2154,7 +2188,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *size,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2192,7 +2226,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *dest,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2208,7 +2242,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *offset,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2224,7 +2258,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *size,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2255,7 +2289,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *index,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2280,7 +2314,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *index,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2296,7 +2330,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *value,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2326,7 +2360,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *value,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2342,7 +2376,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *delta,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2368,7 +2402,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *dest,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2384,7 +2418,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *value,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2400,7 +2434,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *size,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2427,7 +2461,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *dest,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2443,7 +2477,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *src,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2459,7 +2493,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *size,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2497,7 +2531,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *dest,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2513,7 +2547,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *offset,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2529,7 +2563,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *size,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2575,7 +2609,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *ptr,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2591,7 +2625,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *value,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2704,7 +2738,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *ptr,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2720,7 +2754,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *expected,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2736,7 +2770,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *replacement,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2784,7 +2818,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *ptr,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2800,7 +2834,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *expected,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2816,7 +2850,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *timeout,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2851,7 +2885,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *ptr,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2867,7 +2901,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *count,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2895,7 +2929,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *value,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2909,19 +2943,19 @@ impl BinaryWriter {
                 )?;
                 match op {
                     RefAsOp::NonNull => {
-                        encoder.instruction(&Instruction::RefAsNonNull);
+                        emit_instr!(Instruction::RefAsNonNull);
                     }
                     RefAsOp::Extern => {
-                        encoder.instruction(&Instruction::AnyConvertExtern);
+                        emit_instr!(Instruction::AnyConvertExtern);
                     }
                     RefAsOp::Func => {
-                        encoder.instruction(&Instruction::RefAsNonNull);
+                        emit_instr!(Instruction::RefAsNonNull);
                     }
                     RefAsOp::Any => {
-                        encoder.instruction(&Instruction::ExternConvertAny);
+                        emit_instr!(Instruction::ExternConvertAny);
                     }
                     RefAsOp::I31 => {
-                        encoder.instruction(&Instruction::RefAsNonNull);
+                        emit_instr!(Instruction::RefAsNonNull);
                     }
                 };
             }
@@ -2931,7 +2965,7 @@ impl BinaryWriter {
                         encoder,
                         arena,
                         *operand,
-                        label_stack,
+                        scope_stack,
                         func_map,
                         global_map,
                         type_id_map,
@@ -2950,7 +2984,7 @@ impl BinaryWriter {
                     encoder,
                     arena,
                     *tuple,
-                    label_stack,
+                    scope_stack,
                     func_map,
                     global_map,
                     type_id_map,
@@ -2978,15 +3012,27 @@ impl BinaryWriter {
         Ok(())
     }
 
-    fn find_label_depth(label_stack: &[Option<String>], target: &str) -> Result<u32> {
-        for (i, label) in label_stack.iter().rev().enumerate() {
+    fn find_label_depth(scope_stack: &[Option<String>], target: &str) -> Result<u32> {
+        for (i, label) in scope_stack.iter().rev().enumerate() {
             if let Some(name) = label {
                 if name == target {
                     return Ok(i as u32);
                 }
             }
         }
-        Err(WriteError::LabelNotFound(target.to_string()))
+
+        // Provide more context to help diagnose missing labels
+        let names: Vec<String> = scope_stack
+            .iter()
+            .map(|o| match o {
+                Some(s) => s.clone(),
+                None => "<none>".to_string(),
+            })
+            .collect();
+        Err(WriteError::LabelNotFound(format!(
+            "{} stack={:?}",
+            target, names
+        )))
     }
 }
 

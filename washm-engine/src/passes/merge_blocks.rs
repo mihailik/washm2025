@@ -131,43 +131,96 @@ impl BlockMerger {
             // We'll clone fields if needed.
             let block_kind = std::mem::replace(&mut arena[block_id].kind, ExpressionKind::Nop);
 
-            if let ExpressionKind::Block { mut list, .. } = block_kind {
+            if let ExpressionKind::Block { mut list, name } = block_kind {
                 if list.len() > 1 {
-                    let mut new_list = Vec::new();
-                    // Take everything except the last
-                    for _ in 0..list.len() - 1 {
-                        new_list.push(list.remove(0));
+                    // Conservative safety: do not pull statements out of a child block if
+                    // that block (or any descendant) contains control-flow constructs
+                    // such as Break, Loop, Return, Switch, or If. Pulling those
+                    // statements out can reorder control flow (observed with loops).
+                    fn contains_control_flow(
+                        arena: &IdArena<ExpressionMarker, Expression>,
+                        id: ExpressionId,
+                        seen: &mut std::collections::HashSet<ExpressionId>,
+                    ) -> bool {
+                        if !seen.insert(id) {
+                            return false;
+                        }
+                        let expr = &arena[id];
+                        match &expr.kind {
+                            ExpressionKind::Break { .. }
+                            | ExpressionKind::Loop { .. }
+                            | ExpressionKind::Return { .. }
+                            | ExpressionKind::Switch { .. }
+                            | ExpressionKind::If { .. } => return true,
+                            ExpressionKind::Block { list, .. } => {
+                                for &c in list {
+                                    if contains_control_flow(arena, c, seen) {
+                                        return true;
+                                    }
+                                }
+                                false
+                            }
+                            _ => {
+                                let mut found = false;
+                                expr.kind.for_each_child(|c| {
+                                    if contains_control_flow(arena, c, seen) {
+                                        found = true;
+                                    }
+                                });
+                                found
+                            }
+                        }
                     }
 
-                    // The last one stays in the position where the block was.
-                    let last_id = list[0];
-                    let last_type = arena[last_id].type_;
-                    let last_kind =
-                        std::mem::replace(&mut arena[last_id].kind, ExpressionKind::Nop);
+                    let mut skip_pull = false;
+                    for &inner in &list {
+                        let mut seen = std::collections::HashSet::new();
+                        if contains_control_flow(arena, inner, &mut seen) {
+                            skip_pull = true;
+                            break;
+                        }
+                    }
 
-                    // Update the block item to be the last expression instead
-                    arena[block_id].type_ = last_type;
-                    arena[block_id].kind = last_kind;
+                    if skip_pull {
+                        // Put it back (preserve name)
+                        arena[block_id].kind = ExpressionKind::Block { name, list };
+                    } else {
+                        let mut new_list = Vec::new();
+                        // Take everything except the last
+                        for _ in 0..list.len() - 1 {
+                            new_list.push(list.remove(0));
+                        }
 
-                    // Now wrap 'expr' in a new block
-                    let old_type = arena[*expr_id].type_;
-                    let old_kind =
-                        std::mem::replace(&mut arena[*expr_id].kind, ExpressionKind::Nop);
+                        // The last one stays in the position where the block was.
+                        let last_id = list[0];
+                        let last_type = arena[last_id].type_;
+                        let last_kind =
+                            std::mem::replace(&mut arena[last_id].kind, ExpressionKind::Nop);
 
-                    let wrapped_expr = arena.alloc(Expression {
-                        kind: old_kind,
-                        type_: old_type,
-                    });
-                    new_list.push(wrapped_expr);
+                        // Update the block item to be the last expression instead
+                        arena[block_id].type_ = last_type;
+                        arena[block_id].kind = last_kind;
 
-                    arena[*expr_id].kind = ExpressionKind::Block {
-                        name: None,
-                        list: new_list,
-                    };
-                    arena[*expr_id].type_ = old_type;
+                        // Now wrap 'expr' in a new block; preserve the pulled block's name if present
+                        let old_type = arena[*expr_id].type_;
+                        let old_kind =
+                            std::mem::replace(&mut arena[*expr_id].kind, ExpressionKind::Nop);
+
+                        let wrapped_expr = arena.alloc(Expression {
+                            kind: old_kind,
+                            type_: old_type,
+                        });
+                        new_list.push(wrapped_expr);
+
+                        arena[*expr_id].kind = ExpressionKind::Block {
+                            name,
+                            list: new_list,
+                        };
+                        arena[*expr_id].type_ = old_type;
+                    }
                 } else {
-                    // Put it back
-                    arena[block_id].kind = ExpressionKind::Block { name: None, list };
+                    // Put it back (preserve name)
+                    arena[block_id].kind = ExpressionKind::Block { name, list };
                 }
             }
         }

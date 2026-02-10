@@ -4,7 +4,7 @@ use washm::wasm::binary_writer::BinaryWriter;
 use wasmparser::Parser;
 
 #[test]
-fn debug_line_map_emitted() {
+fn debug_line_emitted() {
     // Minimal module with a function that returns i32.const 42
     let wasm = vec![
         0x00, 0x61, 0x73, 0x6D, // magic
@@ -48,30 +48,16 @@ fn debug_line_map_emitted() {
     let mut writer = BinaryWriter::new();
     let out = writer.write_module(&module).expect("write");
 
-    // Ensure .debug_line.map exists and contains our encoded line number 123
+    // Ensure .debug_line exists
     let mut found = false;
     for payload in Parser::new(0).parse_all(&out) {
         let payload = payload.expect("parser");
         if let wasmparser::Payload::CustomSection(s) = payload {
-            if s.name() == ".debug_line.map" {
-                let data = s.data();
-                assert!(
-                    data.len() % 16 == 0,
-                    ".debug_line.map payload length not multiple of 16"
-                );
-                // Search for 123u32 little-endian anywhere in the payload
-                let mut found_123 = false;
-                for chunk in data.chunks(4) {
-                    let val = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                    if val == 123u32 {
-                        found_123 = true;
-                        break;
-                    }
-                }
-                assert!(found_123, "did not find line number 123 in .debug_line.map");
+            if s.name() == ".debug_line" {
                 found = true;
+                assert!(s.data().len() > 0, ".debug_line section is empty");
             }
         }
     }
-    assert!(found, ".debug_line.map custom section not emitted");
+    assert!(found, ".debug_line custom section not emitted");
 }

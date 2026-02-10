@@ -280,7 +280,7 @@ pub fn dump_ir(
 
 impl Pass for Asyncify {
     fn name(&self) -> &str {
-        "asyncify"
+        "Asyncify"
     }
 
     fn run(&mut self, module: &mut Module) {
@@ -407,6 +407,8 @@ impl Pass for Asyncify {
     }
 }
 
+// TODO: do NOT manipulate synthetic names!!
+
 pub struct AsyncifyFunctions {
     pub check_call_index: FuncId,
     pub get_state: FuncId,
@@ -529,9 +531,6 @@ impl ModuleAnalyzer {
             can_change_state: false,
         };
         visitor.visit(expr, arena);
-        if visitor.can_change_state {
-            // eprintln!("can_change_state_expr_inner: true for {:?}", expr);
-        }
         visitor.can_change_state
     }
 }
@@ -741,7 +740,7 @@ impl<'a> AsyncifyFlow<'a> {
                 }
             }
             ExpressionKind::Loop { mut body, .. } => {
-                eprintln!("AsyncifyFlow: processing loop body");
+                log::debug!("AsyncifyFlow: processing loop body");
                 let ty = self.arena[body].type_;
                 let range = self.process(&mut body);
                 let state_normal = self.make_state_check(AsyncifyState::Normal);
@@ -1006,11 +1005,17 @@ impl<'a> AsyncifyLocals<'a> {
             unwind_index_local = func.add_var(Type::I32);
         }
 
+        let unwind_block_id = arena.alloc(Expression {
+            kind: ExpressionKind::Nop,
+            type_: Type::NONE,
+        });
+
         {
             let mut transformer = LocalTransformer {
                 arena,
                 rewind_index_local,
                 unwind_index_local,
+                unwind_target: unwind_block_id,
                 _fake_globals: self.analyzer.fake_call_globals.clone(),
                 _fake_locals: HashMap::new(),
                 functions,
@@ -1121,11 +1126,12 @@ impl<'a> AsyncifyLocals<'a> {
 
         let unwind_block_list = vec![new_inner_body];
 
-        list.push(builder.block(
-            Some(ASYNCIFY_UNWIND.to_string()),
-            unwind_block_list,
-            Type::NONE,
-        ));
+        builder.arena[unwind_block_id].kind = ExpressionKind::Block {
+            name: Some(ASYNCIFY_UNWIND.to_string()),
+            list: unwind_block_list,
+        };
+        builder.arena[unwind_block_id].type_ = Type::NONE;
+        list.push(unwind_block_id);
 
         let gget_state2 = builder.global_get(state_id, Type::I32);
         let cunwind = builder.const_(Literal::I32(AsyncifyState::Unwinding as i32));
@@ -1180,6 +1186,7 @@ struct LocalTransformer<'a> {
     arena: &'a mut IdArena<ExpressionMarker, Expression>,
     rewind_index_local: LocalId,
     unwind_index_local: LocalId,
+    unwind_target: ExpressionId,
     _fake_globals: HashMap<Type, String>,
     _fake_locals: HashMap<Type, LocalId>,
     functions: &'a IdArena<FuncMarker, Function>,
@@ -1190,78 +1197,16 @@ impl<'a> LocalTransformer<'a> {
         let kind = self.arena[expr_id].kind.clone();
         let type_ = self.arena[expr_id].type_;
         match kind {
-            ExpressionKind::Block { name, list } => {
-                let mut new_list = Vec::new();
-                for child in list {
-                    new_list.push(self.visit(child));
-                }
-                let mut builder = IrBuilder::new(self.arena);
-                builder.block(name.unwrap_or_default(), new_list, type_)
-            }
-            ExpressionKind::If {
-                name,
-                condition,
-                if_true,
-                if_false,
-            } => {
-                let cond = self.visit(condition);
-                let true_ = self.visit(if_true);
-                let false_ = if_false.map(|f| self.visit(f));
-                let mut builder = IrBuilder::new(self.arena);
-                builder.if_(name.unwrap_or_default(), cond, true_, false_, type_)
-            }
-            ExpressionKind::Loop { name, body } => {
-                let body = self.visit(body);
-                let mut builder = IrBuilder::new(self.arena);
-                builder.loop_(name.unwrap_or_default(), body, type_)
-            }
-            ExpressionKind::Binary { op, left, right } => {
-                let l = self.visit(left);
-                let r = self.visit(right);
-                let mut builder = IrBuilder::new(self.arena);
-                builder.binary(op, l, r, type_)
-            }
-            ExpressionKind::Unary { op, value } => {
-                let v = self.visit(value);
-                let mut builder = IrBuilder::new(self.arena);
-                builder.unary(op, v, type_)
-            }
-            ExpressionKind::LocalSet { id, value } => {
-                let v = self.visit(value);
-                let mut builder = IrBuilder::new(self.arena);
-                builder.local_set(id, v)
-            }
-            ExpressionKind::LocalTee { id, value } => {
-                let v = self.visit(value);
-                let mut builder = IrBuilder::new(self.arena);
-                builder.local_tee(id, v, type_)
-            }
-            ExpressionKind::GlobalSet { id, value } => {
-                let v = self.visit(value);
-                let mut builder = IrBuilder::new(self.arena);
-                builder.global_set(id, v)
-            }
-            ExpressionKind::Drop { value } => {
-                let v = self.visit(value);
-                let mut builder = IrBuilder::new(self.arena);
-                builder.drop(v)
-            }
-            ExpressionKind::Return { value } => {
-                let v = value.map(|x| self.visit(x));
-                let mut builder = IrBuilder::new(self.arena);
-                builder.return_(v)
-            }
             ExpressionKind::Call {
                 target,
-                operands,
+                mut operands,
                 is_return,
             } => {
                 let target_name = &self.functions[target].name;
                 if target_name == ASYNCIFY_UNWIND {
                     let mut builder = IrBuilder::new(self.arena);
                     let capture = builder.local_set(self.unwind_index_local, operands[0]);
-                    let br =
-                        builder.break_(ASYNCIFY_UNWIND.to_string(), None, None, Type::UNREACHABLE);
+                    let br = builder.break_(self.unwind_target, None, None, Type::UNREACHABLE);
                     builder.block("", vec![capture, br], Type::UNREACHABLE)
                 } else if target_name == ASYNCIFY_CHECK_CALL_INDEX {
                     let mut builder = IrBuilder::new(self.arena);
@@ -1279,15 +1224,27 @@ impl<'a> LocalTransformer<'a> {
                     let mut builder = IrBuilder::new(self.arena);
                     builder.const_(Literal::I32(0))
                 } else {
-                    let mut new_ops = Vec::new();
-                    for op in operands {
-                        new_ops.push(self.visit(op));
+                    for op in operands.iter_mut() {
+                        *op = self.visit(*op);
                     }
-                    let mut builder = IrBuilder::new(self.arena);
-                    builder.call(target, new_ops, type_, is_return)
+                    Expression::alloc(
+                        self.arena,
+                        ExpressionKind::Call {
+                            target,
+                            operands,
+                            is_return,
+                        },
+                        type_,
+                    )
                 }
             }
-            _ => expr_id,
+            _ => {
+                let mut new_kind = kind;
+                new_kind.for_each_child_mut(|child| {
+                    *child = self.visit(*child);
+                });
+                Expression::alloc(self.arena, new_kind, type_)
+            }
         }
     }
 }

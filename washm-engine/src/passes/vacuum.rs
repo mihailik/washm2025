@@ -86,6 +86,8 @@ impl<'a> VacuumOptimizer<'a> {
                     | ExpressionKind::Call { .. }
                     | ExpressionKind::CallIndirect { .. }
                     | ExpressionKind::Return { .. }
+                    | ExpressionKind::Break { .. }
+                    | ExpressionKind::Switch { .. }
                     | ExpressionKind::Unreachable
                     | ExpressionKind::MemoryGrow { .. }
                     | ExpressionKind::Throw { .. }
@@ -143,9 +145,26 @@ impl<'a> VacuumOptimizer<'a> {
             if let Some(dummy) = self.make_default_value(original_type) {
                 let mut list = children_with_effects.clone();
                 list.push(dummy);
+                // Preserve any existing child block name when creating the replacement block (search recursively)
+                let mut chosen_name: Option<String> = None;
+                let mut search_stack = list.clone();
+                while let Some(id) = search_stack.pop() {
+                    let expr = &self.arena[id];
+                    if let ExpressionKind::Block {
+                        name: Some(ref n), ..
+                    } = &expr.kind
+                    {
+                        chosen_name = Some(n.clone());
+                        break;
+                    }
+                    expr.kind.for_each_child(|c| search_stack.push(c));
+                }
                 let block_id = Expression::alloc(
                     self.arena,
-                    ExpressionKind::Block { name: None, list },
+                    ExpressionKind::Block {
+                        name: chosen_name,
+                        list,
+                    },
                     original_type,
                 );
                 return Some(block_id);
@@ -209,24 +228,22 @@ impl<'a> VacuumOptimizer<'a> {
                     // condition is constant true with no value. It's equivalent to a no-op
                     // since both branches continue after the block.
                     if let ExpressionKind::Break {
-                        name: target,
+                        target,
                         condition: Some(cond),
                         value: None,
                     } = &self.arena[child_id].kind
                     {
-                        if let Some(block_name) = &name {
-                            if *target == *block_name {
-                                if let ExpressionKind::Const(lit) = &self.arena[*cond].kind {
-                                    let is_true = match lit {
-                                        Literal::I32(v) => *v != 0,
-                                        Literal::I64(v) => *v != 0,
-                                        _ => false,
-                                    };
-                                    if is_true {
-                                        removed_ids.insert(child_id);
-                                        i += 1;
-                                        continue;
-                                    }
+                        if *target == *expr_id {
+                            if let ExpressionKind::Const(lit) = &self.arena[*cond].kind {
+                                let is_true = match lit {
+                                    Literal::I32(v) => *v != 0,
+                                    Literal::I64(v) => *v != 0,
+                                    _ => false,
+                                };
+                                if is_true {
+                                    removed_ids.insert(child_id);
+                                    i += 1;
+                                    continue;
                                 }
                             }
                         }
@@ -260,38 +277,34 @@ impl<'a> VacuumOptimizer<'a> {
                     i += 1;
                 }
 
-                // If a named block is empty and there are no Breaks targeting it, remove it.
-                if let Some(n) = &name {
-                    if new_list.is_empty() {
-                        // Scan for any remaining breaks that target this name within the same function.
-                        let mut found = false;
-                        if let Some(root) = self.root {
-                            // DFS from root, ignoring removed_ids
-                            let mut stack = vec![root];
-                            while let Some(eid) = stack.pop() {
-                                if removed_ids.contains(&eid) {
-                                    continue;
-                                }
-                                if let ExpressionKind::Break { name: bn, .. } =
-                                    &self.arena[eid].kind
-                                {
-                                    if bn == n {
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                                // push children
-                                self.arena[eid]
-                                    .kind
-                                    .for_each_child(|child| stack.push(child));
+                // If a block is empty and there are no Breaks targeting it, remove it.
+                if new_list.is_empty() {
+                    // Scan for any remaining breaks that target this block within the same function.
+                    let mut found = false;
+                    if let Some(root) = self.root {
+                        // DFS from root, ignoring removed_ids
+                        let mut stack = vec![root];
+                        while let Some(eid) = stack.pop() {
+                            if removed_ids.contains(&eid) {
+                                continue;
                             }
+                            if let ExpressionKind::Break { target, .. } = &self.arena[eid].kind {
+                                if *target == *expr_id {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            // push children
+                            self.arena[eid]
+                                .kind
+                                .for_each_child(|child| stack.push(child));
                         }
+                    }
 
-                        if !found {
-                            self.arena[*expr_id].kind = ExpressionKind::Nop;
-                            self.arena[*expr_id].type_ = Type::NONE;
-                            return;
-                        }
+                    if !found {
+                        self.arena[*expr_id].kind = ExpressionKind::Nop;
+                        self.arena[*expr_id].type_ = Type::NONE;
+                        return;
                     }
                 }
 

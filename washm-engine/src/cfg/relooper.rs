@@ -166,9 +166,6 @@ impl Relooper {
         entry: RelooperBlockId,
         arena: &mut IdArena<ExpressionMarker, Expression>,
     ) {
-        // 0. Optimize
-        self.optimize(entry, arena);
-
         // 1. Liveness
         let mut live = HashSet::new();
         let mut stack = vec![entry];
@@ -367,9 +364,27 @@ impl Relooper {
                 }
                 list.extend(get_expr_list(arena, target_code));
 
+                // Try to preserve any existing block name from constituent parts.
+                let mut chosen_name: Option<String> = None;
+                // Search recursively within the candidate expressions for the first block name.
+                let mut search_stack = list.clone();
+                while let Some(id) = search_stack.pop() {
+                    let expr = &arena[id];
+                    if let ExpressionKind::Block {
+                        name: Some(ref n), ..
+                    } = &expr.kind
+                    {
+                        chosen_name = Some(n.clone());
+                        break;
+                    }
+                    expr.kind.for_each_child(|c| search_stack.push(c));
+                }
                 let new_code = Expression::alloc(
                     arena,
-                    ExpressionKind::Block { name: None, list },
+                    ExpressionKind::Block {
+                        name: chosen_name,
+                        list,
+                    },
                     Type::NONE,
                 );
                 source_block.code = new_code;
@@ -772,8 +787,26 @@ impl Relooper {
     }
 
     pub fn render(&self, builder: &mut IrBuilder, label_var: LocalId) -> ExpressionId {
+        let mut block_map = std::collections::HashMap::new();
+        let mut shape_map = std::collections::HashMap::new();
+
+        for (_, block) in &self.blocks {
+            let expr = builder.arena.alloc(Expression {
+                kind: ExpressionKind::Nop,
+                type_: Type::NONE,
+            });
+            block_map.insert(block.id, expr);
+        }
+        for (_, shape) in &self.shapes {
+            let expr = builder.arena.alloc(Expression {
+                kind: ExpressionKind::Nop,
+                type_: Type::NONE,
+            });
+            shape_map.insert(shape.id, expr);
+        }
+
         if let Some(root_id) = self.root {
-            self.render_shape(builder, label_var, root_id, false)
+            self.render_shape(builder, label_var, root_id, false, &block_map, &shape_map)
         } else {
             builder.nop()
         }
@@ -785,10 +818,14 @@ impl Relooper {
         label_var: LocalId,
         shape_id: ShapeId,
         in_loop: bool,
+        block_map: &std::collections::HashMap<u32, ExpressionId>,
+        shape_map: &std::collections::HashMap<u32, ExpressionId>,
     ) -> ExpressionId {
         let shape = self.shapes.get(shape_id).unwrap();
         let mut ret = match &shape.kind {
-            ShapeKind::Simple { inner } => self.render_block(builder, label_var, *inner, in_loop),
+            ShapeKind::Simple { inner } => {
+                self.render_block(builder, label_var, *inner, in_loop, block_map, shape_map)
+            }
             ShapeKind::Multiple { inner_map } => {
                 let mut sorted_keys: Vec<_> = inner_map.keys().cloned().collect();
                 sorted_keys.sort();
@@ -799,19 +836,32 @@ impl Relooper {
                     inner_map,
                     0,
                     in_loop,
+                    block_map,
+                    shape_map,
                 )
             }
             ShapeKind::Loop { inner, .. } => {
-                let name = format!("shape$continue${}", shape.id);
-                let body = self.render_shape(builder, label_var, *inner, true);
-                builder.loop_(name, body, crate::ir::BlockType::Empty)
+                let body =
+                    self.render_shape(builder, label_var, *inner, true, block_map, shape_map);
+                let loop_id = shape_map[&shape.id];
+                builder.arena[loop_id] = Expression {
+                    kind: ExpressionKind::Loop {
+                        name: Some(format!("shape$continue${}", shape.id)),
+                        body,
+                    },
+                    type_: Type::from(builder.arena[body].type_),
+                };
+                loop_id
             }
         };
 
-        ret = self.handle_followup_multiples(builder, label_var, ret, shape_id, in_loop);
+        ret = self.handle_followup_multiples(
+            builder, label_var, ret, shape_id, in_loop, block_map, shape_map,
+        );
 
         if let Some(next_id) = shape.next {
-            let next_expr = self.render_shape(builder, label_var, next_id, in_loop);
+            let next_expr =
+                self.render_shape(builder, label_var, next_id, in_loop, block_map, shape_map);
             let next_type = builder.arena[next_expr].type_;
             builder.block(
                 None as Option<&str>,
@@ -831,6 +881,8 @@ impl Relooper {
         inner_map: &HashMap<u32, ShapeId>,
         index: usize,
         in_loop: bool,
+        block_map: &std::collections::HashMap<u32, ExpressionId>,
+        shape_map: &std::collections::HashMap<u32, ExpressionId>,
     ) -> ExpressionId {
         if index >= keys.len() {
             return builder.nop();
@@ -839,7 +891,14 @@ impl Relooper {
         let id = keys[index];
         let body_shape_id = inner_map[&id];
         let condition = self.make_check_label(builder, label_var, id);
-        let if_true = self.render_shape(builder, label_var, body_shape_id, in_loop);
+        let if_true = self.render_shape(
+            builder,
+            label_var,
+            body_shape_id,
+            in_loop,
+            block_map,
+            shape_map,
+        );
         let if_false = if index + 1 < keys.len() {
             Some(self.render_multiple_recursive(
                 builder,
@@ -848,6 +907,8 @@ impl Relooper {
                 inner_map,
                 index + 1,
                 in_loop,
+                block_map,
+                shape_map,
             ))
         } else {
             None
@@ -868,6 +929,8 @@ impl Relooper {
         label_var: LocalId,
         block_id: RelooperBlockId,
         in_loop: bool,
+        block_map: &std::collections::HashMap<u32, ExpressionId>,
+        shape_map: &std::collections::HashMap<u32, ExpressionId>,
     ) -> ExpressionId {
         let block = self.blocks.get(block_id).unwrap();
         let mut list = Vec::new();
@@ -887,7 +950,16 @@ impl Relooper {
         }
 
         if let Some(switch_cond) = block.switch_condition {
-            return self.render_switch(builder, label_var, block_id, switch_cond, list, in_loop);
+            return self.render_switch(
+                builder,
+                label_var,
+                block_id,
+                switch_cond,
+                list,
+                in_loop,
+                block_map,
+                shape_map,
+            );
         }
 
         if block.processed_branches_out.is_empty() {
@@ -911,14 +983,18 @@ impl Relooper {
         }
 
         let mut root = if let Some((target_id, branch_id)) = default_target {
-            self.render_branch(builder, label_var, branch_id, target_id)
+            self.render_branch(
+                builder, label_var, branch_id, target_id, block_map, shape_map,
+            )
         } else {
             builder.nop()
         };
 
         for (target_id, branch_id) in branches_to_render {
             let branch = self.branches.get(branch_id).unwrap();
-            let branch_render = self.render_branch(builder, label_var, branch_id, target_id);
+            let branch_render = self.render_branch(
+                builder, label_var, branch_id, target_id, block_map, shape_map,
+            );
             if let Some(cond) = branch.condition {
                 root = builder.if_(
                     None as Option<&str>,
@@ -942,6 +1018,8 @@ impl Relooper {
         condition: ExpressionId,
         mut list: Vec<ExpressionId>,
         _in_loop: bool,
+        block_map: &std::collections::HashMap<u32, ExpressionId>,
+        shape_map: &std::collections::HashMap<u32, ExpressionId>,
     ) -> ExpressionId {
         let block = self.blocks.get(block_id).unwrap();
         let base = format!("switch${}", block.id);
@@ -960,7 +1038,9 @@ impl Relooper {
                 default_name.clone()
             };
 
-            let content = self.render_branch(builder, label_var, branch_id, target_id);
+            let content = self.render_branch(
+                builder, label_var, branch_id, target_id, block_map, shape_map,
+            );
             case_bodies.push((label.clone(), content));
 
             if let Some(values) = &branch.switch_values {
@@ -975,19 +1055,76 @@ impl Relooper {
             }
         }
 
-        let mut res = builder.switch(table, default_target_label, condition, None);
+        // Reserve IDs for labels
+        let mut label_map: std::collections::HashMap<String, ExpressionId> =
+            std::collections::HashMap::new();
+        let mut all_labels = std::collections::HashSet::new();
+        for t in &table {
+            all_labels.insert(t.clone());
+        }
+        all_labels.insert(default_target_label.clone());
+        for (l, _) in &case_bodies {
+            all_labels.insert(l.clone());
+        }
+
+        for lab in all_labels {
+            let id = builder.arena.alloc(Expression {
+                kind: ExpressionKind::Nop,
+                type_: Type::NONE,
+            });
+            label_map.insert(lab, id);
+        }
+
+        // Reserve ID for leave block
+        let leave_id = builder.arena.alloc(Expression {
+            kind: ExpressionKind::Nop,
+            type_: Type::NONE,
+        });
+
+        let table_ids: Vec<ExpressionId> = table.iter().map(|t| label_map[t]).collect();
+        let default_id = label_map[&default_target_label];
+
+        let mut res = builder.switch(table_ids, default_id, condition, None);
 
         for (label, content) in case_bodies {
-            let inner = builder.block(label, vec![res], crate::ir::BlockType::Empty);
-            let br = builder.break_(leave_name.clone(), None, None, crate::ir::BlockType::Empty);
+            let inner_id = label_map[&label];
+
+            // Overwrite inner_id with Block(label, [res])
+            builder.arena[inner_id] = Expression {
+                kind: ExpressionKind::Block {
+                    name: Some(label),
+                    list: vec![res],
+                },
+                type_: Type::NONE,
+            };
+
+            // Break to leave
+            let br = builder.arena.alloc(Expression {
+                kind: ExpressionKind::Break {
+                    target: leave_id,
+                    condition: None,
+                    value: None,
+                },
+                type_: Type::NONE,
+            });
+
             res = builder.block(
                 None as Option<&str>,
-                vec![inner, content, br],
+                vec![inner_id, content, br],
                 crate::ir::BlockType::Empty,
             );
         }
 
-        res = builder.block(leave_name, vec![res], crate::ir::BlockType::Empty);
+        // Overwrite leave_id with final block
+        builder.arena[leave_id] = Expression {
+            kind: ExpressionKind::Block {
+                name: Some(leave_name),
+                list: vec![res],
+            },
+            type_: Type::NONE,
+        };
+        res = leave_id;
+
         list.push(res);
         builder.block(None as Option<&str>, list, crate::ir::BlockType::Empty)
     }
@@ -998,6 +1135,8 @@ impl Relooper {
         label_var: LocalId,
         branch_id: RelooperBranchId,
         target_id: RelooperBlockId,
+        block_map: &std::collections::HashMap<u32, ExpressionId>,
+        shape_map: &std::collections::HashMap<u32, ExpressionId>,
     ) -> ExpressionId {
         let branch = self.branches.get(branch_id).unwrap();
         let target = self.blocks.get(target_id).unwrap();
@@ -1014,14 +1153,30 @@ impl Relooper {
         match branch.branch_type {
             BranchType::Direct => {}
             BranchType::Break => {
-                let name = format!("block$break${}", target.id);
-                list.push(builder.break_(name, None, None, crate::ir::BlockType::Empty));
+                let target_expr_id = block_map[&target.id];
+                let br = builder.arena.alloc(Expression {
+                    kind: ExpressionKind::Break {
+                        target: target_expr_id,
+                        condition: None,
+                        value: None,
+                    },
+                    type_: Type::NONE,
+                });
+                list.push(br);
             }
             BranchType::Continue => {
                 let ancestor_id = branch.ancestor.unwrap();
                 let ancestor = self.shapes.get(ancestor_id).unwrap();
-                let name = format!("shape$continue${}", ancestor.id);
-                list.push(builder.break_(name, None, None, crate::ir::BlockType::Empty));
+                let ancestor_expr_id = shape_map[&ancestor.id];
+                let br = builder.arena.alloc(Expression {
+                    kind: ExpressionKind::Break {
+                        target: ancestor_expr_id,
+                        condition: None,
+                        value: None,
+                    },
+                    type_: Type::NONE,
+                });
+                list.push(br);
             }
         }
 
@@ -1051,6 +1206,8 @@ impl Relooper {
         ret: ExpressionId,
         shape_id: ShapeId,
         _in_loop: bool,
+        block_map: &std::collections::HashMap<u32, ExpressionId>,
+        shape_map: &std::collections::HashMap<u32, ExpressionId>,
     ) -> ExpressionId {
         let shape = self.shapes.get(shape_id).unwrap();
         if shape.next.is_none() {
@@ -1065,20 +1222,43 @@ impl Relooper {
             match &next_shape.kind {
                 ShapeKind::Multiple { inner_map } => {
                     for (&id, _) in inner_map {
-                        let name = format!("block$break${}", id);
-                        curr = builder.block(name, vec![curr], crate::ir::BlockType::Empty);
+                        let vocab_id = block_map[&id];
+                        builder.arena[vocab_id] = Expression {
+                            kind: ExpressionKind::Block {
+                                name: Some(format!("block$break${}", id)),
+                                list: vec![curr],
+                            },
+                            type_: Type::NONE,
+                        };
+                        curr = vocab_id;
                     }
                     next_id = next_shape.next;
                 }
                 ShapeKind::Simple { inner } => {
-                    let name = format!("block$break${}", self.blocks.get(*inner).unwrap().id);
-                    curr = builder.block(name, vec![curr], crate::ir::BlockType::Empty);
+                    let block_id = self.blocks.get(*inner).unwrap().id;
+                    let vocab_id = block_map[&block_id];
+                    builder.arena[vocab_id] = Expression {
+                        kind: ExpressionKind::Block {
+                            name: Some(format!("block$break${}", block_id)),
+                            list: vec![curr],
+                        },
+                        type_: Type::NONE,
+                    };
+                    curr = vocab_id;
                     break;
                 }
                 ShapeKind::Loop { entries, .. } => {
                     for &entry_id in entries {
-                        let name = format!("block$break${}", self.blocks.get(entry_id).unwrap().id);
-                        curr = builder.block(name, vec![curr], crate::ir::BlockType::Empty);
+                        let block_id = self.blocks.get(entry_id).unwrap().id;
+                        let vocab_id = block_map[&block_id];
+                        builder.arena[vocab_id] = Expression {
+                            kind: ExpressionKind::Block {
+                                name: Some(format!("block$break${}", block_id)),
+                                list: vec![curr],
+                            },
+                            type_: Type::NONE,
+                        };
+                        curr = vocab_id;
                     }
                     break;
                 }

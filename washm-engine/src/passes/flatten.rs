@@ -54,7 +54,7 @@ struct Flattener<'a> {
     // For each expression, a bunch of expressions that should execute right before it
     preludes: HashMap<ExpressionId, Vec<ExpressionId>>,
     // Break values are sent through a temp local
-    break_temps: HashMap<String, LocalId>,
+    break_temps: HashMap<ExpressionId, LocalId>,
     // Parent stack to allow migrating preludes upwards
     expression_stack: Vec<ExpressionId>,
     // Functional context needed to add variables
@@ -82,12 +82,12 @@ impl<'a> Flattener<'a> {
         }
     }
 
-    fn get_temp_for_break_target(&mut self, name: &str, type_: Type) -> LocalId {
-        if let Some(&id) = self.break_temps.get(name) {
+    fn get_temp_for_break_target(&mut self, target: ExpressionId, type_: Type) -> LocalId {
+        if let Some(&id) = self.break_temps.get(&target) {
             id
         } else {
             let id = self.function.add_var(type_);
-            self.break_temps.insert(name.to_string(), id);
+            self.break_temps.insert(target, id);
             id
         }
     }
@@ -104,22 +104,6 @@ impl<'a> Flattener<'a> {
                 | ExpressionKind::Loop { .. }
                 | ExpressionKind::Try { .. }
         )
-    }
-
-    fn find_break_target(
-        &self,
-        name: &str,
-        arena: &IdArena<ExpressionMarker, Expression>,
-    ) -> Option<ExpressionId> {
-        for &expr_id in self.expression_stack.iter().rev() {
-            match &arena[expr_id].kind {
-                ExpressionKind::Block { name: Some(n), .. } if n == name => return Some(expr_id),
-                ExpressionKind::Loop { name: Some(n), .. } if n == name => return Some(expr_id),
-                ExpressionKind::Try { name: Some(n), .. } if n == name => return Some(expr_id),
-                _ => {}
-            }
-        }
-        None
     }
 
     fn is_already_flat(
@@ -178,11 +162,7 @@ impl<'a> Flattener<'a> {
                     *list = new_list;
 
                     if curr_type.is_concrete() {
-                        let temp = if let Some(n) = name {
-                            self.get_temp_for_break_target(n, curr_type)
-                        } else {
-                            self.function.add_var(curr_type)
-                        };
+                        let temp = self.get_temp_for_break_target(original_id, curr_type);
 
                         if let Some(last) = list.last_mut() {
                             let last_id = *last;
@@ -313,15 +293,12 @@ impl<'a> Flattener<'a> {
                             replaced = true;
                         }
                     }
-                    ExpressionKind::Break { name, value, .. } => {
+                    ExpressionKind::Break { target, value, .. } => {
                         if let Some(val_id) = *value {
                             let val_type = builder.arena[val_id].type_;
                             if val_type.is_concrete() {
-                                let target_type = self
-                                    .find_break_target(name, builder.arena)
-                                    .map(|t| builder.arena[t].type_)
-                                    .unwrap_or(Type::NONE);
-                                let temp = self.get_temp_for_break_target(name, target_type);
+                                let target_type = builder.arena[*target].type_;
+                                let temp = self.get_temp_for_break_target(*target, target_type);
                                 our_preludes.push(builder.local_set(temp, val_id));
 
                                 if val_type != target_type {
@@ -348,15 +325,15 @@ impl<'a> Flattener<'a> {
                             }
                         }
                     }
-                    ExpressionKind::Switch { names, value, .. } => {
+                    ExpressionKind::Switch { targets, value, .. } => {
                         if let Some(val_id) = *value {
                             let val_type = builder.arena[val_id].type_;
                             if val_type.is_concrete() {
                                 let temp = self.function.add_var(val_type);
                                 our_preludes.push(builder.local_set(temp, val_id));
-                                for name in names.iter() {
+                                for target in targets.iter() {
                                     let target_temp =
-                                        self.get_temp_for_break_target(name, val_type);
+                                        self.get_temp_for_break_target(*target, val_type);
                                     let get = builder.local_get(temp, val_type);
                                     our_preludes.push(builder.local_set(target_temp, get));
                                 }

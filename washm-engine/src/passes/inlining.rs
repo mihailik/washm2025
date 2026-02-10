@@ -294,11 +294,18 @@ impl<'a> Visitor for Inliner<'a> {
                 let mut cloned_body = builder.deep_clone(info.body);
 
                 // Remap locals and handle Returns in cloned body
-                let block_name = format!("inline${}", inline_id);
+                let display_name = format!("inline${}", inline_id);
+
+                // Pre-allocate block ID for returns to target
+                let inline_block_id = builder.arena.alloc(Expression {
+                    kind: ExpressionKind::Nop,
+                    type_: Type::NONE,
+                });
+
                 {
                     let mut remapper = InliningRemapper {
                         mapping,
-                        return_target: block_name.clone(),
+                        return_target: inline_block_id,
                     };
                     remapper.visit(&mut cloned_body, builder.arena);
                 }
@@ -306,8 +313,14 @@ impl<'a> Visitor for Inliner<'a> {
                 block_list.push(cloned_body);
 
                 let result_type = builder.arena[cloned_body].type_;
-                let block = builder.block(Some(block_name), block_list, result_type);
-                *expr = block;
+
+                builder.arena[inline_block_id].kind = ExpressionKind::Block {
+                    name: Some(display_name),
+                    list: block_list,
+                };
+                builder.arena[inline_block_id].type_ = result_type;
+
+                *expr = inline_block_id;
             }
         }
     }
@@ -315,7 +328,7 @@ impl<'a> Visitor for Inliner<'a> {
 
 struct InliningRemapper {
     mapping: HashMap<crate::ir::LocalId, crate::ir::LocalId>,
-    return_target: String,
+    return_target: ExpressionId,
 }
 
 impl Visitor for InliningRemapper {
@@ -339,7 +352,7 @@ impl Visitor for InliningRemapper {
                 // Convert Return to Break to the inlined block
                 let val = *value;
                 let mut builder = IrBuilder::new(arena);
-                *expr = builder.break_(self.return_target.as_str(), None, val, Type::UNREACHABLE);
+                *expr = builder.break_(self.return_target, None, val, Type::UNREACHABLE);
                 return;
             }
             _ => {}
