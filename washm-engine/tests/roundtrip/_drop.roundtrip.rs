@@ -1,4 +1,5 @@
 // Decompiled to Rust from WebAssembly
+// MARKER_CHECK
 
 fn dropper() {
     let mut v0: i32 = 0;

@@ -72,6 +72,12 @@ impl<'m> RustPrinter<'m> {
     }
 
     fn sanitize_label(name: &str) -> String {
+        let name = name
+            .replace("block_break_", "L")
+            .replace("block_break", "L")
+            .replace(".", "_")
+            .replace("$", "_");
+
         let mut out = String::new();
         for c in name.chars() {
             if c.is_ascii_alphanumeric() || c == '_' {
@@ -82,7 +88,7 @@ impl<'m> RustPrinter<'m> {
         }
         // Label must not start with a digit
         if out.chars().next().map_or(false, |c| c.is_ascii_digit()) {
-            out = format!("label_{}", out);
+            out = format!("L{}", out);
         }
         out
     }
@@ -114,7 +120,7 @@ impl<'m> RustPrinter<'m> {
             let label = if let Some(n) = name {
                 Self::sanitize_label(n)
             } else {
-                format!("block_break_{}", expr_id.index())
+                format!("L{}", expr_id.index())
             };
             self.output.push_str(&format!("'{}: ", label));
             true
@@ -183,7 +189,7 @@ impl<'m> RustPrinter<'m> {
     pub fn print(&mut self) -> String {
         self.output.clear();
         self.output
-            .push_str("// Decompiled to Rust from WebAssembly\n\n");
+            .push_str("// Decompiled to Rust from WebAssembly\n// MARKER_CHECK\n\n");
 
         self.print_types();
 
@@ -280,18 +286,99 @@ impl<'m> RustPrinter<'m> {
         format!("{:?}", ty).to_lowercase()
     }
 
+    fn walk_block_list(
+        &mut self,
+        func: &Function,
+        block_id: ExpressionId,
+        list: &[ExpressionId],
+        start_idx: usize,
+    ) {
+        // Successor wrapping for Rust forward jumps (jumps to a sibling in a block)
+        // If a child (or something at the start of it) is a target for a break,
+        // we wrap preceding siblings in a labeled block.
+        let mut targets = Vec::new();
+        for (idx, &child_id) in list.iter().enumerate() {
+            for &target_id in &self.find_all_targets {
+                // Only wrap if we can skip some preceding siblings (idx > 0)
+                // and the target is at the start of this child.
+                if idx > 0 && self.is_at_start(child_id, target_id) {
+                    targets.push((idx, target_id));
+                }
+            }
+        }
+        // Sort by child index (ascending)
+        targets.sort_unstable_by_key(|t| (t.0, t.1.index()));
+
+        let block_has_value = self.module.expressions[block_id].type_ != Type::NONE
+            && self.module.expressions[block_id].type_ != Type::UNREACHABLE;
+
+        // Open wrappers: from last target (outermost) to first (innermost)
+        for &(_idx, target_id) in targets.iter().rev() {
+            self.wrapped_targets.insert(target_id);
+            let name = match &self.module.expressions[target_id].kind {
+                ExpressionKind::Block { name, .. }
+                | ExpressionKind::If { name, .. }
+                | ExpressionKind::Loop { name, .. } => name.clone(),
+                _ => None,
+            };
+            let label = if let Some(n) = name {
+                Self::sanitize_label(&n)
+            } else {
+                format!("L{}", target_id.index())
+            };
+            self.write_indent();
+            self.output.push_str(&format!("'{}: {{\n", label));
+            self.indent += 1;
+        }
+
+        // For closing, we want to pop them back in the order they were opened
+        targets.reverse();
+
+        for (i, &child_id) in list.iter().enumerate().skip(start_idx) {
+            // If we reached a target index, close all wrappers associated with it
+            while !targets.is_empty() && targets.last().unwrap().0 <= i {
+                targets.pop();
+                self.indent -= 1;
+                self.write_indent();
+                self.output.push_str("}\n");
+            }
+
+            let child_is_last = i == list.len() - 1;
+            let child_is_statement = !(child_is_last && block_has_value);
+
+            let mut pushed_ctx = None;
+            if let ExpressionKind::Loop { .. } = &self.module.expressions[child_id].kind {
+                if child_is_last {
+                    pushed_ctx = Some(LoopContext {
+                        break_target: Some(block_id),
+                        continue_target: Some(child_id),
+                    });
+                    self.loop_stack.push(pushed_ctx.unwrap());
+                }
+            }
+
+            self.walk_expression_ext(func, child_id, child_is_statement);
+
+            if pushed_ctx.is_some() {
+                self.loop_stack.pop();
+            }
+        }
+
+        // Close any remaining wrappers
+        while !targets.is_empty() {
+            targets.pop();
+            self.indent -= 1;
+            self.write_indent();
+            self.output.push_str("}\n");
+        }
+    }
+
     fn print_function(&mut self, func: &Function) {
         self.find_all_targets.clear();
         self.wrapped_targets.clear();
         if let FunctionKind::Local { body, .. } = &func.kind {
             self.collect_targets(func, *body);
         }
-
-        /*
-        for (id, expr) in func.expressions.iter() {
-           println!("EXPR {}: {:?}", id.index(), expr.kind);
-        }
-        */
 
         self.output.push_str(&format!("fn {}(", func.name));
 
@@ -328,25 +415,40 @@ impl<'m> RustPrinter<'m> {
         }
 
         match &func.kind {
-            FunctionKind::Local { body, var_ids, .. } => {
+            FunctionKind::Local {
+                body,
+                locals,
+                var_ids,
+                ..
+            } => {
                 self.output.push_str(" {\n");
                 self.indent += 1;
 
                 // Declare locals
                 for &id in var_ids {
                     let name = self.get_local_name(func, id, None);
-                    if let FunctionKind::Local { locals, .. } = &func.kind {
-                        let ty = locals[id].type_;
-                        self.write_indent();
-                        self.output.push_str(&format!(
-                            "let mut {}: {} = 0;\n",
-                            name,
-                            self.type_name(ty)
-                        ));
-                    }
+                    let ty = locals[id].type_;
+                    let default = match ty {
+                        Type::I32 | Type::I64 => "0",
+                        Type::F32 | Type::F64 => "0.0",
+                        _ => "0",
+                    };
+                    self.write_indent();
+                    self.output.push_str(&format!(
+                        "let mut {}: {} = {};\n",
+                        name,
+                        self.type_name(ty),
+                        default
+                    ));
                 }
 
-                self.walk_expression_ext(func, *body, func.results != Type::NONE);
+                // If the body is a block, we only walk its contents to avoid
+                // extra braces { { body } }.
+                if let ExpressionKind::Block { list, .. } = &self.module.expressions[*body].kind {
+                    self.walk_block_list(func, *body, list, 0);
+                } else {
+                    self.walk_expression_ext(func, *body, true);
+                }
 
                 self.indent -= 1;
                 self.output.push_str("}\n\n");
@@ -521,15 +623,18 @@ impl<'m> RustPrinter<'m> {
         false
     }
 
-    fn walk_expression_ext(&mut self, func: &Function, expr_id: ExpressionId, is_statement: bool) {
+    fn walk_expression_ext_no_indent(
+        &mut self,
+        func: &Function,
+        expr_id: ExpressionId,
+        is_statement: bool,
+    ) {
         if self.module.annotations.is_inlined(expr_id) {
             return;
         }
 
         let expr = &self.module.expressions[expr_id];
         let is_return = self.is_last_in_func(func, expr_id) && func.results != Type::NONE;
-
-        self.write_indent();
 
         // If this expression is in a return position and is printable as an inline
         // expression, print it as `return <expr>;` and avoid the generic fallback.
@@ -546,9 +651,7 @@ impl<'m> RustPrinter<'m> {
                 | ExpressionKind::RefFunc { .. }
                 | ExpressionKind::LocalTee { .. }
                 | ExpressionKind::CallIndirect { .. } => {
-                    if is_statement {
-                        self.output.push_str("return ");
-                    }
+                    self.output.push_str("return ");
                     self.walk_inline_value(func, expr_id);
                     self.output.push_str(";\n");
                     return;
@@ -557,11 +660,54 @@ impl<'m> RustPrinter<'m> {
             }
         }
 
+        self.walk_expression_internal(func, expr_id, is_statement, is_return);
+    }
+
+    fn walk_body(&mut self, func: &Function, target_id: ExpressionId) {
+        if self.module.annotations.is_inlined(target_id) {
+            return;
+        }
+        if let ExpressionKind::Block { list, .. } = &self.module.expressions[target_id].kind {
+            self.walk_block_list(func, target_id, list, 0);
+        } else {
+            self.walk_expression_ext(func, target_id, true);
+        }
+    }
+
+    fn walk_expression_ext(&mut self, func: &Function, expr_id: ExpressionId, is_statement: bool) {
+        if self.module.annotations.is_inlined(expr_id) {
+            return;
+        }
+
+        self.write_indent();
+        self.walk_expression_ext_no_indent(func, expr_id, is_statement);
+    }
+
+    fn walk_expression_internal(
+        &mut self,
+        func: &Function,
+        expr_id: ExpressionId,
+        is_statement: bool,
+        is_return: bool,
+    ) {
+        let expr = &self.module.expressions[expr_id];
         match &expr.kind {
             ExpressionKind::Block {
                 name: block_name,
                 list,
             } => {
+                // If this is an anonymous block with one child,
+                // and it's not targeted, we can strip the braces.
+                // We also check get_if_info because that special-cases some blocks.
+                if block_name.is_none()
+                    && list.len() == 1
+                    && !self.find_all_targets.contains(&expr_id)
+                    && self.module.annotations.get_if_info(expr_id).is_none()
+                {
+                    self.walk_expression_internal(func, list[0], is_statement, is_return);
+                    return;
+                }
+
                 let mut loop_nested = None;
                 if list.len() == 1 {
                     if let ExpressionKind::Loop { .. } = &self.module.expressions[list[0]].kind {
@@ -623,85 +769,8 @@ impl<'m> RustPrinter<'m> {
                 self.output.push_str("{\n");
                 self.indent += 1;
 
-                // Successor wrapping for Rust forward jumps (jumps to a sibling in a block)
-                // If a child (or something at the start of it) is a target for a break,
-                // we wrap preceding siblings in a labeled block.
-                let mut targets = Vec::new();
-                for (idx, &child_id) in list.iter().enumerate() {
-                    for &target_id in &self.find_all_targets {
-                        // Only wrap if we can skip some preceding siblings (idx > 0)
-                        // and the target is at the start of this child.
-                        if idx > 0 && self.is_at_start(child_id, target_id) {
-                            targets.push((idx, target_id));
-                        }
-                    }
-                }
-                // Sort by child index (ascending)
-                targets.sort_unstable_by_key(|t| (t.0, t.1.index()));
-
                 let start_idx = if is_if { 1 } else { 0 };
-                let block_has_value = self.module.expressions[expr_id].type_ != Type::NONE
-                    && self.module.expressions[expr_id].type_ != Type::UNREACHABLE;
-
-                // Open wrappers: from last target (outermost) to first (innermost)
-                for &(_idx, target_id) in targets.iter().rev() {
-                    self.wrapped_targets.insert(target_id);
-                    let name = match &self.module.expressions[target_id].kind {
-                        ExpressionKind::Block { name, .. }
-                        | ExpressionKind::If { name, .. }
-                        | ExpressionKind::Loop { name, .. } => name.clone(),
-                        _ => None,
-                    };
-                    let label = if let Some(n) = name {
-                        Self::sanitize_label(&n)
-                    } else {
-                        format!("block_break_{}", target_id.index())
-                    };
-                    self.write_indent();
-                    self.output.push_str(&format!("'{}: {{\n", label));
-                    self.indent += 1;
-                }
-
-                // For closing, we want to pop them back in the order they were opened
-                targets.reverse();
-
-                for (i, &child_id) in list.iter().enumerate().skip(start_idx) {
-                    // If we reached a target index, close all wrappers associated with it
-                    while !targets.is_empty() && targets.last().unwrap().0 <= i {
-                        targets.pop();
-                        self.indent -= 1;
-                        self.write_indent();
-                        self.output.push_str("}\n");
-                    }
-
-                    let child_is_last = i == list.len() - 1;
-                    let child_is_statement = !(child_is_last && block_has_value);
-
-                    let mut pushed_ctx = None;
-                    if let ExpressionKind::Loop { .. } = &self.module.expressions[child_id].kind {
-                        if child_is_last {
-                            pushed_ctx = Some(LoopContext {
-                                break_target: Some(expr_id),
-                                continue_target: Some(child_id),
-                            });
-                            self.loop_stack.push(pushed_ctx.unwrap());
-                        }
-                    }
-
-                    self.walk_expression_ext(func, child_id, child_is_statement);
-
-                    if pushed_ctx.is_some() {
-                        self.loop_stack.pop();
-                    }
-                }
-
-                // Close any remaining wrappers
-                while !targets.is_empty() {
-                    targets.pop();
-                    self.indent -= 1;
-                    self.write_indent();
-                    self.output.push_str("}\n");
-                }
+                self.walk_block_list(func, expr_id, list, start_idx);
 
                 self.indent -= 1;
                 self.write_indent();
@@ -717,7 +786,9 @@ impl<'m> RustPrinter<'m> {
                 let name = self.get_local_name(func, *id, Some(expr_id));
                 self.output.push_str(&format!("{} = ", name));
                 self.walk_inline_expression(func, *value);
-                self.output.push_str(";\n");
+                if is_statement {
+                    self.output.push_str(";\n");
+                }
             }
             ExpressionKind::Call {
                 target, operands, ..
@@ -731,7 +802,7 @@ impl<'m> RustPrinter<'m> {
                         self.walk_inline_expression(func, op_id);
                     }
                     self.output.push_str(")");
-                    if !is_return {
+                    if is_statement && !is_return {
                         self.output.push_str(";\n");
                     } else {
                         self.output.push_str("\n");
@@ -751,28 +822,14 @@ impl<'m> RustPrinter<'m> {
 
                 self.output.push_str("if ");
                 self.render_boolean_condition(func, *condition);
-                self.output.push_str(" ");
+                self.output.push_str(" {\n");
+                self.indent += 1;
 
-                match &self.module.expressions[*if_true].kind {
-                    ExpressionKind::Block { list, .. } => {
-                        self.output.push_str("{\n");
-                        self.indent += 1;
-                        for &child in list {
-                            self.walk_expression_ext(func, child, true);
-                        }
-                        self.indent -= 1;
-                        self.write_indent();
-                        self.output.push_str("}");
-                    }
-                    _ => {
-                        self.output.push_str("{\n");
-                        self.indent += 1;
-                        self.walk_expression_ext(func, *if_true, true);
-                        self.indent -= 1;
-                        self.write_indent();
-                        self.output.push_str("}");
-                    }
-                }
+                self.walk_body(func, *if_true);
+
+                self.indent -= 1;
+                self.write_indent();
+                self.output.push_str("}");
 
                 if let Some(f) = if_false {
                     // Omit printing `else` when the branch is an explicit NOP
@@ -780,25 +837,17 @@ impl<'m> RustPrinter<'m> {
                         ExpressionKind::Nop => {}
                         _ => {
                             self.output.push_str(" else ");
-                            match &self.module.expressions[*f].kind {
-                                ExpressionKind::Block { list, .. } => {
-                                    self.output.push_str("{\n");
-                                    self.indent += 1;
-                                    for &child in list {
-                                        self.walk_expression_ext(func, child, true);
-                                    }
-                                    self.indent -= 1;
-                                    self.write_indent();
-                                    self.output.push_str("}");
-                                }
-                                _ => {
-                                    self.output.push_str("{\n");
-                                    self.indent += 1;
-                                    self.walk_expression_ext(func, *f, true);
-                                    self.indent -= 1;
-                                    self.write_indent();
-                                    self.output.push_str("}");
-                                }
+                            if let ExpressionKind::If { .. } = &self.module.expressions[*f].kind {
+                                // For nested if, use walk_expression_ext without indent?
+                                // Actually, let's just handle it here to keep correct flow.
+                                self.walk_expression_ext_no_indent(func, *f, is_statement);
+                            } else {
+                                self.output.push_str("{\n");
+                                self.indent += 1;
+                                self.walk_body(func, *f);
+                                self.indent -= 1;
+                                self.write_indent();
+                                self.output.push_str("}");
                             }
                         }
                     }
@@ -822,7 +871,7 @@ impl<'m> RustPrinter<'m> {
                     break_target: None, // Standalone loop has no implicit break target
                     continue_target: Some(expr_id),
                 });
-                self.walk_expression_ext(func, *body, false);
+                self.walk_body(func, *body);
                 self.loop_stack.pop();
                 self.indent -= 1;
                 self.write_indent();
@@ -858,7 +907,7 @@ impl<'m> RustPrinter<'m> {
                         let label = if let Some(n) = name {
                             Self::sanitize_label(n)
                         } else {
-                            format!("block_break_{}", target.index())
+                            format!("L{}", target.index())
                         };
                         (label, false)
                     }
@@ -866,7 +915,7 @@ impl<'m> RustPrinter<'m> {
                         let label = if let Some(n) = name {
                             Self::sanitize_label(n)
                         } else {
-                            format!("block_break_{}", target.index())
+                            format!("L{}", target.index())
                         };
                         (label, true)
                     }
@@ -928,16 +977,18 @@ impl<'m> RustPrinter<'m> {
             } => {
                 if is_return {
                     self.output.push_str("return ");
-                    self.walk_inline_expression(func, *if_true);
+                }
+                self.output.push_str("if ");
+                self.walk_inline_expression(func, *condition);
+                self.output.push_str(" { ");
+                self.walk_inline_expression(func, *if_true);
+                self.output.push_str(" } else { ");
+                self.walk_inline_expression(func, *if_false);
+                self.output.push_str(" }");
+                if is_statement {
                     self.output.push_str(";\n");
                 } else {
-                    self.output.push_str("if ");
-                    self.walk_inline_expression(func, *condition);
-                    self.output.push_str(" { ");
-                    self.walk_inline_expression(func, *if_true);
-                    self.output.push_str(" } else { ");
-                    self.walk_inline_expression(func, *if_false);
-                    self.output.push_str(" }\n");
+                    self.output.push_str("\n");
                 }
             }
             ExpressionKind::Store {
@@ -960,7 +1011,11 @@ impl<'m> RustPrinter<'m> {
                     self.output.push_str("return ");
                 }
                 self.walk_inline_value(func, expr_id);
-                self.output.push_str(";\n");
+                if is_statement {
+                    self.output.push_str(";\n");
+                } else {
+                    self.output.push_str("\n");
+                }
             }
             ExpressionKind::GlobalSet { id, value } => {
                 if let Some(g) = self.module.globals.get(id.cast()) {
@@ -974,6 +1029,9 @@ impl<'m> RustPrinter<'m> {
             ExpressionKind::CallIndirect {
                 target, operands, ..
             } => {
+                if is_return {
+                    self.output.push_str("return ");
+                }
                 self.walk_inline_expression(func, *target);
                 self.output.push_str("(");
                 for (i, op) in operands.iter().enumerate() {
@@ -982,16 +1040,31 @@ impl<'m> RustPrinter<'m> {
                     }
                     self.walk_inline_expression(func, *op);
                 }
-                self.output.push_str(")\n");
+                self.output.push_str(")");
+                if is_statement {
+                    self.output.push_str(";\n");
+                } else {
+                    self.output.push_str("\n");
+                }
             }
             ExpressionKind::Try {
                 body, catch_bodies, ..
             } => {
-                self.output.push_str("/* try */\n");
-                self.walk_expression_ext(func, *body, false);
+                self.output.push_str("/* try */ {\n");
+                self.indent += 1;
+                self.walk_body(func, *body);
+                self.indent -= 1;
+                self.write_indent();
+                self.output.push_str("}");
                 for &cb in catch_bodies {
-                    self.walk_expression_ext(func, cb, false);
+                    self.output.push_str(" /* catch */ {\n");
+                    self.indent += 1;
+                    self.walk_body(func, cb);
+                    self.indent -= 1;
+                    self.write_indent();
+                    self.output.push_str("}");
                 }
+                self.output.push_str("\n");
             }
             ExpressionKind::Return { value } => {
                 self.output.push_str("return");

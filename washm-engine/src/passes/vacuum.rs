@@ -15,22 +15,63 @@ impl Pass for Vacuum {
 
     fn run(&mut self, module: &mut Module) {
         let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
-        let mut optimizer = VacuumOptimizer {
-            arena,
-            root: None,
-            next_targets: Vec::new(),
-        };
         for (_, func) in functions.iter_mut() {
             let result_used = func.results != Type::NONE;
             if let Some(body) = func.body_mut() {
-                optimizer.root = Some(*body);
-                optimizer.next_targets.clear();
+                let targeted_ids = Self::collect_targets(arena, *body);
+                let mut optimizer = VacuumOptimizer {
+                    arena,
+                    root: Some(*body),
+                    next_targets: Vec::new(),
+                    targeted_ids,
+                };
                 optimizer.process(body);
                 // Final function-level optimization (like Binaryen's visitFunction)
                 optimizer.finalize_function(body, result_used);
-                optimizer.root = None;
             }
         }
+    }
+}
+
+impl Vacuum {
+    fn collect_targets(
+        arena: &IdArena<ExpressionMarker, Expression>,
+        expr_id: ExpressionId,
+    ) -> std::collections::HashSet<ExpressionId> {
+        struct TargetCollector<'a> {
+            arena: &'a IdArena<ExpressionMarker, Expression>,
+            targets: std::collections::HashSet<ExpressionId>,
+        }
+        impl<'a> crate::ir::visitor::ReadOnlyVisitor for TargetCollector<'a> {
+            fn visit_expression(
+                &mut self,
+                expr: ExpressionId,
+                arena: &IdArena<ExpressionMarker, Expression>,
+            ) {
+                match &arena[expr].kind {
+                    ExpressionKind::Break { target, .. } => {
+                        self.targets.insert(*target);
+                    }
+                    ExpressionKind::Switch {
+                        targets, default, ..
+                    } => {
+                        for t in targets {
+                            self.targets.insert(*t);
+                        }
+                        self.targets.insert(*default);
+                    }
+                    _ => {}
+                }
+                self.visit_children(expr, arena);
+            }
+        }
+        let mut collector = TargetCollector {
+            arena,
+            targets: std::collections::HashSet::new(),
+        };
+        use crate::ir::visitor::ReadOnlyVisitor;
+        collector.visit(expr_id, arena);
+        collector.targets
     }
 }
 
@@ -43,6 +84,8 @@ struct VacuumOptimizer<'a> {
     // Stack of expressions that are reachable via fallthrough from the current point.
     // A break to any of these is redundant.
     next_targets: Vec<ExpressionId>,
+    // Set of all expression IDs that are targeted by a Break or Switch in the function.
+    targeted_ids: std::collections::HashSet<ExpressionId>,
 }
 
 impl<'a> VacuumOptimizer<'a> {
@@ -76,10 +119,16 @@ impl<'a> VacuumOptimizer<'a> {
             // Do not try to optimize these container nodes here.
             match &self.arena[expr_id].kind {
                 ExpressionKind::Drop { .. }
-                | ExpressionKind::Block { .. }
                 | ExpressionKind::If { .. }
                 | ExpressionKind::Loop { .. }
                 | ExpressionKind::Try { .. } => return Some(expr_id),
+                ExpressionKind::Block { name, list } => {
+                    // Remove truly empty and anonymous blocks
+                    if list.is_empty() && name.is_none() {
+                        return None;
+                    }
+                    return Some(expr_id);
+                }
                 ExpressionKind::LocalSet { id, value } | ExpressionKind::LocalTee { id, value } => {
                     if let ExpressionKind::LocalGet { id: get_id } = &self.arena[*value].kind {
                         if id == get_id {
@@ -134,12 +183,6 @@ impl<'a> VacuumOptimizer<'a> {
 
             if children_with_effects.is_empty() {
                 // nothing remains
-                if self.contains_memory_copy(expr_id) {
-                    eprintln!(
-                        "VACUUM-DIAG: removing subtree that contains MemoryCopy; node kind={:?}",
-                        self.arena[expr_id].kind
-                    );
-                }
                 return None;
             }
 
@@ -336,54 +379,26 @@ impl<'a> VacuumOptimizer<'a> {
                     i += 1;
                 }
 
-                // Find if any Break targets this specific block. If not, we can remove its name.
-                let mut is_targeted = false;
-                if name.is_some() {
-                    if let Some(root) = self.root {
-                        let mut stack = vec![root];
-                        while let Some(eid) = stack.pop() {
-                            if let ExpressionKind::Break { target, .. } = &self.arena[eid].kind {
-                                if *target == *expr_id {
-                                    is_targeted = true;
-                                    break;
-                                }
-                            }
-                            self.arena[eid]
-                                .kind
-                                .for_each_child(|child| stack.push(child));
-                        }
-                    }
+                let is_targeted = self.targeted_ids.contains(expr_id);
+                let final_name = if is_targeted { name } else { None };
+
+                if new_list.is_empty() && !is_targeted {
+                    self.arena[*expr_id].kind = ExpressionKind::Nop;
+                    self.arena[*expr_id].type_ = Type::NONE;
+                    return;
                 }
 
-                let effective_name = if is_targeted { name } else { None };
-
-                // If a block is empty and not targeted, removing it is always safe.
-                if new_list.is_empty() {
-                    if !is_targeted {
-                        self.arena[*expr_id].kind = ExpressionKind::Nop;
-                        self.arena[*expr_id].type_ = Type::NONE;
-                        return;
-                    }
-                }
-
-                // If a block has no name and only one child, flatten it.
-                if effective_name.is_none() {
-                    if new_list.is_empty() {
-                        self.arena[*expr_id].kind = ExpressionKind::Nop;
-                        self.arena[*expr_id].type_ = Type::NONE;
-                        return;
-                    } else if new_list.len() == 1 {
+                if final_name.is_none() && !is_targeted {
+                    if new_list.len() == 1 {
                         let child_id = new_list[0];
                         *expr_id = child_id;
-                        // Since we just replaced the block with its child, we should
-                        // potentially re-process to ensure any nested trivialities are caught.
                         self.process(expr_id);
                         return;
                     }
                 }
 
                 self.arena[*expr_id].kind = ExpressionKind::Block {
-                    name: effective_name,
+                    name: final_name,
                     list: new_list,
                 };
             }

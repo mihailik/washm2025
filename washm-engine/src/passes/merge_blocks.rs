@@ -24,14 +24,59 @@ impl Pass for MergeBlocks {
 
         for (_, func) in functions {
             if let Some(body) = func.body_mut() {
-                let mut merger = BlockMerger;
+                let targeted_ids = Self::collect_targets(arena, *body);
+                let mut merger = BlockMerger { targeted_ids };
                 merger.visit(body, arena);
             }
         }
     }
 }
 
-struct BlockMerger;
+impl MergeBlocks {
+    fn collect_targets(
+        arena: &IdArena<ExpressionMarker, Expression>,
+        expr_id: ExpressionId,
+    ) -> std::collections::HashSet<ExpressionId> {
+        struct TargetCollector<'a> {
+            arena: &'a IdArena<ExpressionMarker, Expression>,
+            targets: std::collections::HashSet<ExpressionId>,
+        }
+        impl<'a> crate::ir::visitor::ReadOnlyVisitor for TargetCollector<'a> {
+            fn visit_expression(
+                &mut self,
+                expr: ExpressionId,
+                arena: &IdArena<ExpressionMarker, Expression>,
+            ) {
+                match &arena[expr].kind {
+                    ExpressionKind::Break { target, .. } => {
+                        self.targets.insert(*target);
+                    }
+                    ExpressionKind::Switch {
+                        targets, default, ..
+                    } => {
+                        for t in targets {
+                            self.targets.insert(*t);
+                        }
+                        self.targets.insert(*default);
+                    }
+                    _ => {}
+                }
+                self.visit_children(expr, arena);
+            }
+        }
+        let mut collector = TargetCollector {
+            arena,
+            targets: std::collections::HashSet::new(),
+        };
+        use crate::ir::visitor::ReadOnlyVisitor;
+        collector.visit(expr_id, arena);
+        collector.targets
+    }
+}
+
+struct BlockMerger {
+    targeted_ids: std::collections::HashSet<ExpressionId>,
+}
 
 impl Visitor for BlockMerger {
     fn visit_expression(
@@ -51,7 +96,7 @@ impl Visitor for BlockMerger {
                     name: inner_name, ..
                 } = &arena[child].kind
                 {
-                    inner_name.is_none()
+                    inner_name.is_none() && !self.targeted_ids.contains(&child)
                 } else {
                     false
                 }
@@ -65,8 +110,12 @@ impl Visitor for BlockMerger {
                         list: inner_list,
                     } = &arena[child].kind
                     {
-                        for &inner_child in inner_list.iter() {
-                            new_list.push(inner_child);
+                        if !self.targeted_ids.contains(&child) {
+                            for &inner_child in inner_list.iter() {
+                                new_list.push(inner_child);
+                            }
+                        } else {
+                            new_list.push(child);
                         }
                     } else {
                         new_list.push(child);
