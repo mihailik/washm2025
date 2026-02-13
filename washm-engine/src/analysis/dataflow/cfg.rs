@@ -179,7 +179,6 @@ impl ControlFlowGraph {
 #[derive(Clone)]
 struct Scope {
     expr_id: ExpressionId,
-    label: Option<String>,
     break_target: usize,
     continue_target: Option<usize>,
 }
@@ -216,7 +215,6 @@ impl<'a> CFGBuilder<'a> {
 
                 self.scope_stack.push(Scope {
                     expr_id,
-                    label: None,
                     break_target: end_block,
                     continue_target: None,
                 });
@@ -238,7 +236,6 @@ impl<'a> CFGBuilder<'a> {
 
                 self.scope_stack.push(Scope {
                     expr_id,
-                    label: None,
                     break_target: loop_exit,
                     continue_target: Some(loop_head),
                 });

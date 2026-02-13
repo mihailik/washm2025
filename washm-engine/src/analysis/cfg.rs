@@ -127,7 +127,7 @@ impl<'a> CFGBuilder<'a> {
                 self.current_block = join_block;
             }
             ExpressionKind::If {
-                name,
+                name: _,
                 condition,
                 if_true,
                 if_false,

@@ -79,6 +79,8 @@ pub struct Relooper {
     pub root: Option<ShapeId>,
     pub block_id_counter: u32,
     pub shape_id_counter: u32,
+    pub rendered_shapes: std::cell::RefCell<HashSet<ShapeId>>,
+    pub rendered_blocks: std::cell::RefCell<HashSet<RelooperBlockId>>,
 }
 
 impl Relooper {
@@ -90,6 +92,8 @@ impl Relooper {
             root: None,
             block_id_counter: 1,
             shape_id_counter: 0,
+            rendered_shapes: std::cell::RefCell::new(HashSet::new()),
+            rendered_blocks: std::cell::RefCell::new(HashSet::new()),
         }
     }
 
@@ -202,6 +206,8 @@ impl Relooper {
         }
 
         // 3. Process
+        self.optimize(entry, arena);
+
         let mut initial_entries = HashSet::new();
         initial_entries.insert(entry);
         self.root = self.process(live, initial_entries);
@@ -787,6 +793,8 @@ impl Relooper {
     }
 
     pub fn render(&self, builder: &mut IrBuilder, label_var: LocalId) -> ExpressionId {
+        self.rendered_shapes.borrow_mut().clear();
+        self.rendered_blocks.borrow_mut().clear();
         let mut block_map = std::collections::HashMap::new();
         let mut shape_map = std::collections::HashMap::new();
 
@@ -822,14 +830,55 @@ impl Relooper {
         shape_map: &std::collections::HashMap<u32, ExpressionId>,
     ) -> ExpressionId {
         let shape = self.shapes.get(shape_id).unwrap();
+
+        // Avoid re-rendering shapes we've already done
+        if let ShapeKind::Simple { inner } = &shape.kind {
+            if self.rendered_blocks.borrow().contains(inner) {
+                return block_map[&self.blocks[*inner].id];
+            }
+        } else {
+            if self.rendered_shapes.borrow().contains(&shape_id) {
+                return shape_map[&shape.id];
+            }
+        }
+        self.rendered_shapes.borrow_mut().insert(shape_id);
+
         let mut ret = match &shape.kind {
             ShapeKind::Simple { inner } => {
-                self.render_block(builder, label_var, *inner, in_loop, block_map, shape_map)
+                self.rendered_blocks.borrow_mut().insert(*inner);
+                let block = self.blocks.get(*inner).unwrap();
+                let vocab_id = block_map[&block.id];
+                let rendered =
+                    self.render_block(builder, label_var, *inner, in_loop, block_map, shape_map);
+
+                // Update the pre-allocated ID with the rendered content
+                // Preserve any existing content (e.g. from handle_followup_multiples)
+                if matches!(builder.arena[vocab_id].kind, ExpressionKind::Nop) {
+                    builder.arena[vocab_id] = builder.arena[rendered].clone();
+                } else {
+                    let mut new_list = vec![rendered];
+                    if let ExpressionKind::Block { list, .. } = &builder.arena[vocab_id].kind {
+                        for &e in list {
+                            if e != rendered {
+                                new_list.push(e);
+                            }
+                        }
+                    } else {
+                        new_list.push(vocab_id);
+                    }
+                    builder.arena[vocab_id].kind = ExpressionKind::Block {
+                        name: Some(format!("block$break${}", block.id)),
+                        list: new_list,
+                    };
+                }
+                vocab_id
             }
             ShapeKind::Multiple { inner_map } => {
                 let mut sorted_keys: Vec<_> = inner_map.keys().cloned().collect();
                 sorted_keys.sort();
-                self.render_multiple_recursive(
+                let shape_id = shape.id;
+                let vocab_id = shape_map[&shape_id];
+                let rendered = self.render_multiple_recursive(
                     builder,
                     label_var,
                     &sorted_keys,
@@ -838,7 +887,27 @@ impl Relooper {
                     in_loop,
                     block_map,
                     shape_map,
-                )
+                );
+                // Multiples use the pre-allocated shape ID. Merge if already has content.
+                if matches!(builder.arena[vocab_id].kind, ExpressionKind::Nop) {
+                    builder.arena[vocab_id] = builder.arena[rendered].clone();
+                } else {
+                    let mut new_list = vec![rendered];
+                    if let ExpressionKind::Block { list, .. } = &builder.arena[vocab_id].kind {
+                        for &e in list {
+                            if e != rendered {
+                                new_list.push(e);
+                            }
+                        }
+                    } else {
+                        new_list.push(vocab_id);
+                    }
+                    builder.arena[vocab_id].kind = ExpressionKind::Block {
+                        name: Some(format!("block$break${}", shape_id)),
+                        list: new_list,
+                    };
+                }
+                vocab_id
             }
             ShapeKind::Loop { inner, .. } => {
                 let body =
@@ -862,6 +931,15 @@ impl Relooper {
         if let Some(next_id) = shape.next {
             let next_expr =
                 self.render_shape(builder, label_var, next_id, in_loop, block_map, shape_map);
+            // If the next expression is already our current result (due to map reuse)
+            // or is contained within it, do not append it to avoid duplication.
+            if next_expr == ret || self.expr_contains(builder, ret, next_expr) {
+                return ret;
+            }
+            if self.expr_contains(builder, next_expr, ret) {
+                return next_expr;
+            }
+
             let next_type = builder.arena[next_expr].type_;
             builder.block(
                 None as Option<&str>,
@@ -1199,6 +1277,27 @@ impl Relooper {
         builder.local_set(label_var, val)
     }
 
+    fn expr_contains(&self, builder: &IrBuilder, root: ExpressionId, target: ExpressionId) -> bool {
+        let mut stack = vec![root];
+        while let Some(eid) = stack.pop() {
+            if eid == target {
+                return true;
+            }
+            // Push children for traversal
+            match &builder.arena[eid].kind {
+                ExpressionKind::Block { list, .. } => {
+                    for &c in list {
+                        stack.push(c);
+                    }
+                }
+                kind => {
+                    kind.for_each_child(|child| stack.push(child));
+                }
+            }
+        }
+        false
+    }
+
     fn handle_followup_multiples(
         &self,
         builder: &mut IrBuilder,
@@ -1207,7 +1306,7 @@ impl Relooper {
         shape_id: ShapeId,
         _in_loop: bool,
         block_map: &std::collections::HashMap<u32, ExpressionId>,
-        shape_map: &std::collections::HashMap<u32, ExpressionId>,
+        _shape_map: &std::collections::HashMap<u32, ExpressionId>,
     ) -> ExpressionId {
         let shape = self.shapes.get(shape_id).unwrap();
         if shape.next.is_none() {
@@ -1223,43 +1322,57 @@ impl Relooper {
                 ShapeKind::Multiple { inner_map } => {
                     for (&id, _) in inner_map {
                         let vocab_id = block_map[&id];
-                        builder.arena[vocab_id] = Expression {
-                            kind: ExpressionKind::Block {
-                                name: Some(format!("block$break${}", id)),
-                                list: vec![curr],
-                            },
-                            type_: Type::NONE,
-                        };
-                        curr = vocab_id;
+                        match &builder.arena[vocab_id].kind {
+                            ExpressionKind::Block { list, .. }
+                                if list.len() == 1 && list[0] == curr =>
+                            {
+                                // Already wrapping the same `curr`, reuse it to avoid duplicate blocks
+                                curr = vocab_id;
+                            }
+                            _ => {
+                                // Preserve any existing content in the vocab block when wrapping
+                                let mut new_list: Vec<ExpressionId> = Vec::new();
+                                // We need to handle the case where vocab_id already has content
+                                if !matches!(builder.arena[vocab_id].kind, ExpressionKind::Nop) {
+                                    if let ExpressionKind::Block { list, .. } =
+                                        &builder.arena[vocab_id].kind
+                                    {
+                                        for &e in list {
+                                            if e != curr {
+                                                new_list.push(e);
+                                            }
+                                        }
+                                    } else {
+                                        // Wrap the non-block existing content
+                                        let old_content = builder.arena.alloc(Expression {
+                                            kind: builder.arena[vocab_id].kind.clone(),
+                                            type_: builder.arena[vocab_id].type_,
+                                        });
+                                        new_list.push(old_content);
+                                    }
+                                }
+
+                                // Order: curr (preceding code) FIRST, then new join-point code.
+                                // Actually, handle_followup_multiples is for joins where curr branches to id.
+                                // So curr should be BEFORE the instructions in the block.
+                                new_list.insert(0, curr);
+
+                                builder.arena[vocab_id] = Expression {
+                                    kind: ExpressionKind::Block {
+                                        name: Some(format!("block$break${}", id)),
+                                        list: new_list,
+                                    },
+                                    type_: Type::NONE,
+                                };
+                                curr = vocab_id;
+                            }
+                        }
                     }
                     next_id = next_shape.next;
                 }
-                ShapeKind::Simple { inner } => {
-                    let block_id = self.blocks.get(*inner).unwrap().id;
-                    let vocab_id = block_map[&block_id];
-                    builder.arena[vocab_id] = Expression {
-                        kind: ExpressionKind::Block {
-                            name: Some(format!("block$break${}", block_id)),
-                            list: vec![curr],
-                        },
-                        type_: Type::NONE,
-                    };
-                    curr = vocab_id;
-                    break;
-                }
-                ShapeKind::Loop { entries, .. } => {
-                    for &entry_id in entries {
-                        let block_id = self.blocks.get(entry_id).unwrap().id;
-                        let vocab_id = block_map[&block_id];
-                        builder.arena[vocab_id] = Expression {
-                            kind: ExpressionKind::Block {
-                                name: Some(format!("block$break${}", block_id)),
-                                list: vec![curr],
-                            },
-                            type_: Type::NONE,
-                        };
-                        curr = vocab_id;
-                    }
+                _ => {
+                    // Simple and Loop shapes just follow and are handled by the next_id
+                    // logic at the end of render_shape.
                     break;
                 }
             }

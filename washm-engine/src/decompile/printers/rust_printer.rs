@@ -317,9 +317,16 @@ impl<'m> RustPrinter<'m> {
                 self.indent += 1;
 
                 let start_idx = if is_if { 1 } else { 0 };
+                let block_has_value = self.module.expressions[expr_id].type_ != Type::NONE
+                    && self.module.expressions[expr_id].type_ != Type::UNREACHABLE;
                 for (i, &child_id) in list.iter().enumerate().skip(start_idx) {
                     let child_is_last = i == list.len() - 1;
-                    self.walk_expression_ext(func, child_id, is_return && child_is_last);
+                    // A child is a statement when it's not the final value-producing
+                    // expression of the block (which should be printed inline without
+                    // a trailing semicolon). Otherwise it's a statement and should be
+                    // printed with a semicolon/newline.
+                    let child_is_statement = !(child_is_last && block_has_value);
+                    self.walk_expression_ext(func, child_id, child_is_statement);
                 }
 
                 self.indent -= 1;
@@ -385,10 +392,26 @@ impl<'m> RustPrinter<'m> {
                 self.output.push_str("}\n");
             }
             ExpressionKind::Break {
-                target: _,
+                target,
                 condition,
                 value,
             } => {
+                let (target_name, is_loop) =
+                    if let ExpressionKind::Block { name: Some(n), .. }
+                    | ExpressionKind::If { name: Some(n), .. } =
+                        &self.module.expressions[*target].kind
+                    {
+                        (Some(Self::sanitize_label(n)), false)
+                    } else if let ExpressionKind::Loop { name: Some(n), .. } =
+                        &self.module.expressions[*target].kind
+                    {
+                        (Some(Self::sanitize_label(n)), true)
+                    } else {
+                        (None, false)
+                    };
+
+                let keyword = if is_loop { "continue" } else { "break" };
+
                 if let Some(cond) = condition {
                     self.output.push_str("if ");
                     self.walk_inline_expression(func, *cond);
@@ -398,14 +421,22 @@ impl<'m> RustPrinter<'m> {
                         self.walk_inline_expression(func, *v);
                         self.output.push_str(" */");
                     }
-                    self.output.push_str(" break; }\n");
+                    if let Some(n) = target_name {
+                        self.output.push_str(&format!(" {} '{};", keyword, n));
+                    } else {
+                        self.output.push_str(&format!(" {};", keyword));
+                    }
+                    self.output.push_str(" }\n");
                 } else {
                     if let Some(v) = value {
                         self.output.push_str("/* break with value: ");
                         self.walk_inline_expression(func, *v);
                         self.output.push_str(" */;\n");
+                    }
+                    if let Some(n) = target_name {
+                        self.output.push_str(&format!("{} '{};\n", keyword, n));
                     } else {
-                        self.output.push_str("break;\n");
+                        self.output.push_str(&format!("{};\n", keyword));
                     }
                 }
             }
@@ -566,14 +597,33 @@ impl<'m> RustPrinter<'m> {
                 self.output
                     .push_str(&format!("/* elem.drop {} */\n", segment.index()));
             }
-            ExpressionKind::MemoryInit { .. } => {
-                self.output.push_str("/* memory.init */\n");
+            ExpressionKind::MemoryCopy {
+                dest, src, size, ..
+            } => {
+                self.output.push_str("memory_copy(");
+                self.walk_inline_value(func, *dest);
+                self.output.push_str(", ");
+                self.walk_inline_value(func, *src);
+                self.output.push_str(", ");
+                self.walk_inline_value(func, *size);
+                self.output.push_str(")");
+                if is_statement {
+                    self.output.push_str(";\n");
+                }
             }
-            ExpressionKind::MemoryCopy { .. } => {
-                self.output.push_str("/* memory.copy */\n");
-            }
-            ExpressionKind::MemoryFill { .. } => {
-                self.output.push_str("/* memory.fill */\n");
+            ExpressionKind::MemoryFill {
+                dest, value, size, ..
+            } => {
+                self.output.push_str("memory_fill(");
+                self.walk_inline_value(func, *dest);
+                self.output.push_str(", ");
+                self.walk_inline_value(func, *value);
+                self.output.push_str(", ");
+                self.walk_inline_value(func, *size);
+                self.output.push_str(")");
+                if is_statement {
+                    self.output.push_str(";\n");
+                }
             }
             ExpressionKind::DataDrop { segment } => {
                 self.output

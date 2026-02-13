@@ -15,11 +15,16 @@ impl Pass for Vacuum {
 
     fn run(&mut self, module: &mut Module) {
         let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
-        let mut optimizer = VacuumOptimizer { arena, root: None };
+        let mut optimizer = VacuumOptimizer {
+            arena,
+            root: None,
+            next_targets: Vec::new(),
+        };
         for (_, func) in functions.iter_mut() {
             let result_used = func.results != Type::NONE;
             if let Some(body) = func.body_mut() {
                 optimizer.root = Some(*body);
+                optimizer.next_targets.clear();
                 optimizer.process(body);
                 // Final function-level optimization (like Binaryen's visitFunction)
                 optimizer.finalize_function(body, result_used);
@@ -29,12 +34,15 @@ impl Pass for Vacuum {
     }
 }
 
-use std::collections::HashSet;
+// removed HashSet import
 
 struct VacuumOptimizer<'a> {
     arena: &'a mut IdArena<ExpressionMarker, Expression>,
     // Root expression id for the current function being processed.
     root: Option<ExpressionId>,
+    // Stack of expressions that are reachable via fallthrough from the current point.
+    // A break to any of these is redundant.
+    next_targets: Vec<ExpressionId>,
 }
 
 impl<'a> VacuumOptimizer<'a> {
@@ -72,6 +80,17 @@ impl<'a> VacuumOptimizer<'a> {
                 | ExpressionKind::If { .. }
                 | ExpressionKind::Loop { .. }
                 | ExpressionKind::Try { .. } => return Some(expr_id),
+                ExpressionKind::LocalSet { id, value } | ExpressionKind::LocalTee { id, value } => {
+                    if let ExpressionKind::LocalGet { id: get_id } = &self.arena[*value].kind {
+                        if id == get_id {
+                            if result_used {
+                                return Some(*value);
+                            } else {
+                                return None;
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
 
@@ -99,6 +118,8 @@ impl<'a> VacuumOptimizer<'a> {
                     | ExpressionKind::AtomicNotify { .. }
                     | ExpressionKind::TableInit { .. }
                     | ExpressionKind::MemoryInit { .. }
+                    | ExpressionKind::MemoryCopy { .. }
+                    | ExpressionKind::MemoryFill { .. }
             ) {
                 return Some(expr_id);
             }
@@ -113,6 +134,12 @@ impl<'a> VacuumOptimizer<'a> {
 
             if children_with_effects.is_empty() {
                 // nothing remains
+                if self.contains_memory_copy(expr_id) {
+                    eprintln!(
+                        "VACUUM-DIAG: removing subtree that contains MemoryCopy; node kind={:?}",
+                        self.arena[expr_id].kind
+                    );
+                }
                 return None;
             }
 
@@ -145,26 +172,9 @@ impl<'a> VacuumOptimizer<'a> {
             if let Some(dummy) = self.make_default_value(original_type) {
                 let mut list = children_with_effects.clone();
                 list.push(dummy);
-                // Preserve any existing child block name when creating the replacement block (search recursively)
-                let mut chosen_name: Option<String> = None;
-                let mut search_stack = list.clone();
-                while let Some(id) = search_stack.pop() {
-                    let expr = &self.arena[id];
-                    if let ExpressionKind::Block {
-                        name: Some(ref n), ..
-                    } = &expr.kind
-                    {
-                        chosen_name = Some(n.clone());
-                        break;
-                    }
-                    expr.kind.for_each_child(|c| search_stack.push(c));
-                }
                 let block_id = Expression::alloc(
                     self.arena,
-                    ExpressionKind::Block {
-                        name: chosen_name,
-                        list,
-                    },
+                    ExpressionKind::Block { name: None, list },
                     original_type,
                 );
                 return Some(block_id);
@@ -204,24 +214,74 @@ impl<'a> VacuumOptimizer<'a> {
         None
     }
 
+    fn get_single_break(&self, expr_id: ExpressionId) -> Option<ExpressionId> {
+        match &self.arena[expr_id].kind {
+            ExpressionKind::Break {
+                target,
+                condition: None,
+                value: None,
+            } => Some(*target),
+            ExpressionKind::Block { name: None, list } if list.len() == 1 => {
+                self.get_single_break(list[0])
+            }
+            _ => None,
+        }
+    }
+
     fn process(&mut self, expr_id: &mut ExpressionId) {
         // First, attempt to apply function-level optimizations like in Binaryen's
         // `optimize` for nodes where results are unused. We still recurse as
         // before, but use `optimize` at strategic points.
-        let block_type = self.arena[*expr_id].type_;
+        let _block_type = self.arena[*expr_id].type_;
         let expr_clone = self.arena[*expr_id].clone();
         match expr_clone.kind {
             ExpressionKind::Block { name, mut list } => {
-                // Recurse first
-                for child in list.iter_mut() {
-                    self.process(child);
+                // Pre-filter list to remove Nops and find trailing unreachable code
+                let mut filtered_list = Vec::with_capacity(list.len());
+                for &item in &list {
+                    if !matches!(self.arena[item].kind, ExpressionKind::Nop) {
+                        filtered_list.push(item);
+                        if self.arena[item].type_ == Type::UNREACHABLE {
+                            break;
+                        }
+                    }
                 }
+                list = filtered_list;
+
+                // Recurse first and update list in place
+                let list_len = list.len();
+                let mut processed_list = Vec::with_capacity(list_len);
+
+                for i in 0..list_len {
+                    // An instruction is at the "end" of this block if nothing follows it
+                    // effectively (only Nops or nothing at all).
+                    let is_last = i == list_len - 1;
+                    let mut current_targets = if is_last {
+                        self.next_targets.clone()
+                    } else {
+                        Vec::new()
+                    };
+
+                    if is_last && name.is_some() {
+                        current_targets.push(*expr_id);
+                    }
+
+                    let saved_targets = std::mem::replace(&mut self.next_targets, current_targets);
+                    let mut item = list[i];
+                    self.process(&mut item);
+                    processed_list.push(item);
+                    self.next_targets = saved_targets;
+
+                    if self.arena[item].type_ == Type::UNREACHABLE {
+                        break;
+                    }
+                }
+                list = processed_list;
 
                 let mut new_list = Vec::new();
-                let list_len = list.len();
                 let mut i = 0;
-                let mut removed_ids: HashSet<ExpressionId> = HashSet::new();
-                while i < list_len {
+                let block_type = self.arena[*expr_id].type_;
+                while i < list.len() {
                     let child_id = list[i];
 
                     // Remove degenerate pattern: a br_if that targets this block and whose
@@ -241,7 +301,6 @@ impl<'a> VacuumOptimizer<'a> {
                                     _ => false,
                                 };
                                 if is_true {
-                                    removed_ids.insert(child_id);
                                     i += 1;
                                     continue;
                                 }
@@ -251,7 +310,7 @@ impl<'a> VacuumOptimizer<'a> {
 
                     // Attempt to optimize child when it's not the last (or when the
                     // block result isn't used), mirroring Binaryen's logic.
-                    let is_last = i == list_len - 1;
+                    let is_last = i == list.len() - 1;
                     let used = is_last && block_type != Type::NONE;
                     if let Some(opt_id) = self.optimize(child_id, used, true) {
                         // If this optimization replaced the child with a block that
@@ -277,38 +336,38 @@ impl<'a> VacuumOptimizer<'a> {
                     i += 1;
                 }
 
-                // If a block is empty and there are no Breaks targeting it, remove it.
-                if new_list.is_empty() {
-                    // Scan for any remaining breaks that target this block within the same function.
-                    let mut found = false;
+                // Find if any Break targets this specific block. If not, we can remove its name.
+                let mut is_targeted = false;
+                if name.is_some() {
                     if let Some(root) = self.root {
-                        // DFS from root, ignoring removed_ids
                         let mut stack = vec![root];
                         while let Some(eid) = stack.pop() {
-                            if removed_ids.contains(&eid) {
-                                continue;
-                            }
                             if let ExpressionKind::Break { target, .. } = &self.arena[eid].kind {
                                 if *target == *expr_id {
-                                    found = true;
+                                    is_targeted = true;
                                     break;
                                 }
                             }
-                            // push children
                             self.arena[eid]
                                 .kind
                                 .for_each_child(|child| stack.push(child));
                         }
                     }
+                }
 
-                    if !found {
+                let effective_name = if is_targeted { name } else { None };
+
+                // If a block is empty and not targeted, removing it is always safe.
+                if new_list.is_empty() {
+                    if !is_targeted {
                         self.arena[*expr_id].kind = ExpressionKind::Nop;
                         self.arena[*expr_id].type_ = Type::NONE;
                         return;
                     }
                 }
 
-                if name.is_none() {
+                // If a block has no name and only one child, flatten it.
+                if effective_name.is_none() {
                     if new_list.is_empty() {
                         self.arena[*expr_id].kind = ExpressionKind::Nop;
                         self.arena[*expr_id].type_ = Type::NONE;
@@ -316,12 +375,15 @@ impl<'a> VacuumOptimizer<'a> {
                     } else if new_list.len() == 1 {
                         let child_id = new_list[0];
                         *expr_id = child_id;
+                        // Since we just replaced the block with its child, we should
+                        // potentially re-process to ensure any nested trivialities are caught.
+                        self.process(expr_id);
                         return;
                     }
                 }
 
                 self.arena[*expr_id].kind = ExpressionKind::Block {
-                    name,
+                    name: effective_name,
                     list: new_list,
                 };
             }
@@ -332,28 +394,101 @@ impl<'a> VacuumOptimizer<'a> {
                 mut if_false,
             } => {
                 self.process(&mut condition);
+
+                let mut arm_targets = self.next_targets.clone();
+                if name.is_some() {
+                    arm_targets.push(*expr_id);
+                }
+
+                let saved_targets = std::mem::replace(&mut self.next_targets, arm_targets);
                 self.process(&mut if_true);
                 if let Some(mut f) = if_false {
                     self.process(&mut f);
                     if_false = Some(f);
                 }
+                self.next_targets = saved_targets;
 
-                // constant folding
+                // Arm merging: if both arms are effectively the same side-effect, merging them
+                // can simplify the IR. For now, detect identical Breaks.
+                if let Some(f) = if_false {
+                    if let (Some(t1), Some(t2)) =
+                        (self.get_single_break(if_true), self.get_single_break(f))
+                    {
+                        if t1 == t2 {
+                            // if (cond) break; else break;  =>  drop(cond); break;
+                            let drop_id = self.arena.alloc(Expression::new(
+                                ExpressionKind::Drop { value: condition },
+                                Type::NONE,
+                            ));
+                            let br_id =
+                                if matches!(self.arena[if_true].kind, ExpressionKind::Break { .. })
+                                {
+                                    if_true
+                                } else {
+                                    f
+                                };
+                            self.arena[*expr_id].kind = ExpressionKind::Block {
+                                name: None,
+                                list: vec![drop_id, br_id],
+                            };
+                            self.arena[*expr_id].type_ = self.arena[br_id].type_;
+                            self.process(expr_id);
+                            return;
+                        }
+                    }
+                }
+
+                // constant folding (preserve any side-effects in the condition)
                 if let ExpressionKind::Const(lit) = &self.arena[condition].kind {
                     let is_true = match lit {
                         Literal::I32(v) => *v != 0,
                         Literal::I64(v) => *v != 0,
                         _ => false,
                     };
+                    let cond_has_effects =
+                        EffectAnalyzer::analyze(condition, self.arena).has_side_effects();
                     if is_true {
+                        if cond_has_effects {
+                            let drop_id = self.arena.alloc(Expression::new(
+                                ExpressionKind::Drop { value: condition },
+                                Type::NONE,
+                            ));
+                            self.arena[*expr_id].kind = ExpressionKind::Block {
+                                name: None,
+                                list: vec![drop_id, if_true],
+                            };
+                            self.arena[*expr_id].type_ = self.arena[if_true].type_;
+                            self.process(expr_id);
+                            return;
+                        }
                         *expr_id = if_true;
+                        return;
                     } else if let Some(false_branch) = if_false {
+                        if cond_has_effects {
+                            let drop_id = self.arena.alloc(Expression::new(
+                                ExpressionKind::Drop { value: condition },
+                                Type::NONE,
+                            ));
+                            self.arena[*expr_id].kind = ExpressionKind::Block {
+                                name: None,
+                                list: vec![drop_id, false_branch],
+                            };
+                            self.arena[*expr_id].type_ = self.arena[false_branch].type_;
+                            self.process(expr_id);
+                            return;
+                        }
                         *expr_id = false_branch;
+                        return;
                     } else {
+                        if cond_has_effects {
+                            self.arena[*expr_id].kind = ExpressionKind::Drop { value: condition };
+                            self.arena[*expr_id].type_ = Type::NONE;
+                            return;
+                        }
                         self.arena[*expr_id].kind = ExpressionKind::Nop;
                         self.arena[*expr_id].type_ = Type::NONE;
+                        return;
                     }
-                    return;
                 }
 
                 if let Some(f) = if_false {
@@ -381,6 +516,36 @@ impl<'a> VacuumOptimizer<'a> {
                     if_true,
                     if_false,
                 };
+            }
+            ExpressionKind::Break {
+                target,
+                mut condition,
+                mut value,
+            } => {
+                if value.is_none() && self.next_targets.contains(&target) {
+                    if let Some(mut cond) = condition {
+                        self.process(&mut cond);
+                        self.arena[*expr_id].kind = ExpressionKind::Drop { value: cond };
+                        self.arena[*expr_id].type_ = Type::NONE;
+                    } else {
+                        self.arena[*expr_id].kind = ExpressionKind::Nop;
+                        self.arena[*expr_id].type_ = Type::NONE;
+                    }
+                } else {
+                    if let Some(mut c) = condition {
+                        self.process(&mut c);
+                        condition = Some(c);
+                    }
+                    if let Some(mut v) = value {
+                        self.process(&mut v);
+                        value = Some(v);
+                    }
+                    self.arena[*expr_id].kind = ExpressionKind::Break {
+                        target,
+                        condition,
+                        value,
+                    };
+                }
             }
             ExpressionKind::Drop { mut value } => {
                 // Recurse into the value we are dropping
@@ -449,8 +614,61 @@ impl<'a> VacuumOptimizer<'a> {
                 }
             }
             ExpressionKind::Loop { name, mut body } => {
+                let mut loop_targets = self.next_targets.clone();
+                // br to a loop is a restart/continue. It is "trivial" if it's at
+                // the very end of the loop body.
+                loop_targets.push(*expr_id);
+
+                let saved_targets = std::mem::replace(&mut self.next_targets, loop_targets);
                 self.process(&mut body);
+                self.next_targets = saved_targets;
+
                 self.arena[*expr_id].kind = ExpressionKind::Loop { name, body };
+            }
+            ExpressionKind::LocalSet { id, mut value } => {
+                self.process(&mut value);
+                // Case 1: v = v
+                if let ExpressionKind::LocalGet { id: get_id } = &self.arena[value].kind {
+                    if id == *get_id {
+                        self.arena[*expr_id].kind = ExpressionKind::Nop;
+                        self.arena[*expr_id].type_ = Type::NONE;
+                        return;
+                    }
+                }
+                // Case 2: v = (v := val)
+                if let ExpressionKind::LocalTee {
+                    id: tee_id,
+                    value: _,
+                } = &self.arena[value].kind
+                {
+                    if id == *tee_id {
+                        *expr_id = value;
+                        return;
+                    }
+                }
+                self.arena[*expr_id].kind = ExpressionKind::LocalSet { id, value };
+            }
+            ExpressionKind::LocalTee { id, mut value } => {
+                self.process(&mut value);
+                // Case 1: v := v
+                if let ExpressionKind::LocalGet { id: get_id } = &self.arena[value].kind {
+                    if id == *get_id {
+                        *expr_id = value;
+                        return;
+                    }
+                }
+                // Case 2: v := (v := val)
+                if let ExpressionKind::LocalTee {
+                    id: tee_id,
+                    value: _,
+                } = &self.arena[value].kind
+                {
+                    if id == *tee_id {
+                        *expr_id = value;
+                        return;
+                    }
+                }
+                self.arena[*expr_id].kind = ExpressionKind::LocalTee { id, value };
             }
             ExpressionKind::Try {
                 name,
@@ -469,6 +687,9 @@ impl<'a> VacuumOptimizer<'a> {
 
                 // Otherwise, keep visiting children as needed.
                 // Visit body and catches
+                let saved_targets = self.next_targets.clone();
+                self.next_targets.push(*expr_id);
+
                 let mut b = body;
                 self.process(&mut b);
                 let mut new_catches: Vec<ExpressionId> = Vec::new();
@@ -477,6 +698,9 @@ impl<'a> VacuumOptimizer<'a> {
                     self.process(&mut cc);
                     new_catches.push(cc);
                 }
+
+                self.next_targets = saved_targets;
+
                 self.arena[*expr_id].kind = ExpressionKind::Try {
                     name,
                     body: b,
@@ -563,9 +787,54 @@ impl<'a> VacuumOptimizer<'a> {
             } => {
                 self.process(condition);
             }
+            ExpressionKind::MemoryCopy {
+                ref mut dest,
+                ref mut src,
+                ref mut size,
+                ..
+            } => {
+                self.process(dest);
+                self.process(src);
+                self.process(size);
+            }
+            ExpressionKind::MemoryFill {
+                ref mut dest,
+                ref mut value,
+                ref mut size,
+                ..
+            } => {
+                self.process(dest);
+                self.process(value);
+                self.process(size);
+            }
+            ExpressionKind::MemoryInit {
+                ref mut dest,
+                ref mut offset,
+                ref mut size,
+                ..
+            } => {
+                self.process(dest);
+                self.process(offset);
+                self.process(size);
+            }
+            ExpressionKind::DataDrop { .. } | ExpressionKind::ElemDrop { .. } => {}
             _ => {}
         }
         self.arena[*expr_id].kind = expr_kind;
+    }
+
+    /// Does the subtree rooted at `expr_id` contain a MemoryCopy node?
+    fn contains_memory_copy(&self, expr_id: ExpressionId) -> bool {
+        if matches!(self.arena[expr_id].kind, ExpressionKind::MemoryCopy { .. }) {
+            return true;
+        }
+        let mut found = false;
+        self.arena[expr_id].kind.for_each_child(|child| {
+            if !found && self.contains_memory_copy(child) {
+                found = true;
+            }
+        });
+        found
     }
 
     /// Apply final function-level optimization: try to optimize the function body
@@ -574,6 +843,13 @@ impl<'a> VacuumOptimizer<'a> {
         if let Some(opt) = self.optimize(*expr_id, result_used, true) {
             *expr_id = opt;
         } else {
+            // Sanity check: do not elide a function body that has side-effects.
+            if EffectAnalyzer::analyze(*expr_id, self.arena).has_side_effects() {
+                panic!(
+                    "finalize_function would elide expression with side-effects: {:?}",
+                    self.arena[*expr_id].kind
+                );
+            }
             self.arena[*expr_id].kind = ExpressionKind::Nop;
             self.arena[*expr_id].type_ = Type::NONE;
         }
@@ -638,10 +914,15 @@ mod tests {
             Type::I32,
         ));
 
-        // break to label "lbl" with condition const_true
+        // Placeholder for inner_block
+        let inner_block = module
+            .expressions
+            .alloc(Expression::new(ExpressionKind::Nop, Type::NONE));
+
+        // break to target "inner_block" with condition const_true
         let break_expr = module.expressions.alloc(Expression::new(
             ExpressionKind::Break {
-                name: "lbl".to_string(),
+                target: inner_block,
                 condition: Some(const_true),
                 value: None,
             },
@@ -649,13 +930,13 @@ mod tests {
         ));
 
         // named inner block with the break as its only child
-        let inner_block = module.expressions.alloc(Expression::new(
+        module.expressions[inner_block] = Expression::new(
             ExpressionKind::Block {
                 name: Some("lbl".to_string()),
                 list: vec![break_expr],
             },
             Type::NONE,
-        ));
+        );
 
         // following dummy const to ensure it's preserved after simplification
         let following = module.expressions.alloc(Expression::new(
@@ -932,6 +1213,7 @@ mod tests {
         let mut optimizer = VacuumOptimizer {
             arena: &mut module.expressions,
             root: None,
+            next_targets: Vec::new(),
         };
         if let Some(opt_id) = optimizer.optimize(bin, false, true) {
             if !matches!(

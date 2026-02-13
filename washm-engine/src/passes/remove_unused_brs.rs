@@ -366,8 +366,18 @@ mod tests {
         let mut module = Module::new();
         let body = {
             let mut builder = IrBuilder::new(&mut module.expressions);
-            let br = builder.break_("L".to_string(), None, None, Type::NONE);
-            builder.block(Some("L".to_string()), vec![br], Type::NONE)
+            let label_block = builder.arena.alloc(Expression {
+                kind: ExpressionKind::Nop,
+                type_: Type::NONE,
+            });
+            let br = builder.break_(label_block, None, None, Type::NONE);
+
+            builder.arena[label_block].kind = ExpressionKind::Block {
+                name: Some("L".to_string()),
+                list: vec![br],
+            };
+            builder.arena[label_block].type_ = Type::NONE;
+            label_block
         };
 
         let func = Function::new("test".to_string(), Type::NONE, Type::NONE, vec![], body);

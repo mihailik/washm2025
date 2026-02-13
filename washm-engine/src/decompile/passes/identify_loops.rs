@@ -48,7 +48,7 @@ impl<'a> ReadOnlyVisitor for LoopVisitor<'a> {
             crate::ir::expression::Expression,
         >,
     ) {
-        if let ExpressionKind::Loop { name, body } = &arena[expr].kind {
+        if let ExpressionKind::Loop { name: _, body } = &arena[expr].kind {
             let mut detected = false;
 
             // 1. Look for Do-While Pattern:

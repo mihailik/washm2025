@@ -1,13 +1,12 @@
 // Decompiled to Rust from WebAssembly
 
-fn func_0() {
+fn dropper() {
     let mut v0: i32 = 0;
-    func_1();
+    _RNvCshXwFllX56pT_7___rustc35___rust_no_alloc_shim_is_unstable_v2();
 }
 
-fn func_1() {
+fn _RNvCshXwFllX56pT_7___rustc35___rust_no_alloc_shim_is_unstable_v2() {
     let mut v0: i32 = 0;
     return;
 }
-
 

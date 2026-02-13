@@ -548,6 +548,40 @@ impl<'m> CPrinter<'m> {
                     self.output.push_str(";\n");
                 }
             }
+            ExpressionKind::MemoryCopy {
+                dest, src, size, ..
+            } => {
+                self.output.push_str("memory_copy(");
+                self.walk_inline_expression(func, *dest);
+                self.output.push_str(", ");
+                self.walk_inline_expression(func, *src);
+                self.output.push_str(", ");
+                self.walk_inline_expression(func, *size);
+                self.output.push_str(")");
+                if is_statement {
+                    self.output.push_str(";\n");
+                }
+            }
+            ExpressionKind::MemoryFill {
+                dest, value, size, ..
+            } => {
+                self.output.push_str("memory_fill(");
+                self.walk_inline_expression(func, *dest);
+                self.output.push_str(", ");
+                self.walk_inline_expression(func, *value);
+                self.output.push_str(", ");
+                self.walk_inline_expression(func, *size);
+                self.output.push_str(")");
+                if is_statement {
+                    self.output.push_str(";\n");
+                }
+            }
+            ExpressionKind::MemoryInit { .. } => {
+                self.output.push_str("/* memory.init */");
+                if is_statement {
+                    self.output.push_str(";\n");
+                }
+            }
             ExpressionKind::Drop { value } => {
                 self.walk_inline_expression(func, *value);
                 if is_statement {

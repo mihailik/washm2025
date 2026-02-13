@@ -16,8 +16,9 @@
 //! use washm::analysis::effects::{Effect, EffectAnalyzer};
 //! use washm::ir::expression::{IrBuilder, ExpressionId};
 //! use washm::ir::{Literal, Type};
+//! use washm::collections::IdArena;
 //!
-//! // Assuming you have an arena
+//! let mut arena = IdArena::new();
 //! let mut builder = IrBuilder::new(&mut arena);
 //! let expr = builder.unreachable();
 //!
@@ -979,7 +980,8 @@ mod tests {
     fn test_analyzer_break() {
         let mut arena = IdArena::new();
         let mut builder = IrBuilder::new(&mut arena);
-        let br = builder.break_("loop", None, None, Type::NONE);
+        let target = builder.block(None::<String>, vec![], Type::NONE);
+        let br = builder.break_(target, None, None, Type::NONE);
 
         let effect = EffectAnalyzer::analyze(br, &arena);
         assert!(effect.transfers_control());
@@ -1189,10 +1191,21 @@ mod tests {
         let c0 = builder.const_(Literal::I32(0));
         let c42 = builder.const_(Literal::I32(42));
         let store = builder.store(MemoryId::from_raw_parts(0, 0), 4, 0, 4, c0, c42);
-        let br = builder.break_("myloop", None, None, Type::NONE);
+
+        let loop_expr = builder.arena.alloc(Expression {
+            kind: ExpressionKind::Nop,
+            type_: Type::NONE,
+        });
+
+        let br = builder.break_(loop_expr, None, None, Type::NONE);
         let loop_list = vec![store, br];
         let loop_block = builder.block(None::<String>, loop_list, Type::NONE);
-        let loop_expr = builder.loop_(Some("myloop"), loop_block, Type::NONE);
+
+        builder.arena[loop_expr].kind = ExpressionKind::Loop {
+            name: Some("myloop".to_string()),
+            body: loop_block,
+        };
+        builder.arena[loop_expr].type_ = Type::NONE;
 
         let condition = builder.const_(Literal::I32(1));
         let if_expr = builder.if_(None::<&str>, condition, loop_expr, None, Type::NONE);
@@ -1385,7 +1398,8 @@ mod tests {
             Type::I32,
             false,
         );
-        let br = builder.break_("loop", Some(condition), Some(value), Type::I32);
+        let target = builder.block(None::<String>, vec![], Type::I32);
+        let br = builder.break_(target, Some(condition), Some(value), Type::I32);
 
         let effect = EffectAnalyzer::analyze(br, &arena);
         assert!(effect.calls());

@@ -99,7 +99,7 @@ impl BinaryWriter {
     }
 
     // Helper: read u32 LEB128 from bytes at offset `p`, returning (value, size_bytes)
-    fn read_leb_u32(bytes: &[u8], p: usize) -> Option<(u32, usize)> {
+    fn _read_leb_u32(bytes: &[u8], p: usize) -> Option<(u32, usize)> {
         let mut shift = 0u32;
         let mut result = 0u32;
         let mut i = 0usize;
@@ -3012,7 +3012,7 @@ impl BinaryWriter {
         Ok(())
     }
 
-    fn find_label_depth(scope_stack: &[Option<String>], target: &str) -> Result<u32> {
+    fn _find_label_depth(scope_stack: &[Option<String>], target: &str) -> Result<u32> {
         for (i, label) in scope_stack.iter().rev().enumerate() {
             if let Some(name) = label {
                 if name == target {
@@ -3216,9 +3216,21 @@ mod tests {
 
             let const_42 = builder.const_(Literal::I32(42));
             let drop_expr = builder.drop(const_42);
-            let break_expr = builder.break_("$loop", None, None, Type::UNREACHABLE);
+            // Create loop placeholder to resolve circular reference
+            let loop_expr = builder
+                .arena
+                .alloc(Expression::new(ExpressionKind::Nop, Type::NONE));
+            let break_expr = builder.break_(loop_expr, None, None, Type::UNREACHABLE);
             let loop_body_block = builder.block("", vec![drop_expr, break_expr], Type::NONE);
-            let loop_expr = builder.loop_(Some("$loop"), loop_body_block, Type::NONE);
+
+            // Update the loop expression
+            builder.arena[loop_expr] = Expression::new(
+                ExpressionKind::Loop {
+                    name: Some("$loop".to_string()),
+                    body: loop_body_block,
+                },
+                Type::NONE,
+            );
 
             let block = builder.block("", vec![if_body, loop_expr], Type::NONE);
 

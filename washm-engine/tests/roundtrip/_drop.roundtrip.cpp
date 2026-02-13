@@ -3,14 +3,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-void func_0(void) {
+void dropper(void) {
     int32_t v0 = 0;
-    func_1();
+    _RNvCshXwFllX56pT_7___rustc35___rust_no_alloc_shim_is_unstable_v2();
 }
 
-void func_1(void) {
+void _RNvCshXwFllX56pT_7___rustc35___rust_no_alloc_shim_is_unstable_v2(void) {
     int32_t v0 = 0;
     return;
 }
-
 

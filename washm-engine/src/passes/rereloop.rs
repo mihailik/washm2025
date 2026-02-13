@@ -46,6 +46,9 @@ impl Pass for Rereloop {
                 // Render
                 let label_var = func.add_var(Type::I32);
                 let new_body = context.relooper.render(&mut context.builder, label_var);
+
+                // NOTE: the renderer must preserve side-effects — do not mask
+                // missing nodes here. `Rereloop` should not inject workarounds.
                 func.set_body(new_body);
             }
         }
@@ -318,7 +321,8 @@ impl<'a> ReReloopContext<'a> {
                 self.stop_control_flow();
             }
             _ => {
-                self.get_curr_block_list_mut().push(expr_id);
+                let list = self.get_curr_block_list_mut();
+                list.push(expr_id);
             }
         }
     }

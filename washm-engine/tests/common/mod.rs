@@ -5,6 +5,7 @@ use washm::decompile::printers::{CPrinter, RustPrinter};
 use washm::decompile::Lifter;
 use washm::wasm::binary_reader::BinaryReader;
 
+#[allow(dead_code)]
 pub fn run_roundtrip_test_rust(source_path_str: &str) {
     let (rust_out, _cpp_out, rust_gold_path, _cpp_gold_path) =
         generate_roundtrip_outputs(source_path_str);
@@ -26,6 +27,7 @@ pub fn run_roundtrip_test_rust(source_path_str: &str) {
     );
 }
 
+#[allow(dead_code)]
 pub fn run_roundtrip_test_cpp(source_path_str: &str) {
     let (_rust_out, cpp_out, _rust_gold_path, cpp_gold_path) =
         generate_roundtrip_outputs(source_path_str);
@@ -47,6 +49,7 @@ pub fn run_roundtrip_test_cpp(source_path_str: &str) {
     );
 }
 
+#[allow(dead_code)]
 fn generate_roundtrip_outputs(source_path_str: &str) -> (String, String, PathBuf, PathBuf) {
     let source_path = hex_to_path(source_path_str);
     let stem = source_path
@@ -105,6 +108,7 @@ fn generate_roundtrip_outputs(source_path_str: &str) -> (String, String, PathBuf
 /// Trace Lifter Passes: Run the lifter-like sequence of passes one by one and
 /// capture the Rust printing after each pass so tests can inspect which
 /// pass introduces regressions.
+#[allow(dead_code)]
 pub fn trace_lifter_passes_for_source(source_path_str: &str) -> Vec<(String, String)> {
     let source_path = hex_to_path(source_path_str);
 
@@ -234,6 +238,31 @@ pub fn trace_lifter_passes_for_source(source_path_str: &str) -> Vec<(String, Str
                         format!("DebugAfterRereloop({})[{}]", name, inner),
                         format!("{:#?}", &module.expressions[inner]),
                     ));
+
+                    // Also dump referenced children of this inner expression for extra context
+                    let inner_expr = &module.expressions[inner];
+                    let mut child_ids = Vec::new();
+                    inner_expr.kind.for_each_child(|c| child_ids.push(c));
+                    for c in child_ids {
+                        outputs.push((
+                            format!("DebugAfterRereloop({})[{}].child[{}]", name, inner, c),
+                            format!("{:#?}", &module.expressions[c]),
+                        ));
+                        // Dump one level deeper
+                        let mut grand_children = Vec::new();
+                        module.expressions[c]
+                            .kind
+                            .for_each_child(|gc| grand_children.push(gc));
+                        for gc in grand_children {
+                            outputs.push((
+                                format!(
+                                    "DebugAfterRereloop({})[{}].child[{}].child[{}]",
+                                    name, inner, c, gc
+                                ),
+                                format!("{:#?}", &module.expressions[gc]),
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -290,6 +319,7 @@ pub fn trace_lifter_passes_for_source(source_path_str: &str) -> Vec<(String, Str
     outputs
 }
 
+#[allow(dead_code)]
 fn hex_to_path(path_str: &str) -> PathBuf {
     PathBuf::from(path_str)
 }

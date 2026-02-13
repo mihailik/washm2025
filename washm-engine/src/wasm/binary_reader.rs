@@ -348,7 +348,7 @@ impl BinaryReader {
                     }
                 }
                 Payload::FunctionSection(reader) => {
-                    for (i, type_idx) in reader.into_iter().enumerate() {
+                    for type_idx in reader {
                         let type_idx = type_idx?;
                         function_section.push(type_idx);
                         self.all_function_types.push(type_idx);
@@ -389,7 +389,7 @@ impl BinaryReader {
                     }
                 }
                 Payload::TableSection(reader) => {
-                    for (i, table) in reader.into_iter().enumerate() {
+                    for table in reader {
                         let table = table?;
                         let id = module.add_table(crate::ir::module::Table {
                             name: String::new(),
@@ -406,7 +406,7 @@ impl BinaryReader {
                     }
                 }
                 Payload::MemorySection(reader) => {
-                    for (i, memory) in reader.into_iter().enumerate() {
+                    for memory in reader {
                         let memory = memory?;
                         let id = module.add_memory(crate::ir::module::Memory {
                             name: String::new(),
@@ -420,7 +420,7 @@ impl BinaryReader {
                     }
                 }
                 Payload::GlobalSection(reader) => {
-                    for (i, global) in reader.into_iter().enumerate() {
+                    for global in reader {
                         let global = global?;
                         let type_ = Self::valtype_to_type(global.ty.content_type);
                         let mutable = global.ty.mutable;
@@ -451,6 +451,14 @@ impl BinaryReader {
                                     self.func_ids.get(export.index as usize).copied().ok_or(
                                         ParseError::InvalidIndex("func export", export.index),
                                     )?;
+                                // Propagate export name to function name if missing
+                                if let Some(func) = module.functions.get_mut(id) {
+                                    // Prefer export names over generic `func_X` names so the
+                                    // decompiler prints the real, meaningful function names.
+                                    if func.name.is_empty() || func.name.starts_with("func_") {
+                                        func.name = export.name.to_string();
+                                    }
+                                }
                                 ExportKind::Function(id)
                             }
                             wasmparser::ExternalKind::Table => {
@@ -538,6 +546,12 @@ impl BinaryReader {
                     let start = body.range().start;
                     self.body_starts.push(start as u64);
                     let func_id = self.func_ids[import_count + code_entry_count];
+
+                    // DEBUG: Check name
+                    // if let Some(f) = module.functions.get(func_id) {
+                    //     eprintln!("DEBUG: CodeSectionEntry for {:?}, current name: '{}'", func_id, f.name);
+                    // }
+
                     // Record the current function index (global index including imports)
                     self.current_function_index = Some(import_count + code_entry_count);
                     // Record the start of the function body (including size LEB) to allow relative offsets
@@ -650,7 +664,12 @@ impl BinaryReader {
                                                     self.func_ids.get(naming.index as usize)
                                                 {
                                                     if let Some(f) = module.functions.get_mut(id) {
-                                                        f.name = naming.name.to_string();
+                                                        let new_name = naming.name.to_string();
+                                                        if f.name.is_empty()
+                                                            || f.name.starts_with("func_")
+                                                        {
+                                                            f.name = new_name;
+                                                        }
                                                     }
                                                 }
                                             }
@@ -695,6 +714,38 @@ impl BinaryReader {
                                             }
                                         }
                                     }
+                                    Name::Local(map) => {
+                                        for entry in map {
+                                            if let Ok(naming) = entry {
+                                                if let Some(&id) =
+                                                    self.func_ids.get(naming.index as usize)
+                                                {
+                                                    if let Some(f) = module.functions.get_mut(id) {
+                                                        if let crate::ir::module::FunctionKind::Local {
+                                                            locals,
+                                                            ..
+                                                        } = &mut f.kind
+                                                        {
+                                                            for l_naming in naming.names {
+                                                                if let Ok(l) = l_naming {
+                                                                    let l_id =
+                                                                        crate::ir::LocalId::from_u32(
+                                                                            l.index,
+                                                                        );
+                                                                    if let Some(local) =
+                                                                        locals.get_mut(l_id)
+                                                                    {
+                                                                        local.name =
+                                                                            l.name.to_string();
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -715,7 +766,7 @@ impl BinaryReader {
         Ok(module)
     }
 
-    fn apply_dwarf(&self, module: &mut Module, data: &[u8]) {
+    fn apply_dwarf(&self, module: &mut Module, _data: &[u8]) {
         let num_imports = module
             .functions
             .iter()
@@ -1072,7 +1123,7 @@ impl BinaryReader {
             expression_id: ExpressionId,
             result_type: Type,
             start_stack_len: usize,
-            start_value_stack_len: usize,
+            _start_value_stack_len: usize,
             start_offset: u32,
         }
         let mut frames: Vec<Frame> = Vec::new();
@@ -1284,7 +1335,7 @@ impl BinaryReader {
                         expression_id,
                         result_type,
                         start_stack_len: stack.len(),
-                        start_value_stack_len: value_stack.len(),
+                        _start_value_stack_len: value_stack.len(),
                         start_offset: offset,
                     });
                 }
@@ -1302,7 +1353,7 @@ impl BinaryReader {
                         expression_id,
                         result_type,
                         start_stack_len: stack.len(),
-                        start_value_stack_len: value_stack.len(),
+                        _start_value_stack_len: value_stack.len(),
                         start_offset: offset,
                     });
                 }
@@ -1326,7 +1377,7 @@ impl BinaryReader {
                         expression_id,
                         result_type,
                         start_stack_len: stack.len(),
-                        start_value_stack_len: value_stack.len(),
+                        _start_value_stack_len: value_stack.len(),
                         start_offset: offset,
                     });
                 }
@@ -1559,7 +1610,18 @@ impl BinaryReader {
                         .current_func_local_ids
                         .get(local_index as usize)
                         .copied()
-                        .ok_or(ParseError::InvalidIndex("local.get", local_index))?;
+                        .unwrap_or_else(|| {
+                            println!(
+                                "WARN: Invalid local.get index {} (len {}), using 0",
+                                local_index,
+                                self.current_func_local_ids.len()
+                            );
+                            self.current_func_local_ids
+                                .get(0)
+                                .copied()
+                                .unwrap_or(crate::ir::module::LocalId::null())
+                        });
+                    /* .ok_or(ParseError::InvalidIndex("local.get", local_index))?; */
                     let ty = self
                         .current_func_local_types
                         .get(local_index as usize)

@@ -4305,10 +4305,20 @@ fn test_br_unconditional() {
     // block with unconditional break
     let body = {
         let mut builder = IrBuilder::new(&mut module.expressions);
-        let br = builder.break_("label", None, None, Type::NONE);
+        let label_block = builder.arena.alloc(Expression {
+            kind: ExpressionKind::Nop,
+            type_: Type::NONE,
+        });
+
+        let br = builder.break_(label_block, None, None, Type::NONE);
         let mut block_list = vec![];
         block_list.push(br);
-        builder.block(Some("label"), block_list, Type::NONE)
+
+        builder.arena[label_block].kind = ExpressionKind::Block {
+            name: Some("label".to_string()),
+            list: block_list,
+        };
+        label_block
     };
 
     module.add_function(Function::new(
@@ -4338,11 +4348,20 @@ fn test_br_if_conditional() {
     // block with conditional break
     let body = {
         let mut builder = IrBuilder::new(&mut module.expressions);
+        let label_block = builder.arena.alloc(Expression {
+            kind: ExpressionKind::Nop,
+            type_: Type::NONE,
+        });
+
         let condition = builder.const_(Literal::I32(1));
-        let br_if = builder.break_("label", Some(condition), None, Type::NONE);
+        let br_if = builder.break_(label_block, Some(condition), None, Type::NONE);
         let mut block_list = vec![];
         block_list.push(br_if);
-        builder.block(Some("label"), block_list, Type::NONE)
+        builder.arena[label_block].kind = ExpressionKind::Block {
+            name: Some("label".to_string()),
+            list: block_list,
+        };
+        label_block
     };
 
     module.add_function(Function::new(
@@ -4372,11 +4391,20 @@ fn test_br_with_value() {
     // block that returns a value via break
     let body = {
         let mut builder = IrBuilder::new(&mut module.expressions);
+        let label_block = builder.arena.alloc(Expression {
+            kind: ExpressionKind::Nop,
+            type_: Type::I32,
+        });
+
         let value = builder.const_(Literal::I32(42));
-        let br = builder.break_("label", None, Some(value), Type::I32);
+        let br = builder.break_(label_block, None, Some(value), Type::I32);
         let mut block_list = vec![];
         block_list.push(br);
-        builder.block(Some("label"), block_list, Type::I32)
+        builder.arena[label_block].kind = ExpressionKind::Block {
+            name: Some("label".to_string()),
+            list: block_list,
+        };
+        label_block
     };
 
     module.add_function(Function::new(
@@ -4406,16 +4434,32 @@ fn test_nested_blocks_with_breaks() {
     // outer block
     let body = {
         let mut builder = IrBuilder::new(&mut module.expressions);
-        let br_inner = builder.break_("inner", None, None, Type::NONE);
+        let inner_block = builder.arena.alloc(Expression {
+            kind: ExpressionKind::Nop,
+            type_: Type::NONE,
+        });
+        let outer_block = builder.arena.alloc(Expression {
+            kind: ExpressionKind::Nop,
+            type_: Type::NONE,
+        });
+
+        let br_inner = builder.break_(inner_block, None, None, Type::NONE);
         let mut inner_list = vec![];
         inner_list.push(br_inner);
-        let inner = builder.block(Some("inner"), inner_list, Type::NONE);
+        builder.arena[inner_block].kind = ExpressionKind::Block {
+            name: Some("inner".to_string()),
+            list: inner_list,
+        };
 
-        let br_outer = builder.break_("outer", None, None, Type::NONE);
+        let br_outer = builder.break_(outer_block, None, None, Type::NONE);
         let mut outer_list = vec![];
-        outer_list.push(inner);
+        outer_list.push(inner_block);
         outer_list.push(br_outer);
-        builder.block(Some("outer"), outer_list, Type::NONE)
+        builder.arena[outer_block].kind = ExpressionKind::Block {
+            name: Some("outer".to_string()),
+            list: outer_list,
+        };
+        outer_block
     };
 
     module.add_function(Function::new(
@@ -4475,8 +4519,19 @@ fn test_loop_with_break_to_continue() {
     // break to loop label continues the loop
     let body = {
         let mut builder = IrBuilder::new(&mut module.expressions);
-        let br = builder.break_("loop", None, None, Type::NONE);
-        builder.loop_(Some("loop"), br, Type::NONE)
+        let loop_expr = builder.arena.alloc(Expression {
+            kind: ExpressionKind::Nop,
+            type_: Type::NONE,
+        });
+
+        let br = builder.break_(loop_expr, None, None, Type::NONE);
+
+        builder.arena[loop_expr].kind = ExpressionKind::Loop {
+            name: Some("loop".to_string()),
+            body: br,
+        };
+        builder.arena[loop_expr].type_ = Type::NONE;
+        loop_expr
     };
 
     module.add_function(Function::new(
@@ -4506,11 +4561,22 @@ fn test_loop_with_exit_block() {
     // break to outer block exits the loop
     let body = {
         let mut builder = IrBuilder::new(&mut module.expressions);
-        let br = builder.break_("exit", None, None, Type::NONE);
+        let exit_block = builder.arena.alloc(Expression {
+            kind: ExpressionKind::Nop,
+            type_: Type::NONE,
+        });
+
+        let br = builder.break_(exit_block, None, None, Type::NONE);
         let loop_body = builder.loop_(Some("loop"), br, Type::NONE);
         let mut block_list = vec![];
         block_list.push(loop_body);
-        builder.block(Some("exit"), block_list, Type::NONE)
+
+        builder.arena[exit_block].kind = ExpressionKind::Block {
+            name: Some("exit".to_string()),
+            list: block_list,
+        };
+        builder.arena[exit_block].type_ = Type::NONE;
+        exit_block
     };
 
     module.add_function(Function::new(

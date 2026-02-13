@@ -149,7 +149,7 @@ impl<'a> Flattener<'a> {
             // but they do have preludes which we need to set up in the right place
             let mut kind = std::mem::replace(&mut arena[original_id].kind, ExpressionKind::Nop);
             match &mut kind {
-                ExpressionKind::Block { name, list } => {
+                ExpressionKind::Block { name: _, list } => {
                     let mut new_list = Vec::new();
                     for item in list.iter() {
                         if let Some(item_preludes) = self.preludes.remove(item) {
