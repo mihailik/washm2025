@@ -1,7 +1,6 @@
 use crate::ir::annotation::Annotation;
 use crate::ir::expression::{ExpressionId, ExpressionKind};
 use crate::ir::module::{FunctionKind, Module};
-use crate::ir::visitor::ReadOnlyVisitor;
 use std::collections::HashMap;
 
 pub struct ExpressionRecombination;
@@ -11,14 +10,14 @@ impl ExpressionRecombination {
         for (_, func) in module.functions.iter_mut() {
             if let FunctionKind::Local { body, .. } = &func.kind {
                 let mut analyzer = UsageAnalyzer::new();
-                analyzer.visit(*body, &module.expressions);
+                analyzer.visit(*body, &module.expressions, &module.annotations);
 
                 let mut inliner = Inliner {
                     annotations: &mut module.annotations,
                     expressions: &module.expressions,
                     analyzer,
                 };
-                inliner.process(*body);
+                inliner.process(*body, false);
             }
         }
     }
@@ -38,16 +37,15 @@ impl UsageAnalyzer {
             last_set: HashMap::new(),
         }
     }
-}
 
-impl ReadOnlyVisitor for UsageAnalyzer {
-    fn visit_expression(
+    fn visit(
         &mut self,
         expr_id: ExpressionId,
         arena: &crate::collections::id_arena::IdArena<
             crate::ir::expression::ExpressionMarker,
             crate::ir::expression::Expression,
         >,
+        annotations: &crate::ir::annotation::AnnotationStore,
     ) {
         match &arena[expr_id].kind {
             ExpressionKind::LocalSet { id, .. } | ExpressionKind::LocalTee { id, .. } => {
@@ -59,6 +57,9 @@ impl ReadOnlyVisitor for UsageAnalyzer {
             }
             _ => {}
         }
+        arena[expr_id]
+            .kind
+            .for_each_child(|child_id| self.visit(child_id, arena, annotations));
     }
 }
 
@@ -72,11 +73,69 @@ struct Inliner<'a> {
 }
 
 impl<'a> Inliner<'a> {
-    fn process(&mut self, expr_id: ExpressionId) {
-        self.annotate(expr_id);
+    fn process(&mut self, expr_id: ExpressionId, in_condition: bool) {
+        if !in_condition {
+            self.annotate(expr_id);
+        }
 
         let expr = &self.expressions[expr_id];
-        expr.kind.for_each_child(|child_id| self.process(child_id));
+        match &expr.kind {
+            ExpressionKind::If {
+                condition,
+                if_true,
+                if_false,
+                ..
+            } => {
+                self.process(*condition, true);
+                self.process(*if_true, false);
+                if let Some(f) = if_false {
+                    self.process(*f, false);
+                }
+            }
+            ExpressionKind::Break {
+                condition, value, ..
+            } => {
+                if let Some(c) = condition {
+                    self.process(*c, true);
+                }
+                if let Some(v) = value {
+                    self.process(*v, false);
+                }
+            }
+            ExpressionKind::Switch {
+                condition, value, ..
+            } => {
+                self.process(*condition, true);
+                if let Some(v) = value {
+                    self.process(*v, false);
+                }
+            }
+            ExpressionKind::Select {
+                condition,
+                if_true,
+                if_false,
+            } => {
+                self.process(*condition, true);
+                self.process(*if_true, false);
+                self.process(*if_false, false);
+            }
+            ExpressionKind::Block { list, .. } => {
+                if let Some((condition, _)) = self.annotations.get_if_info(expr_id) {
+                    self.process(condition, true);
+                    for &child in list.iter().skip(1) {
+                        self.process(child, false);
+                    }
+                } else {
+                    for &child in list {
+                        self.process(child, false);
+                    }
+                }
+            }
+            _ => {
+                expr.kind
+                    .for_each_child(|child_id| self.process(child_id, in_condition));
+            }
+        }
     }
 
     fn annotate(&mut self, expr_id: ExpressionId) {

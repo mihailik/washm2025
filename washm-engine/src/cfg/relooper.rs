@@ -924,9 +924,7 @@ impl Relooper {
             }
         };
 
-        ret = self.handle_followup_multiples(
-            builder, label_var, ret, shape_id, in_loop, block_map, shape_map,
-        );
+        ret = self.handle_followup_multiples(builder, ret, shape_id, block_map);
 
         if let Some(next_id) = shape.next {
             let next_expr =
@@ -1301,12 +1299,9 @@ impl Relooper {
     fn handle_followup_multiples(
         &self,
         builder: &mut IrBuilder,
-        _label_var: LocalId,
         ret: ExpressionId,
         shape_id: ShapeId,
-        _in_loop: bool,
         block_map: &std::collections::HashMap<u32, ExpressionId>,
-        _shape_map: &std::collections::HashMap<u32, ExpressionId>,
     ) -> ExpressionId {
         let shape = self.shapes.get(shape_id).unwrap();
         if shape.next.is_none() {

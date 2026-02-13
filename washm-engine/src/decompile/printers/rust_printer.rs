@@ -367,18 +367,58 @@ impl<'m> RustPrinter<'m> {
                 self.output.push_str("if ");
                 self.walk_inline_expression(func, *condition);
                 self.output.push_str(" ");
-                self.walk_expression_ext(func, *if_true, false);
+
+                match &self.module.expressions[*if_true].kind {
+                    ExpressionKind::Block { list, .. } => {
+                        self.output.push_str("{\n");
+                        self.indent += 1;
+                        for &child in list {
+                            self.walk_expression_ext(func, child, true);
+                        }
+                        self.indent -= 1;
+                        self.write_indent();
+                        self.output.push_str("}");
+                    }
+                    _ => {
+                        self.output.push_str("{\n");
+                        self.indent += 1;
+                        self.walk_expression_ext(func, *if_true, true);
+                        self.indent -= 1;
+                        self.write_indent();
+                        self.output.push_str("}");
+                    }
+                }
+
                 if let Some(f) = if_false {
                     // Omit printing `else` when the branch is an explicit NOP
                     match &self.module.expressions[*f].kind {
                         ExpressionKind::Nop => {}
                         _ => {
-                            self.write_indent();
-                            self.output.push_str("else ");
-                            self.walk_expression_ext(func, *f, false);
+                            self.output.push_str(" else ");
+                            match &self.module.expressions[*f].kind {
+                                ExpressionKind::Block { list, .. } => {
+                                    self.output.push_str("{\n");
+                                    self.indent += 1;
+                                    for &child in list {
+                                        self.walk_expression_ext(func, child, true);
+                                    }
+                                    self.indent -= 1;
+                                    self.write_indent();
+                                    self.output.push_str("}");
+                                }
+                                _ => {
+                                    self.output.push_str("{\n");
+                                    self.indent += 1;
+                                    self.walk_expression_ext(func, *f, true);
+                                    self.indent -= 1;
+                                    self.write_indent();
+                                    self.output.push_str("}");
+                                }
+                            }
                         }
                     }
                 }
+                self.output.push_str("\n");
             }
             ExpressionKind::Loop { name, body } => {
                 if let Some(n) = name {
@@ -415,18 +455,23 @@ impl<'m> RustPrinter<'m> {
                 if let Some(cond) = condition {
                     self.output.push_str("if ");
                     self.walk_inline_expression(func, *cond);
-                    self.output.push_str(" {");
+                    self.output.push_str(" {\n");
+                    self.indent += 1;
+                    self.write_indent();
                     if let Some(v) = value {
-                        self.output.push_str(" /* break with value: ");
+                        self.output.push_str("/* break with value: ");
                         self.walk_inline_expression(func, *v);
-                        self.output.push_str(" */");
+                        self.output.push_str(" */;\n");
+                        self.write_indent();
                     }
                     if let Some(n) = target_name {
-                        self.output.push_str(&format!(" {} '{};", keyword, n));
+                        self.output.push_str(&format!("{} '{};\n", keyword, n));
                     } else {
-                        self.output.push_str(&format!(" {};", keyword));
+                        self.output.push_str(&format!("{};\n", keyword));
                     }
-                    self.output.push_str(" }\n");
+                    self.indent -= 1;
+                    self.write_indent();
+                    self.output.push_str("}\n");
                 } else {
                     if let Some(v) = value {
                         self.output.push_str("/* break with value: ");

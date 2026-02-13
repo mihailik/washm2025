@@ -247,44 +247,10 @@ impl<'a> CFGBuilder<'a> {
     }
 
     fn visit_children(&mut self, expr_id: ExpressionId) {
-        match &self.arena[expr_id].kind {
-            ExpressionKind::Unary { value, .. }
-            | ExpressionKind::LocalSet { value, .. }
-            | ExpressionKind::LocalTee { value, .. }
-            | ExpressionKind::GlobalSet { value, .. }
-            | ExpressionKind::Load { ptr: value, .. }
-            | ExpressionKind::MemoryGrow { delta: value, .. } => {
-                self.visit(*value);
-            }
-            ExpressionKind::Binary { left, right, .. }
-            | ExpressionKind::Store {
-                ptr: left,
-                value: right,
-                ..
-            } => {
-                self.visit(*left);
-                self.visit(*right);
-            }
-            ExpressionKind::Call { operands, .. }
-            | ExpressionKind::CallIndirect { operands, .. } => {
-                for &op in operands {
-                    self.visit(op);
-                }
-            }
-            ExpressionKind::Select {
-                if_true,
-                if_false,
-                condition,
-            } => {
-                self.visit(*if_true);
-                self.visit(*if_false);
-                self.visit(*condition);
-            }
-            ExpressionKind::Drop { value } => {
-                self.visit(*value);
-            }
-            _ => {}
-        }
+        let kind = self.arena[expr_id].kind.clone();
+        kind.for_each_child(|child| {
+            self.visit(child);
+        });
     }
 }
 

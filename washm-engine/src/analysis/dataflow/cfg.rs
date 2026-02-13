@@ -336,20 +336,39 @@ impl<'a> CFGBuilder<'a> {
                 let dead = self.cfg.add_block();
                 self.current_block = dead;
             }
-            ExpressionKind::Call { operands, .. }
-            | ExpressionKind::CallIndirect { operands, .. } => {
-                for op in operands {
-                    self.visit(*op);
+            ExpressionKind::Switch {
+                targets,
+                default,
+                condition,
+                value,
+            } => {
+                self.visit(*condition);
+                if let Some(v) = value {
+                    self.visit(*v);
                 }
+                for t in targets.iter().chain(std::iter::once(default)) {
+                    if let Some(target_block) = self.find_break_target(*t) {
+                        self.add_edge(self.current_block, target_block);
+                    }
+                }
+                let dead = self.cfg.add_block();
+                self.current_block = dead;
             }
-            ExpressionKind::Drop { value } => self.visit(*value),
-            ExpressionKind::Unary { value, .. } => self.visit(*value),
-            ExpressionKind::Binary { left, right, .. } => {
-                self.visit(*left);
-                self.visit(*right);
+            _ => {
+                let kind = self.arena[expr_id].kind.clone();
+                kind.for_each_child(|child| {
+                    self.visit(child);
+                });
             }
-            ExpressionKind::Const(_) | ExpressionKind::Nop | ExpressionKind::Unreachable => {}
-            _ => {}
+        }
+    }
+
+    fn add_edge(&mut self, from: usize, to: usize) {
+        if !self.cfg.blocks[from].succs.contains(&to) {
+            self.cfg.blocks[from].succs.push(to);
+        }
+        if !self.cfg.blocks[to].preds.contains(&from) {
+            self.cfg.blocks[to].preds.push(from);
         }
     }
 

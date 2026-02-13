@@ -342,19 +342,27 @@ impl<'m> CPrinter<'m> {
             } => {
                 self.output.push_str("if (");
                 self.walk_inline_expression(func, *condition);
-                self.output.push_str(") ");
+                self.output.push_str(") {\n");
+                self.indent += 1;
                 self.walk_expression_ext(func, *if_true, true);
+                self.indent -= 1;
+                self.write_indent();
+                self.output.push_str("}");
                 if let Some(f) = if_false {
                     // Omit printing a pointless `else` when the branch is an explicit NOP
                     match &self.module.expressions[*f].kind {
                         ExpressionKind::Nop => {}
                         _ => {
-                            self.write_indent();
-                            self.output.push_str("else ");
+                            self.output.push_str(" else {\n");
+                            self.indent += 1;
                             self.walk_expression_ext(func, *f, true);
+                            self.indent -= 1;
+                            self.write_indent();
+                            self.output.push_str("}");
                         }
                     }
                 }
+                self.output.push_str("\n");
             }
             ExpressionKind::Loop { name, body } => {
                 if let Some(n) = name {

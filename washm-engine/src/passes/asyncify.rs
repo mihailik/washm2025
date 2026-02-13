@@ -425,7 +425,6 @@ pub struct ModuleAnalyzer {
     pub is_top_most_runtime: HashSet<FuncId>,
     pub is_bottom_most_runtime: HashSet<FuncId>,
     pub ignore_indirect: bool,
-    pub fake_call_globals: HashMap<Type, String>,
 }
 
 impl ModuleAnalyzer {
@@ -499,17 +498,11 @@ impl ModuleAnalyzer {
                 && !is_bottom_most_runtime.contains(&id)
         });
 
-        let mut fake_call_globals: HashMap<Type, String> = HashMap::new();
-        for ty in [Type::I32, Type::I64, Type::F32, Type::F64] {
-            fake_call_globals.insert(ty, format!("asyncify_fake_global_{}", ty));
-        }
-
         Self {
             can_change_state: final_can_change_state,
             is_top_most_runtime,
             is_bottom_most_runtime,
             ignore_indirect: config.ignore_indirect,
-            fake_call_globals,
         }
     }
 
@@ -1016,12 +1009,11 @@ impl<'a> AsyncifyLocals<'a> {
                 rewind_index_local,
                 unwind_index_local,
                 unwind_target: unwind_block_id,
-                _fake_globals: self.analyzer.fake_call_globals.clone(),
-                _fake_locals: HashMap::new(),
                 functions,
             };
-            let body = functions[self.func_id].body().unwrap();
-            new_inner_body = transformer.visit(body);
+            let mut body = functions[self.func_id].body().unwrap();
+            transformer.process(&mut body);
+            new_inner_body = body;
         }
 
         let func = &mut functions[self.func_id];
@@ -1187,63 +1179,58 @@ struct LocalTransformer<'a> {
     rewind_index_local: LocalId,
     unwind_index_local: LocalId,
     unwind_target: ExpressionId,
-    _fake_globals: HashMap<Type, String>,
-    _fake_locals: HashMap<Type, LocalId>,
     functions: &'a IdArena<FuncMarker, Function>,
 }
 
 impl<'a> LocalTransformer<'a> {
-    fn visit(&mut self, expr_id: ExpressionId) -> ExpressionId {
-        let kind = self.arena[expr_id].kind.clone();
-        let type_ = self.arena[expr_id].type_;
+    fn process(&mut self, expr_id: &mut ExpressionId) {
+        let kind = self.arena[*expr_id].kind.clone();
         match kind {
             ExpressionKind::Call {
                 target,
                 mut operands,
-                is_return,
+                is_return: _,
             } => {
                 let target_name = &self.functions[target].name;
                 if target_name == ASYNCIFY_UNWIND {
                     let mut builder = IrBuilder::new(self.arena);
                     let capture = builder.local_set(self.unwind_index_local, operands[0]);
                     let br = builder.break_(self.unwind_target, None, None, Type::UNREACHABLE);
-                    builder.block("", vec![capture, br], Type::UNREACHABLE)
+                    *expr_id = builder.block("", vec![capture, br], Type::UNREACHABLE);
                 } else if target_name == ASYNCIFY_CHECK_CALL_INDEX {
                     let mut builder = IrBuilder::new(self.arena);
                     let lget = builder.local_get(self.rewind_index_local, Type::I32);
-                    builder.binary(
+                    *expr_id = builder.binary(
                         crate::ir::ops::BinaryOp::EqInt32,
                         lget,
                         operands[0],
                         Type::I32,
-                    )
+                    );
                 } else if target_name == ASYNCIFY_GET_REWIND_INDEX {
                     let mut builder = IrBuilder::new(self.arena);
-                    builder.local_get(self.rewind_index_local, Type::I32)
+                    *expr_id = builder.local_get(self.rewind_index_local, Type::I32);
                 } else if target_name == ASYNCIFY_GET_CALL_INDEX {
                     let mut builder = IrBuilder::new(self.arena);
-                    builder.const_(Literal::I32(0))
+                    *expr_id = builder.const_(Literal::I32(0));
                 } else {
                     for op in operands.iter_mut() {
-                        *op = self.visit(*op);
+                        self.process(op);
                     }
-                    Expression::alloc(
-                        self.arena,
-                        ExpressionKind::Call {
-                            target,
-                            operands,
-                            is_return,
-                        },
-                        type_,
-                    )
+                    if let ExpressionKind::Call {
+                        operands: old_operands,
+                        ..
+                    } = &mut self.arena[*expr_id].kind
+                    {
+                        *old_operands = operands;
+                    }
                 }
             }
             _ => {
-                let mut new_kind = kind;
-                new_kind.for_each_child_mut(|child| {
-                    *child = self.visit(*child);
+                let mut kind = self.arena[*expr_id].kind.clone();
+                kind.for_each_child_mut(|child| {
+                    self.process(child);
                 });
-                Expression::alloc(self.arena, new_kind, type_)
+                self.arena[*expr_id].kind = kind;
             }
         }
     }
