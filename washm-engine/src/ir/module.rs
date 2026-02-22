@@ -354,6 +354,18 @@ impl Global {
     }
 }
 
+impl Memory {
+    pub fn is_import(&self) -> bool {
+        matches!(self.kind, MemoryKind::Import { .. })
+    }
+}
+
+impl Table {
+    pub fn is_import(&self) -> bool {
+        matches!(self.kind, TableKind::Import { .. })
+    }
+}
+
 impl GlobalKind {
     pub fn set_init(&mut self, new_init: ExpressionId) {
         if let GlobalKind::Local { init } = self {
@@ -452,6 +464,13 @@ impl Module {
         Self::default()
     }
 
+    pub fn builder(&mut self) -> crate::ir::expression::IrBuilder<'_> {
+        crate::ir::expression::IrBuilder::with_annotations(
+            &mut self.expressions,
+            &mut self.annotations,
+        )
+    }
+
     pub fn parts_mut(
         &mut self,
     ) -> (
@@ -467,7 +486,7 @@ impl Module {
         &mut IdArena<DataMarker, DataSegment>,
         &mut IdArena<TagMarker, Tag>,
         &mut Vec<String>,
-        &mut Vec<()>,
+        &mut AnnotationStore,
     ) {
         (
             &mut self.expressions,
@@ -482,7 +501,7 @@ impl Module {
             &mut self.data,
             &mut self.tags,
             &mut self.strings,
-            &mut self.recgroups,
+            &mut self.annotations,
         )
     }
 

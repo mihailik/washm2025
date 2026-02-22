@@ -181,6 +181,8 @@ impl ReadOnlyVisitor for CostCalculator {
             }
             _ => {}
         }
+
+        self.visit_children(expr_id, arena);
     }
 }
 

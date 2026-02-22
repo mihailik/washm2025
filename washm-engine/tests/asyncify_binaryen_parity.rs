@@ -114,6 +114,7 @@ fn test_asyncify_binaryen_sleep_parity() {
                     self.found = true;
                 }
             }
+            self.visit_children(expr_id, arena);
         }
     }
 

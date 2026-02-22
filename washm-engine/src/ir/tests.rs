@@ -234,10 +234,11 @@ struct CountVisitor {
 impl Visitor for CountVisitor {
     fn visit_expression(
         &mut self,
-        _expr: &mut ExpressionId,
-        _arena: &mut IdArena<ExpressionMarker, Expression>,
+        expr: &mut ExpressionId,
+        arena: &mut IdArena<ExpressionMarker, Expression>,
     ) {
         self.count += 1;
+        self.visit_children(expr, arena);
     }
 }
 

@@ -884,20 +884,57 @@ impl LabelName for Option<&str> {
 
 pub struct IrBuilder<'a> {
     pub arena: &'a mut IdArena<ExpressionMarker, Expression>,
+    pub annotations: Option<&'a mut crate::ir::annotation::AnnotationStore>,
+    pub current_location: Option<crate::ir::annotation::DebugLocation>,
 }
 
 impl<'a> IrBuilder<'a> {
     pub fn new(arena: &'a mut IdArena<ExpressionMarker, Expression>) -> Self {
-        Self { arena }
+        Self {
+            arena,
+            annotations: None,
+            current_location: None,
+        }
+    }
+
+    pub fn with_annotations(
+        arena: &'a mut IdArena<ExpressionMarker, Expression>,
+        annotations: &'a mut crate::ir::annotation::AnnotationStore,
+    ) -> Self {
+        Self {
+            arena,
+            annotations: Some(annotations),
+            current_location: None,
+        }
+    }
+
+    pub fn set_location(&mut self, location: Option<crate::ir::annotation::DebugLocation>) {
+        self.current_location = location;
+    }
+
+    pub fn copy_location(&mut self, other: ExpressionId) {
+        if let Some(annotations) = &self.annotations {
+            self.current_location = annotations.get_location(other);
+        }
+    }
+
+    fn alloc(&mut self, kind: ExpressionKind, type_: Type) -> ExpressionId {
+        let id = self.arena.alloc(Expression { type_, kind });
+        if let Some(location) = self.current_location {
+            if let Some(annotations) = &mut self.annotations {
+                annotations.set_location(id, location);
+            }
+        }
+        id
     }
 
     pub fn nop(&mut self) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::Nop, Type::NONE)
+        self.alloc(ExpressionKind::Nop, Type::NONE)
     }
 
     pub fn const_(&mut self, value: Literal) -> ExpressionId {
         let type_ = value.get_type();
-        Expression::alloc(self.arena, ExpressionKind::Const(value), type_)
+        self.alloc(ExpressionKind::Const(value), type_)
     }
 
     pub fn block(
@@ -912,15 +949,11 @@ impl<'a> IrBuilder<'a> {
             BlockType::Empty => Type::NONE,
             BlockType::Type(t) => t,
         };
-        Expression::alloc(
-            self.arena,
-            ExpressionKind::Block { name, list },
-            actual_type,
-        )
+        self.alloc(ExpressionKind::Block { name, list }, actual_type)
     }
 
     pub fn unary(&mut self, op: UnaryOp, value: ExpressionId, type_: Type) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::Unary { op, value }, type_)
+        self.alloc(ExpressionKind::Unary { op, value }, type_)
     }
 
     pub fn binary(
@@ -930,15 +963,11 @@ impl<'a> IrBuilder<'a> {
         right: ExpressionId,
         type_: Type,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
-            ExpressionKind::Binary { op, left, right },
-            type_,
-        )
+        self.alloc(ExpressionKind::Binary { op, left, right }, type_)
     }
 
     pub fn drop(&mut self, value: ExpressionId) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::Drop { value }, Type::NONE)
+        self.alloc(ExpressionKind::Drop { value }, Type::NONE)
     }
 
     pub fn call(
@@ -948,8 +977,7 @@ impl<'a> IrBuilder<'a> {
         type_: Type,
         is_return: bool,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::Call {
                 target: target.into(),
                 operands,
@@ -967,8 +995,7 @@ impl<'a> IrBuilder<'a> {
         type_id: TypeId,
         type_: Type,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::CallIndirect {
                 table: table.into(),
                 target,
@@ -980,16 +1007,11 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn local_get(&mut self, id: impl Into<LocalId>, type_: Type) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
-            ExpressionKind::LocalGet { id: id.into() },
-            type_,
-        )
+        self.alloc(ExpressionKind::LocalGet { id: id.into() }, type_)
     }
 
     pub fn local_set(&mut self, id: impl Into<LocalId>, value: ExpressionId) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::LocalSet {
                 id: id.into(),
                 value,
@@ -1004,8 +1026,7 @@ impl<'a> IrBuilder<'a> {
         value: ExpressionId,
         type_: Type,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::LocalTee {
                 id: id.into(),
                 value,
@@ -1015,16 +1036,11 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn global_get(&mut self, id: impl Into<GlobalId>, type_: Type) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
-            ExpressionKind::GlobalGet { id: id.into() },
-            type_,
-        )
+        self.alloc(ExpressionKind::GlobalGet { id: id.into() }, type_)
     }
 
     pub fn global_set(&mut self, id: impl Into<GlobalId>, value: ExpressionId) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::GlobalSet {
                 id: id.into(),
                 value,
@@ -1040,8 +1056,7 @@ impl<'a> IrBuilder<'a> {
         condition: ExpressionId,
         value: Option<ExpressionId>,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::Switch {
                 targets,
                 default,
@@ -1066,8 +1081,7 @@ impl<'a> IrBuilder<'a> {
             BlockType::Empty => Type::NONE,
             BlockType::Type(t) => t,
         };
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::If {
                 name,
                 condition,
@@ -1090,7 +1104,7 @@ impl<'a> IrBuilder<'a> {
             BlockType::Empty => Type::NONE,
             BlockType::Type(t) => t,
         };
-        Expression::alloc(self.arena, ExpressionKind::Loop { name, body }, actual_type)
+        self.alloc(ExpressionKind::Loop { name, body }, actual_type)
     }
 
     pub fn break_(
@@ -1100,8 +1114,7 @@ impl<'a> IrBuilder<'a> {
         value: Option<ExpressionId>,
         type_: Type,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::Break {
                 target,
                 condition,
@@ -1122,8 +1135,7 @@ impl<'a> IrBuilder<'a> {
         ptr: ExpressionId,
         type_: Type,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::Load {
                 memory: memory.into(),
                 bytes,
@@ -1145,8 +1157,7 @@ impl<'a> IrBuilder<'a> {
         ptr: ExpressionId,
         value: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::Store {
                 memory: memory.into(),
                 bytes,
@@ -1160,20 +1171,15 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn return_(&mut self, value: Option<ExpressionId>) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
-            ExpressionKind::Return { value },
-            Type::UNREACHABLE,
-        )
+        self.alloc(ExpressionKind::Return { value }, Type::UNREACHABLE)
     }
 
     pub fn unreachable(&mut self) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::Unreachable, Type::UNREACHABLE)
+        self.alloc(ExpressionKind::Unreachable, Type::UNREACHABLE)
     }
 
     pub fn memory_size(&mut self, memory: impl Into<MemoryId>) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::MemorySize {
                 memory: memory.into(),
             },
@@ -1188,8 +1194,7 @@ impl<'a> IrBuilder<'a> {
         if_false: ExpressionId,
         type_: Type,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::Select {
                 condition,
                 if_true,
@@ -1204,8 +1209,7 @@ impl<'a> IrBuilder<'a> {
         memory: impl Into<MemoryId>,
         delta: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::MemoryGrow {
                 memory: memory.into(),
                 delta,
@@ -1225,8 +1229,7 @@ impl<'a> IrBuilder<'a> {
         value: ExpressionId,
         type_: Type,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::AtomicRMW {
                 memory,
                 op,
@@ -1250,8 +1253,7 @@ impl<'a> IrBuilder<'a> {
         replacement: ExpressionId,
         type_: Type,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::AtomicCmpxchg {
                 memory,
                 bytes,
@@ -1272,8 +1274,7 @@ impl<'a> IrBuilder<'a> {
         timeout: ExpressionId,
         expected_type: Type,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::AtomicWait {
                 memory,
                 ptr,
@@ -1291,15 +1292,14 @@ impl<'a> IrBuilder<'a> {
         ptr: ExpressionId,
         count: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::AtomicNotify { memory, ptr, count },
             Type::I32,
         )
     }
 
     pub fn atomic_fence(&mut self) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::AtomicFence, Type::NONE)
+        self.alloc(ExpressionKind::AtomicFence, Type::NONE)
     }
 
     pub fn memory_init(
@@ -1310,8 +1310,7 @@ impl<'a> IrBuilder<'a> {
         offset: ExpressionId,
         size: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::MemoryInit {
                 memory,
                 segment,
@@ -1324,7 +1323,7 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn data_drop(&mut self, segment: DataId) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::DataDrop { segment }, Type::NONE)
+        self.alloc(ExpressionKind::DataDrop { segment }, Type::NONE)
     }
 
     pub fn memory_copy(
@@ -1335,8 +1334,7 @@ impl<'a> IrBuilder<'a> {
         src: ExpressionId,
         size: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::MemoryCopy {
                 dest_memory,
                 src_memory,
@@ -1355,8 +1353,7 @@ impl<'a> IrBuilder<'a> {
         value: ExpressionId,
         size: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::MemoryFill {
                 memory,
                 dest,
@@ -1368,7 +1365,7 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn table_get(&mut self, table: TableId, index: ExpressionId, type_: Type) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::TableGet { table, index }, type_)
+        self.alloc(ExpressionKind::TableGet { table, index }, type_)
     }
 
     pub fn table_set(
@@ -1377,8 +1374,7 @@ impl<'a> IrBuilder<'a> {
         index: ExpressionId,
         value: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::TableSet {
                 table,
                 index,
@@ -1389,7 +1385,7 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn table_size(&mut self, table: TableId) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::TableSize { table }, Type::I32)
+        self.alloc(ExpressionKind::TableSize { table }, Type::I32)
     }
 
     pub fn table_grow(
@@ -1398,8 +1394,7 @@ impl<'a> IrBuilder<'a> {
         delta: ExpressionId,
         value: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::TableGrow {
                 table,
                 delta,
@@ -1416,8 +1411,7 @@ impl<'a> IrBuilder<'a> {
         value: ExpressionId,
         size: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::TableFill {
                 table,
                 dest,
@@ -1436,8 +1430,7 @@ impl<'a> IrBuilder<'a> {
         src: ExpressionId,
         size: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::TableCopy {
                 dest_table,
                 src_table,
@@ -1457,8 +1450,7 @@ impl<'a> IrBuilder<'a> {
         offset: ExpressionId,
         size: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::TableInit {
                 table,
                 segment,
@@ -1471,7 +1463,7 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn elem_drop(&mut self, segment: ElementId) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::ElemDrop { segment }, Type::NONE)
+        self.alloc(ExpressionKind::ElemDrop { segment }, Type::NONE)
     }
 
     pub fn simd_extract(
@@ -1481,11 +1473,7 @@ impl<'a> IrBuilder<'a> {
         index: u8,
         type_: Type,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
-            ExpressionKind::SIMDExtract { op, vec, index },
-            type_,
-        )
+        self.alloc(ExpressionKind::SIMDExtract { op, vec, index }, type_)
     }
 
     pub fn simd_replace(
@@ -1495,8 +1483,7 @@ impl<'a> IrBuilder<'a> {
         index: u8,
         value: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::SIMDReplace {
                 op,
                 vec,
@@ -1513,8 +1500,7 @@ impl<'a> IrBuilder<'a> {
         right: ExpressionId,
         mask: [u8; 16],
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::SIMDShuffle { left, right, mask },
             Type::V128,
         )
@@ -1527,11 +1513,7 @@ impl<'a> IrBuilder<'a> {
         b: ExpressionId,
         c: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
-            ExpressionKind::SIMDTernary { op, a, b, c },
-            Type::V128,
-        )
+        self.alloc(ExpressionKind::SIMDTernary { op, a, b, c }, Type::V128)
     }
 
     pub fn simd_shift(
@@ -1540,11 +1522,7 @@ impl<'a> IrBuilder<'a> {
         vec: ExpressionId,
         shift: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
-            ExpressionKind::SIMDShift { op, vec, shift },
-            Type::V128,
-        )
+        self.alloc(ExpressionKind::SIMDShift { op, vec, shift }, Type::V128)
     }
 
     pub fn simd_load(
@@ -1554,8 +1532,7 @@ impl<'a> IrBuilder<'a> {
         align: u32,
         ptr: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::SIMDLoad {
                 op,
                 offset,
@@ -1567,39 +1544,31 @@ impl<'a> IrBuilder<'a> {
     }
 
     pub fn ref_null(&mut self, type_: Type) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::RefNull { type_ }, type_)
+        self.alloc(ExpressionKind::RefNull { type_ }, type_)
     }
 
     pub fn ref_is_null(&mut self, value: ExpressionId) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::RefIsNull { value }, Type::I32)
+        self.alloc(ExpressionKind::RefIsNull { value }, Type::I32)
     }
 
     pub fn ref_func(&mut self, func: FuncId) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::RefFunc { func }, Type::FUNCREF)
+        self.alloc(ExpressionKind::RefFunc { func }, Type::FUNCREF)
     }
 
     pub fn ref_eq(&mut self, left: ExpressionId, right: ExpressionId) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::RefEq { left, right }, Type::I32)
+        self.alloc(ExpressionKind::RefEq { left, right }, Type::I32)
     }
 
     pub fn i31_new(&mut self, value: ExpressionId) -> ExpressionId {
-        Expression::alloc(self.arena, ExpressionKind::I31New { value }, Type::I31REF)
+        self.alloc(ExpressionKind::I31New { value }, Type::I31REF)
     }
 
     pub fn i31_get(&mut self, i31: ExpressionId, signed: bool) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
-            ExpressionKind::I31Get { i31, signed },
-            Type::I32,
-        )
+        self.alloc(ExpressionKind::I31Get { i31, signed }, Type::I32)
     }
 
     pub fn struct_new(&mut self, type_: Type, operands: Vec<ExpressionId>) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
-            ExpressionKind::StructNew { type_, operands },
-            type_,
-        )
+        self.alloc(ExpressionKind::StructNew { type_, operands }, type_)
     }
 
     pub fn struct_get(
@@ -1610,8 +1579,7 @@ impl<'a> IrBuilder<'a> {
         signed: bool,
         field_type: Type,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::StructGet {
                 type_,
                 ptr,
@@ -1629,8 +1597,7 @@ impl<'a> IrBuilder<'a> {
         index: u32,
         value: ExpressionId,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
+        self.alloc(
             ExpressionKind::StructSet {
                 type_,
                 ptr,
@@ -1647,11 +1614,7 @@ impl<'a> IrBuilder<'a> {
         size: ExpressionId,
         init: Option<ExpressionId>,
     ) -> ExpressionId {
-        Expression::alloc(
-            self.arena,
-            ExpressionKind::ArrayNew { type_, size, init },
-            type_,
-        )
+        self.alloc(ExpressionKind::ArrayNew { type_, size, init }, type_)
     }
 
     pub fn array_get(

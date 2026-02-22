@@ -78,7 +78,29 @@ impl UsageTracker {
             }
         }
 
-        // 3. Finalize segments based on memory/table preservation
+        // 3. Mark all imports as used seeds
+        for (id, func) in module.functions.iter() {
+            if func.is_import() {
+                tracker.mark_func(id);
+            }
+        }
+        for (id, global) in module.globals.iter() {
+            if global.is_import() {
+                tracker.mark_global(id);
+            }
+        }
+        for (id, memory) in module.memories.iter() {
+            if memory.is_import() {
+                tracker.memories.insert(id);
+            }
+        }
+        for (id, table) in module.tables.iter() {
+            if table.is_import() {
+                tracker.tables.insert(id);
+            }
+        }
+
+        // 4. Finalize segments based on memory/table preservation
         if !tracker.memories.is_empty() {
             for (id, _) in module.data.iter() {
                 tracker.data_segments.insert(id);
