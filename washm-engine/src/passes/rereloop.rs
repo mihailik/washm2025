@@ -16,7 +16,6 @@ impl Pass for Rereloop {
     }
 
     fn run(&mut self, module: &mut Module) {
-        println!("PASS: Rereloop");
         let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
         for (_, func) in functions {
             if let crate::ir::module::FunctionKind::Local { body, .. } = &func.kind {
@@ -78,6 +77,7 @@ struct ReReloopContext<'a> {
     relooper: Relooper,
     curr_cfg_block: Option<RelooperBlockId>,
     break_targets: HashMap<ExpressionId, RelooperBlockId>,
+    loop_targets: HashMap<ExpressionId, (RelooperBlockId, RelooperBlockId)>,
     label_counts: HashMap<ExpressionId, usize>,
     stack: Vec<Task>,
     exit_block: Option<RelooperBlockId>,
@@ -90,6 +90,7 @@ impl<'a> ReReloopContext<'a> {
             relooper: Relooper::new(),
             curr_cfg_block: None,
             break_targets: HashMap::new(),
+            loop_targets: HashMap::new(),
             label_counts: HashMap::new(),
             stack: Vec::new(),
             exit_block: None,
@@ -134,11 +135,14 @@ impl<'a> ReReloopContext<'a> {
 
             let expr_kind = self.builder.arena.get(curr_id).unwrap().kind.clone();
             match &expr_kind {
-                ExpressionKind::Block { .. }
-                | ExpressionKind::Loop { .. }
-                | ExpressionKind::If { .. } => {
+                ExpressionKind::Block { .. } | ExpressionKind::If { .. } => {
                     let l = self.make_cfg_block();
                     self.break_targets.insert(curr_id, l);
+                }
+                ExpressionKind::Loop { .. } => {
+                    let top = self.make_cfg_block();
+                    let bottom = self.make_cfg_block();
+                    self.loop_targets.insert(curr_id, (top, bottom));
                 }
                 _ => {}
             }
@@ -241,15 +245,10 @@ impl<'a> ReReloopContext<'a> {
             }
             ExpressionKind::Loop { body, .. } => {
                 let before = self.curr_cfg_block.unwrap();
-                let top = if let Some(&t) = self.break_targets.get(&expr_id) {
-                    t
-                } else {
-                    self.start_cfg_block()
-                };
+                let (top, after) = *self.loop_targets.get(&expr_id).unwrap();
                 self.set_curr_cfg_block(top);
                 self.add_branch(before, top, None);
 
-                let after = self.make_cfg_block();
                 self.stack.push(Task::BlockJoin { later: after });
                 self.stack.push(Task::Triage(body));
             }
@@ -273,15 +272,24 @@ impl<'a> ReReloopContext<'a> {
                 let before = self.curr_cfg_block.unwrap();
                 let target = match self.break_targets.get(&target_id) {
                     Some(&t) => t,
-                    None => self.get_exit_block(),
+                    None => match self.loop_targets.get(&target_id) {
+                        Some(&(top, _bottom)) => {
+                            // Loop targets: Break always targets bottom.
+                            // Continue (back-edge) is handled by the Relooper's solipsization automatically
+                            // if it detects a backward jump to the loop entry (TOP).
+                            // However, in our IR, 'Break' with no condition to a loop is a 'continue'.
+                            top
+                        }
+                        None => self.get_exit_block(),
+                    },
                 };
                 if let Some(cond) = condition {
                     let next = self.make_cfg_block();
-                    self.relooper.add_branch(before, target, Some(cond), None);
-                    self.relooper.add_branch(before, next, None, None);
+                    self.add_branch(before, target, Some(cond));
+                    self.add_branch(before, next, None);
                     self.set_curr_cfg_block(next);
                 } else {
-                    self.relooper.add_branch(before, target, None, None);
+                    self.add_branch(before, target, None);
                     self.stop_control_flow();
                 }
             }

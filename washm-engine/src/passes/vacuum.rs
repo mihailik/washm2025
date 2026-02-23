@@ -14,7 +14,6 @@ impl Pass for Vacuum {
     }
 
     fn run(&mut self, module: &mut Module) {
-        println!("PASS: Vacuum");
         let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
         let mut optimizer = VacuumOptimizer {
             arena,
@@ -501,6 +500,14 @@ impl<'a> VacuumOptimizer<'a> {
                 if matches!(self.arena[if_true].kind, ExpressionKind::Nop) {
                     if let Some(f) = if_false.take() {
                         if_true = f;
+                        // Invert condition
+                        condition = self.arena.alloc(Expression::new(
+                            ExpressionKind::Unary {
+                                op: crate::ir::ops::UnaryOp::EqZInt32,
+                                value: condition,
+                            },
+                            Type::I32,
+                        ));
                     }
                 }
 

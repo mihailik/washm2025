@@ -57,17 +57,35 @@ impl<'m> CPrinter<'m> {
 
     fn is_last_in_func(&self, func: &Function, expr_id: ExpressionId) -> bool {
         if let FunctionKind::Local { body, .. } = &func.kind {
-            if *body == expr_id {
-                return true;
-            }
-            // Check if it's the last expression in the top-level block
-            match &self.module.expressions[*body].kind {
-                ExpressionKind::Block { list, .. } => list.last() == Some(&expr_id),
-                _ => false,
-            }
+            self.is_last_in_expr(*body, expr_id)
         } else {
             false
         }
+    }
+
+    fn is_last_in_expr(&self, parent: ExpressionId, expr_id: ExpressionId) -> bool {
+        if parent == expr_id {
+            return true;
+        }
+        match &self.module.expressions[parent].kind {
+            ExpressionKind::Block { list, .. } => {
+                if let Some(&last) = list.last() {
+                    return self.is_last_in_expr(last, expr_id);
+                }
+            }
+            ExpressionKind::If { if_true, if_false, .. } => {
+                if self.is_last_in_expr(*if_true, expr_id) {
+                    return true;
+                }
+                if let Some(f) = if_false {
+                    if self.is_last_in_expr(*f, expr_id) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
     }
 
     pub fn print(&mut self) -> String {
@@ -212,10 +230,9 @@ impl<'m> CPrinter<'m> {
         }
 
         let expr = &self.module.expressions[expr_id];
-        let is_return =
-            is_statement && self.is_last_in_func(func, expr_id) && func.results != Type::NONE;
+        let is_return = self.is_last_in_func(func, expr_id) && func.results != Type::NONE;
 
-        if is_statement {
+        if is_statement || is_return {
             self.write_indent();
         }
 
@@ -277,8 +294,12 @@ impl<'m> CPrinter<'m> {
                 self.indent += 1;
 
                 let start_idx = if is_if { 1 } else { 0 };
-                for &child_id in list.iter().skip(start_idx) {
-                    self.walk_expression_ext(func, child_id, true);
+                let block_has_value = self.module.expressions[expr_id].type_ != Type::NONE
+                    && self.module.expressions[expr_id].type_ != Type::UNREACHABLE;
+                for (i, &child_id) in list.iter().enumerate().skip(start_idx) {
+                    let child_is_last = i == list.len() - 1;
+                    let child_is_statement = !(child_is_last && block_has_value);
+                    self.walk_expression_ext(func, child_id, child_is_statement);
                 }
 
                 self.indent -= 1;
@@ -478,32 +499,6 @@ impl<'m> CPrinter<'m> {
                 self.walk_inline_expression(func, *value);
                 self.output.push_str(";\n");
             }
-            ExpressionKind::Load {
-                ptr,
-                bytes: _,
-                signed: _,
-                offset: _,
-                align: _,
-                memory: _,
-            } => {
-                if is_statement {
-                    self.output.push_str("/* load */;\n");
-                } else {
-                    self.output.push_str("(");
-                    self.walk_inline_expression(func, *ptr);
-                    self.output.push_str(")");
-                }
-            }
-            ExpressionKind::GlobalGet { id } => {
-                if let Some(g) = self.module.globals.get(id.cast()) {
-                    self.output.push_str(&g.name);
-                } else {
-                    self.output.push_str(&format!("global_{}", id.index()));
-                }
-                if is_statement {
-                    self.output.push_str(";\n");
-                }
-            }
             ExpressionKind::GlobalSet { id, value } => {
                 if let Some(g) = self.module.globals.get(id.cast()) {
                     self.output.push_str(&format!("{} = ", g.name));
@@ -593,6 +588,20 @@ impl<'m> CPrinter<'m> {
             ExpressionKind::Drop { value } => {
                 self.walk_inline_expression(func, *value);
                 if is_statement {
+                    self.output.push_str(";\n");
+                }
+            }
+            ExpressionKind::Load { .. }
+            | ExpressionKind::GlobalGet { .. }
+            | ExpressionKind::LocalGet { .. }
+            | ExpressionKind::Binary { .. }
+            | ExpressionKind::Unary { .. }
+            | ExpressionKind::Const(_) => {
+                if is_return {
+                    self.output.push_str("return ");
+                }
+                self.walk_inline_expression(func, expr_id);
+                if is_statement || is_return {
                     self.output.push_str(";\n");
                 }
             }
@@ -716,11 +725,19 @@ impl<'m> CPrinter<'m> {
                     crate::ir::ops::UnaryOp::PopcntInt32 | crate::ir::ops::UnaryOp::PopcntInt64 => {
                         "popcnt"
                     }
+                    crate::ir::ops::UnaryOp::EqZInt32 | crate::ir::ops::UnaryOp::EqZInt64 => "!",
                     _ => "unary",
                 };
-                self.output.push_str(&format!("{}(", op_str));
-                self.walk_inline_expression(func, *value);
-                self.output.push_str(")");
+                if op_str == "!" {
+                    self.output.push_str("!");
+                    self.output.push_str("(");
+                    self.walk_inline_expression(func, *value);
+                    self.output.push_str(")");
+                } else {
+                    self.output.push_str(&format!("{}(", op_str));
+                    self.walk_inline_expression(func, *value);
+                    self.output.push_str(")");
+                }
             }
             ExpressionKind::LocalTee { id, value } => {
                 let name = self.get_local_name(func, *id, Some(expr_id));

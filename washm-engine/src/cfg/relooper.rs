@@ -247,64 +247,8 @@ impl Relooper {
         }
     }
 
-    fn skip_empty_blocks(&mut self, arena: &IdArena<ExpressionMarker, Expression>) -> bool {
-        let mut worked = false;
-        let block_ids: Vec<_> = self.blocks.iter().map(|(id, _)| id).collect();
-
-        for source_id in block_ids {
-            let mut changed = false;
-            let mut new_branches_out = HashMap::new();
-
-            // We need to clone or extract because we'll mutate self.blocks
-            let current_branches: Vec<_> = {
-                let block = self.blocks.get(source_id).unwrap();
-                block.branches_out.iter().map(|(&t, &b)| (t, b)).collect()
-            };
-
-            for (target_id, branch_id) in current_branches {
-                let mut replacement_id = target_id;
-                let mut seen = HashSet::new();
-                seen.insert(target_id);
-
-                while self.is_block_empty(replacement_id, arena) {
-                    let next_block = self.blocks.get(replacement_id).unwrap();
-                    if next_block.branches_out.len() == 1 {
-                        let (&next_next_id, &next_next_branch_id) =
-                            next_block.branches_out.iter().next().unwrap();
-                        let next_next_branch = self.branches.get(next_next_branch_id).unwrap();
-
-                        if next_next_branch.condition.is_none()
-                            && next_next_branch.code.is_none()
-                            && next_next_branch.switch_values.is_none()
-                        {
-                            if !seen.insert(next_next_id) {
-                                break;
-                            }
-                            replacement_id = next_next_id;
-                            changed = true;
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-
-                if replacement_id != target_id {
-                    worked = true;
-                }
-
-                // If collision, we just keep the existing branch ID (simple skip)
-                if !new_branches_out.contains_key(&replacement_id) {
-                    new_branches_out.insert(replacement_id, branch_id);
-                }
-            }
-
-            if changed {
-                self.blocks.get_mut(source_id).unwrap().branches_out = new_branches_out;
-            }
-        }
-        worked
+    fn skip_empty_blocks(&mut self, _arena: &IdArena<ExpressionMarker, Expression>) -> bool {
+        false
     }
 
     fn merge_consecutive_blocks(
@@ -337,7 +281,15 @@ impl Relooper {
                 continue;
             }
 
-            if num_predecessors.get(&target_id).copied().unwrap_or(0) == 1 {
+            let (num_out, has_switch) = {
+                let block = self.blocks.get(source_id).unwrap();
+                (block.branches_out.len(), block.switch_condition.is_some())
+            };
+
+            if num_out == 1
+                && !has_switch
+                && num_predecessors.get(&target_id).copied().unwrap_or(0) == 1
+            {
                 let branch = self.branches.get(branch_id).unwrap();
                 if branch.condition.is_some() {
                     continue;
@@ -491,20 +443,38 @@ impl Relooper {
         entries: HashSet<RelooperBlockId>,
         next_entries: &mut HashSet<RelooperBlockId>,
     ) -> ShapeId {
-        let mut inner_blocks = HashSet::new();
-        let mut queue: Vec<_> = entries.iter().cloned().collect();
+        let mut potential_reach = HashSet::new();
+        let mut f_queue: Vec<_> = entries.iter().cloned().collect();
 
-        while let Some(curr_id) = queue.pop() {
-            if !inner_blocks.contains(&curr_id) {
-                inner_blocks.insert(curr_id);
-                blocks.remove(&curr_id);
+        while let Some(curr_id) = f_queue.pop() {
+            if !potential_reach.contains(&curr_id) {
+                potential_reach.insert(curr_id);
                 let block = self.blocks.get(curr_id).unwrap();
-                for &prev_id in &block.branches_in {
-                    if blocks.contains(&prev_id) {
-                        queue.push(prev_id);
+                for &target_id in block.branches_out.keys() {
+                    if blocks.contains(&target_id) {
+                        f_queue.push(target_id);
                     }
                 }
             }
+        }
+
+        let mut inner_blocks = HashSet::new();
+        let mut b_queue: Vec<_> = entries.iter().cloned().collect();
+
+        while let Some(curr_id) = b_queue.pop() {
+            if !inner_blocks.contains(&curr_id) {
+                inner_blocks.insert(curr_id);
+                let block = self.blocks.get(curr_id).unwrap();
+                for &prev_id in &block.branches_in {
+                    if potential_reach.contains(&prev_id) {
+                        b_queue.push(prev_id);
+                    }
+                }
+            }
+        }
+
+        for &id in &inner_blocks {
+            blocks.remove(&id);
         }
 
         for &curr_id in &inner_blocks {
@@ -535,10 +505,12 @@ impl Relooper {
         });
         self.shape_id_counter += 1;
 
-        for &entry_id in &entries {
-            self.solipsize(entry_id, BranchType::Continue, shape_id, &inner_blocks);
+        for entry_id in &entries {
+            self.solipsize(*entry_id, BranchType::Continue, shape_id, &inner_blocks);
         }
-        let next_entries_vec: Vec<_> = next_entries.iter().cloned().collect();
+        let mut next_entries_vec: Vec<_> = next_entries.iter().cloned().collect();
+        // Sort to ensure deterministic output
+        next_entries_vec.sort();
         for &target_id in &next_entries_vec {
             self.solipsize(target_id, BranchType::Break, shape_id, &inner_blocks);
         }
@@ -1227,7 +1199,7 @@ impl Relooper {
         }
 
         if let Some(switch_cond) = switch_condition {
-            return self.render_switch(
+            let rendered = self.render_switch(
                 builder,
                 label_var,
                 block_id,
@@ -1240,6 +1212,7 @@ impl Relooper {
                 shape_map,
                 stop_at,
             );
+            return rendered;
         }
 
         let mut default_target_info = None;
@@ -1252,6 +1225,7 @@ impl Relooper {
         }
 
         let mut iter_targets: Vec<_> = processed_branches_out.keys().cloned().collect();
+        iter_targets.sort();
 
         let mut root = None;
         let mut curr_if: Option<ExpressionId> = None;
@@ -1294,9 +1268,11 @@ impl Relooper {
 
             if set_curr_label
                 || target_branch_type != BranchType::Direct
+                || target_branch_condition.is_some()
                 || has_fused_content
                 || target_branch_code.is_some()
             {
+                let is_in_if_chain = !is_default || remaining_conditions.is_some();
                 let mut content = self.render_branch(
                     builder,
                     label_var,
@@ -1305,6 +1281,7 @@ impl Relooper {
                     block_map,
                     shape_map,
                     set_curr_label,
+                    is_in_if_chain,
                 );
                 if has_fused_content {
                     let (fused_m_id, fused_map) = fused_info.as_ref().unwrap();
@@ -1393,11 +1370,7 @@ impl Relooper {
             // No root but has targets
         }
 
-        builder.block(
-            Some("RELOOPER_BLOCK_ROOT"),
-            list,
-            crate::ir::BlockType::Empty,
-        )
+        builder.block(None as Option<&str>, list, crate::ir::BlockType::Empty)
     }
 
     fn render_switch(
@@ -1504,6 +1477,7 @@ impl Relooper {
                     block_map,
                     shape_map,
                     set_curr_label,
+                    false, // multiple case is never a condition chain in this sense
                 );
                 if has_fused_content {
                     let (fused_m_id, fused_map) = fused_info.as_ref().unwrap();
@@ -1738,6 +1712,7 @@ impl Relooper {
         block_map: &std::collections::HashMap<u32, ExpressionId>,
         shape_map: &std::collections::HashMap<u32, ExpressionId>,
         set_label: bool,
+        is_in_if_chain: bool,
     ) -> ExpressionId {
         let (branch_code, branch_type, branch_ancestor) = {
             let branch = self.branches.get(branch_id).unwrap();
@@ -1758,7 +1733,19 @@ impl Relooper {
         }
 
         match branch_type {
-            BranchType::Direct => {}
+            BranchType::Direct => {
+                if is_in_if_chain {
+                    let br = builder.arena.alloc(Expression {
+                        kind: ExpressionKind::Break {
+                            target: target_expr_id,
+                            condition: None,
+                            value: None,
+                        },
+                        type_: Type::NONE,
+                    });
+                    list.push(br);
+                }
+            }
             BranchType::Break => {
                 let br = builder.arena.alloc(Expression {
                     kind: ExpressionKind::Break {
