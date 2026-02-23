@@ -1,3 +1,4 @@
+use crate::analysis::effects::EffectAnalyzer;
 use crate::ir::annotation::Annotation;
 use crate::ir::expression::{ExpressionId, ExpressionKind};
 use crate::ir::module::{FunctionKind, Module};
@@ -139,20 +140,34 @@ impl<'a> Inliner<'a> {
     }
 
     fn annotate(&mut self, expr_id: ExpressionId) {
-        if let ExpressionKind::LocalGet { id } = &self.expressions[expr_id].kind {
-            if self.analyzer.get_counts.get(id) == Some(&1)
-                && self.analyzer.set_counts.get(id) == Some(&1)
-            {
-                if let Some(&set_id) = self.analyzer.last_set.get(id) {
-                    if let ExpressionKind::LocalSet { value, .. }
-                    | ExpressionKind::LocalTee { value, .. } = &self.expressions[set_id].kind
-                    {
-                        self.annotations
-                            .insert(expr_id, Annotation::InlinedValue(*value));
-                        self.annotations.insert(set_id, Annotation::Inlined);
+        let expr = &self.expressions[expr_id];
+        match &expr.kind {
+            ExpressionKind::LocalGet { id } => {
+                if self.analyzer.get_counts.get(id) == Some(&1)
+                    && self.analyzer.set_counts.get(id) == Some(&1)
+                {
+                    if let Some(&set_id) = self.analyzer.last_set.get(id) {
+                        if let ExpressionKind::LocalSet { value, .. }
+                        | ExpressionKind::LocalTee { value, .. } = &self.expressions[set_id].kind
+                        {
+                            self.annotations
+                                .insert(expr_id, Annotation::InlinedValue(*value));
+                            self.annotations.insert(set_id, Annotation::Inlined);
+                        }
                     }
                 }
             }
+            ExpressionKind::LocalSet { id, value } => {
+                if self.analyzer.get_counts.get(id).unwrap_or(&0) == &0 {
+                    // This local is set but never used. If it's a pure value, we can
+                    // remove it (mark as inlined and hope for the best, or rather
+                    // we should mark it as skipped).
+                    if !EffectAnalyzer::analyze(*value, self.expressions).has_side_effects() {
+                        self.annotations.insert(expr_id, Annotation::Inlined);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }

@@ -16,27 +16,20 @@ int32_t factorial(int32_t v0) {
         v1 = 1;
         if ((v0 < 1)) {
             goto block_break_2_end;
-        } else {
+        }
+        v1 = 1;
+        v2 = 1;
+        /* loop: shape$continue$4 */ while (1) {
             {
-                v3 = 8;
-                v1 = 1;
-                v2 = 1;
-                /* loop: shape$continue$4 */ while (1) {
-                    {
-                        v1 = (v2 * v1);
-                        if (!(((v2 = (v2 + 1)) <= v0))) {
-                            goto block_break_9_end;
-                        }
-                    }
+                v1 = (v2 * v1);
+                if (!(((v2 = (v2 + 1)) <= v0))) {
+                    goto block_break_9_end;
                 }
-                /* block: block$break$9 */ {
-                }
-block_break_9_end: ;
             }
         }
         /* block: block$break$2 */ {
             return v1;
         }
-block_break_2_end: ;
+        block_break_2_end: ;
     }
 }

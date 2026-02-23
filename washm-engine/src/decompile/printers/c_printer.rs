@@ -7,6 +7,13 @@ pub struct CPrinter<'m> {
     pub module: &'m Module,
     output: String,
     indent: usize,
+    loop_stack: Vec<LoopContext>,
+}
+
+#[derive(Clone, Copy)]
+struct LoopContext {
+    break_target: ExpressionId,
+    continue_target: ExpressionId,
 }
 
 impl<'m> CPrinter<'m> {
@@ -15,6 +22,7 @@ impl<'m> CPrinter<'m> {
             module,
             output: String::new(),
             indent: 0,
+            loop_stack: Vec::new(),
         }
     }
 
@@ -31,6 +39,42 @@ impl<'m> CPrinter<'m> {
             out = format!("label_{}", out);
         }
         out
+    }
+
+    fn render_boolean_condition(&mut self, func: &Function, condition: ExpressionId) {
+        // Prefer printing boolean constants as `true`/`false` when used as conditions
+        match &self.module.expressions[condition].kind {
+            ExpressionKind::Const(lit) => {
+                use crate::ir::Literal;
+                match lit {
+                    Literal::I32(v) => self.output.push_str(if *v != 0 { "true" } else { "false" }),
+                    Literal::I64(v) => self.output.push_str(if *v != 0 { "true" } else { "false" }),
+                    _ => self.walk_inline_expression(func, condition),
+                }
+            }
+            _ => {
+                self.walk_inline_expression(func, condition);
+            }
+        }
+    }
+
+    fn emit_block_label_if_needed(&mut self, func: &Function, expr_id: ExpressionId, name: &str) {
+        // Only emit an end label if some Break targets this block name
+        let mut found = false;
+        for (_id, expr) in self.module.expressions.iter() {
+            if let ExpressionKind::Break { target, .. } = &expr.kind {
+                if *target == expr_id {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if found {
+            let safe = Self::sanitize_label(name);
+            self.write_indent();
+            self.output
+                .push_str(&format!("{}: ;\n", format!("{}_end", safe)));
+        }
     }
 
     fn get_local_name(
@@ -73,7 +117,9 @@ impl<'m> CPrinter<'m> {
                     return self.is_last_in_expr(last, expr_id);
                 }
             }
-            ExpressionKind::If { if_true, if_false, .. } => {
+            ExpressionKind::If {
+                if_true, if_false, ..
+            } => {
                 if self.is_last_in_expr(*if_true, expr_id) {
                     return true;
                 }
@@ -267,24 +313,7 @@ impl<'m> CPrinter<'m> {
                     if inverted {
                         self.output.push_str("!");
                     }
-                    // Prefer printing boolean constants as `true`/`false` when used as conditions
-                    match &self.module.expressions[condition].kind {
-                        ExpressionKind::Const(lit) => {
-                            use crate::ir::Literal;
-                            match lit {
-                                Literal::I32(v) => {
-                                    self.output.push_str(if *v != 0 { "true" } else { "false" })
-                                }
-                                Literal::I64(v) => {
-                                    self.output.push_str(if *v != 0 { "true" } else { "false" })
-                                }
-                                _ => self.walk_inline_expression(func, condition),
-                            }
-                        }
-                        _ => {
-                            self.walk_inline_expression(func, condition);
-                        }
-                    }
+                    self.render_boolean_condition(func, condition);
                     self.output.push_str(") ");
                 } else if let Some(n) = name {
                     self.output.push_str(&format!("/* block: {} */ ", n));
@@ -296,10 +325,30 @@ impl<'m> CPrinter<'m> {
                 let start_idx = if is_if { 1 } else { 0 };
                 let block_has_value = self.module.expressions[expr_id].type_ != Type::NONE
                     && self.module.expressions[expr_id].type_ != Type::UNREACHABLE;
+
                 for (i, &child_id) in list.iter().enumerate().skip(start_idx) {
                     let child_is_last = i == list.len() - 1;
                     let child_is_statement = !(child_is_last && block_has_value);
+
+                    let mut pushed_ctx = None;
+                    if let ExpressionKind::Loop { .. } = &self.module.expressions[child_id].kind {
+                        // We can use the break keyword only if this loop is the last thing
+                        // in the block, because the break keyword in C will jump to the
+                        // end of the while(1) loop, which is also the end of this block.
+                        if child_is_last {
+                            pushed_ctx = Some(LoopContext {
+                                break_target: expr_id,
+                                continue_target: child_id,
+                            });
+                            self.loop_stack.push(pushed_ctx.unwrap());
+                        }
+                    }
+
                     self.walk_expression_ext(func, child_id, child_is_statement);
+
+                    if pushed_ctx.is_some() {
+                        self.loop_stack.pop();
+                    }
                 }
 
                 self.indent -= 1;
@@ -307,21 +356,7 @@ impl<'m> CPrinter<'m> {
                 self.output.push_str("}\n");
 
                 if let Some(n) = name {
-                    // Only emit an end label if some Break targets this block name
-                    let mut found = false;
-                    for (_id, expr) in self.module.expressions.iter() {
-                        if let ExpressionKind::Break { target, .. } = &expr.kind {
-                            if *target == expr_id {
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                    if found {
-                        let safe = Self::sanitize_label(n);
-                        self.output
-                            .push_str(&format!("{}: ;\n", format!("{}_end", safe)));
-                    }
+                    self.emit_block_label_if_needed(func, expr_id, n);
                 }
             }
             ExpressionKind::LocalSet { id, value } => {
@@ -401,6 +436,29 @@ impl<'m> CPrinter<'m> {
                 condition,
                 value,
             } => {
+                let mut idiomatic_keyword = None;
+                if let Some(ctx) = self.loop_stack.last() {
+                    if *target == ctx.break_target && value.is_none() {
+                        idiomatic_keyword = Some("break");
+                    } else if *target == ctx.continue_target && value.is_none() {
+                        idiomatic_keyword = Some("continue");
+                    }
+                }
+
+                if let Some(kw) = idiomatic_keyword {
+                    if let Some(cond) = condition {
+                        self.output.push_str("if (");
+                        self.walk_inline_expression(func, *cond);
+                        self.output.push_str(") ");
+                        self.output.push_str(kw);
+                        self.output.push_str(";\n");
+                    } else {
+                        self.output.push_str(kw);
+                        self.output.push_str(";\n");
+                    }
+                    return;
+                }
+
                 let target_name = match &self.module.expressions[*target].kind {
                     ExpressionKind::Block { name, .. } => name.clone(),
                     ExpressionKind::Loop { name, .. } => name.clone(),
@@ -441,6 +499,10 @@ impl<'m> CPrinter<'m> {
                         self.walk_inline_expression(func, *v);
                         self.output.push_str(" */;\n");
                     } else {
+                        if let Some(cond) = condition {
+                            self.output.push_str("if (");
+                            self.walk_inline_expression(func, *cond);
+                        }
                         self.output.push_str("/* break */;\n");
                     }
                 }

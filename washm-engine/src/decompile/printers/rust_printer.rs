@@ -1,12 +1,21 @@
 use crate::ir::expression::{ExpressionId, ExpressionKind};
 use crate::ir::module::{Function, FunctionKind, Module};
-use crate::ir::Type;
+use crate::ir::{Literal, Type};
 
 /// The RustPrinter converts the annotated IR into human-readable Rust code.
 pub struct RustPrinter<'m> {
     pub module: &'m Module,
     output: String,
     indent: usize,
+    loop_stack: Vec<LoopContext>,
+    find_all_targets: std::collections::HashSet<ExpressionId>,
+    wrapped_targets: std::collections::HashSet<ExpressionId>,
+}
+
+#[derive(Clone, Copy)]
+struct LoopContext {
+    break_target: Option<ExpressionId>,
+    continue_target: Option<ExpressionId>,
 }
 
 impl<'m> RustPrinter<'m> {
@@ -15,7 +24,45 @@ impl<'m> RustPrinter<'m> {
             module,
             output: String::new(),
             indent: 0,
+            loop_stack: Vec::new(),
+            find_all_targets: std::collections::HashSet::new(),
+            wrapped_targets: std::collections::HashSet::new(),
         }
+    }
+
+    fn collect_targets(&mut self, _func: &Function, expr_id: ExpressionId) {
+        struct TargetCollector<'a> {
+            targets: &'a mut std::collections::HashSet<ExpressionId>,
+        }
+        impl<'a> crate::ir::visitor::ReadOnlyVisitor for TargetCollector<'a> {
+            fn visit_expression(
+                &mut self,
+                expr: ExpressionId,
+                arena: &crate::collections::id_arena::IdArena<
+                    crate::ir::expression::ExpressionMarker,
+                    crate::ir::expression::Expression,
+                >,
+            ) {
+                if let ExpressionKind::Break { target, .. } = &arena[expr].kind {
+                    self.targets.insert(*target);
+                }
+                if let ExpressionKind::Switch {
+                    targets, default, ..
+                } = &arena[expr].kind
+                {
+                    for &t in targets {
+                        self.targets.insert(t);
+                    }
+                    self.targets.insert(*default);
+                }
+                self.visit_children(expr, arena);
+            }
+        }
+        let mut collector = TargetCollector {
+            targets: &mut self.find_all_targets,
+        };
+        use crate::ir::visitor::ReadOnlyVisitor;
+        collector.visit(expr_id, &self.module.expressions);
     }
 
     fn write_indent(&mut self) {
@@ -38,6 +85,46 @@ impl<'m> RustPrinter<'m> {
             out = format!("label_{}", out);
         }
         out
+    }
+
+    fn render_boolean_condition(&mut self, func: &Function, condition: ExpressionId) {
+        // Prefer printing boolean constants as `true`/`false` when used as conditions
+        match &self.module.expressions[condition].kind {
+            ExpressionKind::Const(lit) => {
+                use crate::ir::Literal;
+                match lit {
+                    Literal::I32(v) => self.output.push_str(if *v != 0 { "true" } else { "false" }),
+                    Literal::I64(v) => self.output.push_str(if *v != 0 { "true" } else { "false" }),
+                    _ => self.walk_inline_expression(func, condition),
+                }
+            }
+            _ => {
+                self.walk_inline_expression(func, condition);
+            }
+        }
+    }
+
+    fn emit_block_label_if_needed(
+        &mut self,
+        _func: &Function,
+        expr_id: ExpressionId,
+        name: &Option<String>,
+    ) -> bool {
+        eprintln!(
+            "DEBUG: emit_block_label_if_needed for ID {}",
+            expr_id.index()
+        );
+        if self.find_all_targets.contains(&expr_id) && !self.wrapped_targets.contains(&expr_id) {
+            let label = if let Some(n) = name {
+                Self::sanitize_label(n)
+            } else {
+                format!("block_break_{}", expr_id.index())
+            };
+            self.output.push_str(&format!("'{}: ", label));
+            true
+        } else {
+            false
+        }
     }
 
     fn get_local_name(
@@ -80,7 +167,9 @@ impl<'m> RustPrinter<'m> {
                     return self.is_last_in_expr(last, expr_id);
                 }
             }
-            ExpressionKind::If { if_true, if_false, .. } => {
+            ExpressionKind::If {
+                if_true, if_false, ..
+            } => {
                 if self.is_last_in_expr(*if_true, expr_id) {
                     return true;
                 }
@@ -196,6 +285,21 @@ impl<'m> RustPrinter<'m> {
     }
 
     fn print_function(&mut self, func: &Function) {
+        for (id, expr) in self.module.expressions.iter() {
+            eprintln!("EXPR {}: {:?}", id.index(), expr.kind);
+        }
+        self.find_all_targets.clear();
+        self.wrapped_targets.clear();
+        if let FunctionKind::Local { body, .. } = &func.kind {
+            self.collect_targets(func, *body);
+        }
+
+        /*
+        for (id, expr) in func.expressions.iter() {
+           println!("EXPR {}: {:?}", id.index(), expr.kind);
+        }
+        */
+
         self.output.push_str(&format!("fn {}(", func.name));
 
         let param_types = func.params.tuple_elements();
@@ -402,6 +506,28 @@ impl<'m> RustPrinter<'m> {
         }
     }
 
+    fn is_at_start(&self, parent_id: ExpressionId, target_id: ExpressionId) -> bool {
+        if parent_id == target_id {
+            return true;
+        }
+        let expr = &self.module.expressions[parent_id];
+        match &expr.kind {
+            ExpressionKind::Block { list, .. } => {
+                if !list.is_empty() {
+                    return self.is_at_start(list[0], target_id);
+                }
+            }
+            ExpressionKind::If { if_true, .. } => {
+                return self.is_at_start(*if_true, target_id);
+            }
+            ExpressionKind::Loop { body, .. } => {
+                return self.is_at_start(*body, target_id);
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn walk_expression_ext(&mut self, func: &Function, expr_id: ExpressionId, is_statement: bool) {
         if self.module.annotations.is_inlined(expr_id) {
             return;
@@ -439,57 +565,160 @@ impl<'m> RustPrinter<'m> {
         }
 
         match &expr.kind {
-            ExpressionKind::Block { name, list } => {
+            ExpressionKind::Block {
+                name: block_name,
+                list,
+            } => {
+                let mut loop_nested = None;
+                if list.len() == 1 {
+                    if let ExpressionKind::Loop { .. } = &self.module.expressions[list[0]].kind {
+                        loop_nested = Some(list[0]);
+                    }
+                }
+
+                if let Some(loop_id) = loop_nested {
+                    let loop_expr = &self.module.expressions[loop_id];
+                    let (loop_name, loop_body) =
+                        if let ExpressionKind::Loop { name, body } = &loop_expr.kind {
+                            (name, body)
+                        } else {
+                            unreachable!()
+                        };
+
+                    self.emit_block_label_if_needed(func, expr_id, block_name);
+                    if block_name.is_none() {
+                        self.emit_block_label_if_needed(func, loop_id, loop_name);
+                    }
+
+                    self.output.push_str("loop {\n");
+
+                    self.loop_stack.push(LoopContext {
+                        break_target: Some(expr_id),
+                        continue_target: Some(loop_id),
+                    });
+                    self.indent += 1;
+                    self.walk_expression_ext(func, *loop_body, true);
+                    self.indent -= 1;
+                    self.loop_stack.pop();
+
+                    self.write_indent();
+                    self.output.push_str("}\n");
+                    return;
+                }
+
                 let mut is_if = false;
+                let mut wrapped_if = false;
                 if let Some((condition, inverted)) = self.module.annotations.get_if_info(expr_id) {
                     is_if = true;
+                    if self.find_all_targets.contains(&expr_id) || block_name.is_some() {
+                        wrapped_if = true;
+                        self.emit_block_label_if_needed(func, expr_id, block_name);
+                        self.output.push_str("{\n");
+                        self.indent += 1;
+                        self.write_indent();
+                    }
                     self.output.push_str("if ");
                     if inverted {
                         self.output.push_str("!");
                     }
-                    // Prefer printing boolean constants as `true`/`false` when used as conditions
-                    match &self.module.expressions[condition].kind {
-                        ExpressionKind::Const(lit) => {
-                            use crate::ir::Literal;
-                            match lit {
-                                Literal::I32(v) => {
-                                    self.output.push_str(if *v != 0 { "true" } else { "false" })
-                                }
-                                Literal::I64(v) => {
-                                    self.output.push_str(if *v != 0 { "true" } else { "false" })
-                                }
-                                _ => self.walk_inline_expression(func, condition),
-                            }
-                        }
-                        _ => {
-                            self.walk_inline_expression(func, condition);
-                        }
-                    }
+                    self.render_boolean_condition(func, condition);
                     self.output.push_str(" ");
-                } else if let Some(n) = name {
-                    let safe = Self::sanitize_label(n);
-                    self.output.push_str(&format!("'{}: ", safe));
+                } else {
+                    self.emit_block_label_if_needed(func, expr_id, block_name);
                 }
 
                 self.output.push_str("{\n");
                 self.indent += 1;
 
+                // Successor wrapping for Rust forward jumps (jumps to a sibling in a block)
+                // If a child (or something at the start of it) is a target for a break,
+                // we wrap preceding siblings in a labeled block.
+                let mut targets = Vec::new();
+                for (idx, &child_id) in list.iter().enumerate() {
+                    for &target_id in &self.find_all_targets {
+                        // Only wrap if we can skip some preceding siblings (idx > 0)
+                        // and the target is at the start of this child.
+                        if idx > 0 && self.is_at_start(child_id, target_id) {
+                            targets.push((idx, target_id));
+                        }
+                    }
+                }
+                // Sort by child index (ascending)
+                targets.sort_unstable_by_key(|t| (t.0, t.1.index()));
+
                 let start_idx = if is_if { 1 } else { 0 };
                 let block_has_value = self.module.expressions[expr_id].type_ != Type::NONE
                     && self.module.expressions[expr_id].type_ != Type::UNREACHABLE;
+
+                // Open wrappers: from last target (outermost) to first (innermost)
+                for &(_idx, target_id) in targets.iter().rev() {
+                    self.wrapped_targets.insert(target_id);
+                    let name = match &self.module.expressions[target_id].kind {
+                        ExpressionKind::Block { name, .. }
+                        | ExpressionKind::If { name, .. }
+                        | ExpressionKind::Loop { name, .. } => name.clone(),
+                        _ => None,
+                    };
+                    let label = if let Some(n) = name {
+                        Self::sanitize_label(&n)
+                    } else {
+                        format!("block_break_{}", target_id.index())
+                    };
+                    self.write_indent();
+                    self.output.push_str(&format!("'{}: {{\n", label));
+                    self.indent += 1;
+                }
+
+                // For closing, we want to pop them back in the order they were opened
+                targets.reverse();
+
                 for (i, &child_id) in list.iter().enumerate().skip(start_idx) {
+                    // If we reached a target index, close all wrappers associated with it
+                    while !targets.is_empty() && targets.last().unwrap().0 <= i {
+                        targets.pop();
+                        self.indent -= 1;
+                        self.write_indent();
+                        self.output.push_str("}\n");
+                    }
+
                     let child_is_last = i == list.len() - 1;
-                    // A child is a statement when it's not the final value-producing
-                    // expression of the block (which should be printed inline without
-                    // a trailing semicolon). Otherwise it's a statement and should be
-                    // printed with a semicolon/newline.
                     let child_is_statement = !(child_is_last && block_has_value);
+
+                    let mut pushed_ctx = None;
+                    if let ExpressionKind::Loop { .. } = &self.module.expressions[child_id].kind {
+                        if child_is_last {
+                            pushed_ctx = Some(LoopContext {
+                                break_target: Some(expr_id),
+                                continue_target: Some(child_id),
+                            });
+                            self.loop_stack.push(pushed_ctx.unwrap());
+                        }
+                    }
+
                     self.walk_expression_ext(func, child_id, child_is_statement);
+
+                    if pushed_ctx.is_some() {
+                        self.loop_stack.pop();
+                    }
+                }
+
+                // Close any remaining wrappers
+                while !targets.is_empty() {
+                    targets.pop();
+                    self.indent -= 1;
+                    self.write_indent();
+                    self.output.push_str("}\n");
                 }
 
                 self.indent -= 1;
                 self.write_indent();
                 self.output.push_str("}\n");
+
+                if wrapped_if {
+                    self.indent -= 1;
+                    self.write_indent();
+                    self.output.push_str("}\n");
+                }
             }
             ExpressionKind::LocalSet { id, value } => {
                 let name = self.get_local_name(func, *id, Some(expr_id));
@@ -522,12 +751,13 @@ impl<'m> RustPrinter<'m> {
                 if_true,
                 if_false,
             } => {
-                if let Some(n) = name {
-                    let safe = Self::sanitize_label(n);
-                    self.output.push_str(&format!("'{}: ", safe));
+                let has_label = self.emit_block_label_if_needed(func, expr_id, name);
+                if has_label {
+                    self.output.push_str("{ ");
                 }
+
                 self.output.push_str("if ");
-                self.walk_inline_expression(func, *condition);
+                self.render_boolean_condition(func, *condition);
                 self.output.push_str(" ");
 
                 match &self.module.expressions[*if_true].kind {
@@ -580,16 +810,27 @@ impl<'m> RustPrinter<'m> {
                         }
                     }
                 }
+
+                if has_label {
+                    self.output.push_str(" }");
+                }
                 self.output.push_str("\n");
             }
             ExpressionKind::Loop { name, body } => {
-                if let Some(n) = name {
-                    let safe = Self::sanitize_label(n);
-                    self.output.push_str(&format!("'{}: ", safe));
-                }
+                self.emit_block_label_if_needed(func, expr_id, name);
                 self.output.push_str("loop {\n");
                 self.indent += 1;
+                // A standalone loop's own break target is NOT itself in Wasm
+                // (Wasm `loop` labels are for `continue`).
+                // But in Rust, `continue` targets the loop itself.
+                // We don't have a specific wrapping block here if this is a standalone
+                // ExpressionKind::Loop, so we only push the continue target.
+                self.loop_stack.push(LoopContext {
+                    break_target: None, // Standalone loop has no implicit break target
+                    continue_target: Some(expr_id),
+                });
                 self.walk_expression_ext(func, *body, false);
+                self.loop_stack.pop();
                 self.indent -= 1;
                 self.write_indent();
                 self.output.push_str("}\n");
@@ -599,25 +840,51 @@ impl<'m> RustPrinter<'m> {
                 condition,
                 value,
             } => {
-                let (target_name, is_loop) =
-                    if let ExpressionKind::Block { name: Some(n), .. }
-                    | ExpressionKind::If { name: Some(n), .. } =
-                        &self.module.expressions[*target].kind
-                    {
-                        (Some(Self::sanitize_label(n)), false)
-                    } else if let ExpressionKind::Loop { name: Some(n), .. } =
-                        &self.module.expressions[*target].kind
-                    {
-                        (Some(Self::sanitize_label(n)), true)
+                let mut idiomatic_keyword = None;
+                if let Some(ctx) = self.loop_stack.last() {
+                    if Some(*target) == ctx.break_target && value.is_none() {
+                        idiomatic_keyword = Some("break");
+                    } else if Some(*target) == ctx.continue_target && value.is_none() {
+                        idiomatic_keyword = Some("continue");
+                    }
+                }
+
+                if let Some(kw) = idiomatic_keyword {
+                    if let Some(cond) = condition {
+                        self.output.push_str("if ");
+                        self.render_boolean_condition(func, *cond);
+                        self.output.push_str(&format!(" {{ {} }}\n", kw));
                     } else {
-                        (None, false)
-                    };
+                        self.output.push_str(&format!("{};\n", kw));
+                    }
+                    return;
+                }
+
+                let (target_label, is_loop) = match &self.module.expressions[*target].kind {
+                    ExpressionKind::Block { name, .. } | ExpressionKind::If { name, .. } => {
+                        let label = if let Some(n) = name {
+                            Self::sanitize_label(n)
+                        } else {
+                            format!("block_break_{}", target.index())
+                        };
+                        (label, false)
+                    }
+                    ExpressionKind::Loop { name, .. } => {
+                        let label = if let Some(n) = name {
+                            Self::sanitize_label(n)
+                        } else {
+                            format!("block_break_{}", target.index())
+                        };
+                        (label, true)
+                    }
+                    _ => (format!("target_{}", target.index()), false),
+                };
 
                 let keyword = if is_loop { "continue" } else { "break" };
 
                 if let Some(cond) = condition {
                     self.output.push_str("if ");
-                    self.walk_inline_expression(func, *cond);
+                    self.render_boolean_condition(func, *cond);
                     self.output.push_str(" {\n");
                     self.indent += 1;
                     self.write_indent();
@@ -627,11 +894,8 @@ impl<'m> RustPrinter<'m> {
                         self.output.push_str(" */;\n");
                         self.write_indent();
                     }
-                    if let Some(n) = target_name {
-                        self.output.push_str(&format!("{} '{};\n", keyword, n));
-                    } else {
-                        self.output.push_str(&format!("{};\n", keyword));
-                    }
+                    self.output
+                        .push_str(&format!("{} '{};\n", keyword, target_label));
                     self.indent -= 1;
                     self.write_indent();
                     self.output.push_str("}\n");
@@ -640,12 +904,10 @@ impl<'m> RustPrinter<'m> {
                         self.output.push_str("/* break with value: ");
                         self.walk_inline_expression(func, *v);
                         self.output.push_str(" */;\n");
+                        self.write_indent();
                     }
-                    if let Some(n) = target_name {
-                        self.output.push_str(&format!("{} '{};\n", keyword, n));
-                    } else {
-                        self.output.push_str(&format!("{};\n", keyword));
-                    }
+                    self.output
+                        .push_str(&format!("{} '{};\n", keyword, target_label));
                 }
             }
             ExpressionKind::LocalTee { id, value } => {
@@ -655,9 +917,9 @@ impl<'m> RustPrinter<'m> {
                     self.walk_inline_expression(func, *value);
                     self.output.push_str(";\n");
                 } else {
-                    self.output.push_str(&format!("({} = ", name));
+                    self.output.push_str(&format!("{{ {} = ", name));
                     self.walk_inline_expression(func, *value);
-                    self.output.push_str(")");
+                    self.output.push_str(&format!("; {} }}", name));
                 }
             }
             ExpressionKind::Nop => {
@@ -1275,11 +1537,11 @@ impl<'m> RustPrinter<'m> {
             }
             ExpressionKind::LocalTee { id, value } => {
                 let name = self.get_local_name(func, *id, Some(expr_id));
-                self.output.push_str("(");
+                self.output.push_str("{ ");
                 self.output.push_str(&name);
                 self.output.push_str(" = ");
                 self.walk_inline_expression(func, *value);
-                self.output.push_str(")");
+                self.output.push_str(&format!("; {} }}", name));
             }
             ExpressionKind::GlobalGet { id } => {
                 if let Some(g) = self.module.globals.get(id.cast()) {
@@ -1389,6 +1651,20 @@ impl<'m> RustPrinter<'m> {
         target: ExpressionId,
         value: Option<ExpressionId>,
     ) {
+        let mut idiomatic_keyword = None;
+        if let Some(ctx) = self.loop_stack.last() {
+            if Some(target) == ctx.break_target && value.is_none() {
+                idiomatic_keyword = Some("break");
+            } else if Some(target) == ctx.continue_target && value.is_none() {
+                idiomatic_keyword = Some("continue");
+            }
+        }
+
+        if let Some(kw) = idiomatic_keyword {
+            self.output.push_str(&format!(" {};\n", kw));
+            return;
+        }
+
         let (target_name, is_loop) = if let ExpressionKind::Block { name: Some(n), .. }
         | ExpressionKind::If { name: Some(n), .. } =
             &self.module.expressions[target].kind
@@ -1405,16 +1681,16 @@ impl<'m> RustPrinter<'m> {
         let keyword = if is_loop { "continue" } else { "break" };
 
         if let Some(v) = value {
-            self.output.push_str(&format!("{} ", keyword));
+            self.output.push_str(&format!(" {} ", keyword));
             if let Some(n) = target_name {
                 self.output.push_str(&format!("'{}: ", n));
             }
             self.walk_inline_expression(func, v);
             self.output.push_str(";\n");
         } else if let Some(n) = target_name {
-            self.output.push_str(&format!("{} '{};\n", keyword, n));
+            self.output.push_str(&format!(" {} '{};\n", keyword, n));
         } else {
-            self.output.push_str(&format!("{};\n", keyword));
+            self.output.push_str(&format!(" {};\n", keyword));
         }
     }
 }
