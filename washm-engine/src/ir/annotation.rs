@@ -22,6 +22,7 @@ pub enum Annotation {
     InlinedValue(ExpressionId), // Tag for local.get that should be replaced by this expression
     Location(DebugLocation),
     ConstantGlobal(crate::ir::Literal),
+    StructOffsets(std::collections::HashSet<(u32, u32)>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +55,7 @@ pub struct Annotations {
     pub inlined_value: Option<ExpressionId>,
     pub location: Option<DebugLocation>,
     pub constant_global: Option<crate::ir::Literal>,
+    pub struct_offsets: Option<std::collections::HashSet<(u32, u32)>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -92,6 +94,7 @@ impl AnnotationStore {
             Annotation::InlinedValue(val) => entry.inlined_value = Some(val),
             Annotation::Location(loc) => entry.location = Some(loc),
             Annotation::ConstantGlobal(lit) => entry.constant_global = Some(lit),
+            Annotation::StructOffsets(offsets) => entry.struct_offsets = Some(offsets),
         }
     }
 

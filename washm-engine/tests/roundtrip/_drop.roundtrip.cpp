@@ -12,4 +12,3 @@ void _RNvCshXwFllX56pT_7___rustc35___rust_no_alloc_shim_is_unstable_v2(void) {
     int32_t v0 = 0;
     return;
 }
-

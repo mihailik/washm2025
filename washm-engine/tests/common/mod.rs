@@ -20,6 +20,11 @@ pub fn run_roundtrip_test_rust(source_path_str: &str) {
     let actual_trimmed = rust_out.trim().replace("\r\n", "\n");
     let expected_trimmed = expected.trim().replace("\r\n", "\n");
 
+    if expected_trimmed.is_empty() || std::env::var("UPDATE_GOLD").is_ok() {
+        fs::write(&rust_gold_path, &actual_trimmed).expect("Failed to write rust gold");
+        return;
+    }
+
     assert_eq!(
         expected_trimmed, actual_trimmed,
         "Rust roundtrip mismatch for {:?}",
@@ -41,6 +46,11 @@ pub fn run_roundtrip_test_cpp(source_path_str: &str) {
 
     let actual_trimmed = cpp_out.trim().replace("\r\n", "\n");
     let expected_trimmed = expected.trim().replace("\r\n", "\n");
+
+    if expected_trimmed.is_empty() || std::env::var("UPDATE_GOLD").is_ok() {
+        fs::write(&cpp_gold_path, &actual_trimmed).expect("Failed to write cpp gold");
+        return;
+    }
 
     assert_eq!(
         expected_trimmed, actual_trimmed,

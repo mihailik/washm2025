@@ -724,8 +724,7 @@ impl<'m> CPrinter<'m> {
             }
             ExpressionKind::LocalTee { id, value } => {
                 let name = self.get_local_name(func, *id, Some(expr_id));
-                self.output.push_str("(");
-                self.output.push_str(&format!("{} = ", name));
+                self.output.push_str(&format!("({} = ", name));
                 self.walk_inline_expression(func, *value);
                 self.output.push_str(")");
             }

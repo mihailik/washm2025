@@ -277,6 +277,7 @@ impl<'a> Visitor for Inliner<'a> {
                         .alloc(crate::ir::module::Local {
                             name: String::new(),
                             type_: *local_type,
+                            h_type: None,
                         });
                     mapping.insert(*callee_local_id, new_id);
                 }

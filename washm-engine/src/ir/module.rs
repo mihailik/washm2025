@@ -44,6 +44,7 @@ pub type LocalId = Id<LocalMarker>;
 pub struct Local {
     pub name: String,
     pub type_: Type,
+    pub h_type: Option<crate::ir::annotation::HighLevelType>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +89,7 @@ impl Function {
                     .alloc(Local {
                         name: String::new(),
                         type_: param_type,
+                        h_type: None,
                     })
                     .cast(),
             );
@@ -99,6 +101,7 @@ impl Function {
                     .alloc(Local {
                         name: String::new(),
                         type_: var_type,
+                        h_type: None,
                     })
                     .cast(),
             );
@@ -133,6 +136,7 @@ impl Function {
                     .alloc(Local {
                         name: String::new(),
                         type_: param_type,
+                        h_type: None,
                     })
                     .cast(),
             );
@@ -144,6 +148,7 @@ impl Function {
                     .alloc(Local {
                         name: String::new(),
                         type_: var_type,
+                        h_type: None,
                     })
                     .cast(),
             );
@@ -265,6 +270,7 @@ impl Function {
             .alloc(Local {
                 name: String::new(),
                 type_,
+                h_type: None,
             })
             .cast();
         if let Some(var_ids) = self.var_ids_mut() {

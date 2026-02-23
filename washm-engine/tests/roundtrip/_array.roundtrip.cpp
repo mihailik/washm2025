@@ -5,6 +5,5 @@
 
 int32_t arr(int32_t v0) {
     int32_t v1 = 0;
-    return (v2 = 7);
+    return 7;
 }
-

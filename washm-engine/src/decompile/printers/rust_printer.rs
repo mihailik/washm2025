@@ -18,6 +18,12 @@ impl<'m> RustPrinter<'m> {
         }
     }
 
+    fn write_indent(&mut self) {
+        for _ in 0..self.indent {
+            self.output.push_str("    ");
+        }
+    }
+
     fn sanitize_label(name: &str) -> String {
         let mut out = String::new();
         for c in name.chars() {
@@ -239,9 +245,142 @@ impl<'m> RustPrinter<'m> {
         }
     }
 
-    fn write_indent(&mut self) {
-        for _ in 0..self.indent {
-            self.output.push_str("    ");
+    fn print_load(
+        &mut self,
+        func: &Function,
+        _expr_id: ExpressionId,
+        ptr: ExpressionId,
+        offset: u32,
+        bytes: u32,
+        is_inline: bool,
+    ) {
+        let mut handled = false;
+
+        // Try to handle as struct access via annotations
+        if let Some(ann) = self.module.annotations.get(ptr) {
+            if let Some(offsets) = &ann.struct_offsets {
+                if offsets.contains(&(offset, bytes)) {
+                    if is_inline {
+                        self.walk_inline_value(func, ptr);
+                    } else {
+                        self.walk_inline_expression(func, ptr);
+                    }
+
+                    self.output.push_str(&format!(".field_{}", offset));
+                    handled = true;
+                }
+            }
+        }
+
+        if !handled {
+            // Fallback to the pointer-based logic for locals if we have no annotation
+            if let ExpressionKind::LocalGet { id } = &self.module.expressions[ptr].kind {
+                let local = &func.locals()[*id];
+                if let Some(crate::ir::annotation::HighLevelType::Pointer) = local.h_type {
+                    let name = self.get_local_name(func, *id, Some(ptr));
+                    if offset == 0 {
+                        self.output.push_str(&format!("*{}", name));
+                    } else {
+                        self.output.push_str(&format!("{}.field_{}", name, offset));
+                    }
+                    handled = true;
+                }
+            }
+        }
+
+        if !handled {
+            self.output.push_str("*(");
+            if is_inline {
+                self.walk_inline_value(func, ptr);
+            } else {
+                self.walk_inline_expression(func, ptr);
+            }
+            if offset > 0 {
+                self.output.push_str(&format!(" + {}", offset));
+            }
+            self.output.push_str(")");
+        }
+
+        if !is_inline {
+            self.output.push_str("");
+        }
+    }
+
+    fn print_store(
+        &mut self,
+        func: &Function,
+        _expr_id: ExpressionId,
+        ptr: ExpressionId,
+        value: ExpressionId,
+        offset: u32,
+        bytes: u32,
+        is_inline: bool,
+    ) {
+        let mut handled = false;
+
+        // Try to handle as struct access via annotations
+        if let Some(ann) = self.module.annotations.get(ptr) {
+            if let Some(offsets) = &ann.struct_offsets {
+                if offsets.contains(&(offset, bytes)) {
+                    if is_inline {
+                        self.walk_inline_value(func, ptr);
+                    } else {
+                        self.walk_inline_expression(func, ptr);
+                    }
+                    if offset == 0 {
+                        self.output.push_str(".field_0");
+                    } else {
+                        self.output.push_str(&format!(".field_{}", offset));
+                    }
+                    self.output.push_str(" = ");
+                    if is_inline {
+                        self.walk_inline_value(func, value);
+                    } else {
+                        self.walk_inline_expression(func, value);
+                    }
+                    handled = true;
+                }
+            }
+        }
+
+        if !handled {
+            // Fallback to the pointer-based logic for locals if we have no annotation
+            if let ExpressionKind::LocalGet { id } = &self.module.expressions[ptr].kind {
+                let local = &func.locals()[*id];
+                if let Some(crate::ir::annotation::HighLevelType::Pointer) = local.h_type {
+                    let name = self.get_local_name(func, *id, Some(ptr));
+                    if offset == 0 {
+                        self.output.push_str(&format!("*{} = ", name));
+                    } else {
+                        self.output
+                            .push_str(&format!("{}.field_{} = ", name, offset));
+                    }
+                    if is_inline {
+                        self.walk_inline_value(func, value);
+                    } else {
+                        self.walk_inline_expression(func, value);
+                    }
+                    handled = true;
+                }
+            }
+        }
+
+        if !handled {
+            self.output.push_str("*(");
+            if is_inline {
+                self.walk_inline_value(func, ptr);
+            } else {
+                self.walk_inline_expression(func, ptr);
+            }
+            if offset != 0 {
+                self.output.push_str(&format!(" + {}", offset));
+            }
+            self.output.push_str(") = ");
+            if is_inline {
+                self.walk_inline_value(func, value);
+            } else {
+                self.walk_inline_expression(func, value);
+            }
         }
     }
 
@@ -359,11 +498,15 @@ impl<'m> RustPrinter<'m> {
                 }
             }
             ExpressionKind::If {
+                name,
                 condition,
                 if_true,
                 if_false,
-                ..
             } => {
+                if let Some(n) = name {
+                    let safe = Self::sanitize_label(n);
+                    self.output.push_str(&format!("'{}: ", safe));
+                }
                 self.output.push_str("if ");
                 self.walk_inline_expression(func, *condition);
                 self.output.push_str(" ");
@@ -422,7 +565,8 @@ impl<'m> RustPrinter<'m> {
             }
             ExpressionKind::Loop { name, body } => {
                 if let Some(n) = name {
-                    self.output.push_str(&format!("/* loop: {} */ ", n));
+                    let safe = Self::sanitize_label(n);
+                    self.output.push_str(&format!("'{}: ", safe));
                 }
                 self.output.push_str("loop {\n");
                 self.indent += 1;
@@ -487,15 +631,14 @@ impl<'m> RustPrinter<'m> {
             }
             ExpressionKind::LocalTee { id, value } => {
                 let name = self.get_local_name(func, *id, Some(expr_id));
-                if is_return {
+                if is_statement {
                     self.output.push_str(&format!("{} = ", name));
                     self.walk_inline_expression(func, *value);
                     self.output.push_str(";\n");
                 } else {
-                    self.output.push_str("(");
-                    self.output.push_str(&format!("{} = ", name));
+                    self.output.push_str(&format!("({} = ", name));
                     self.walk_inline_expression(func, *value);
-                    self.output.push_str(")\n");
+                    self.output.push_str(")");
                 }
             }
             ExpressionKind::Nop => {
@@ -514,33 +657,36 @@ impl<'m> RustPrinter<'m> {
                     self.walk_inline_expression(func, *if_true);
                     self.output.push_str(";\n");
                 } else {
-                    self.output.push_str("(");
+                    self.output.push_str("if ");
                     self.walk_inline_expression(func, *condition);
-                    self.output.push_str(" ? ");
+                    self.output.push_str(" { ");
                     self.walk_inline_expression(func, *if_true);
-                    self.output.push_str(" : ");
+                    self.output.push_str(" } else { ");
                     self.walk_inline_expression(func, *if_false);
-                    self.output.push_str(")\n");
+                    self.output.push_str(" }\n");
                 }
             }
-            ExpressionKind::Store { ptr, value, .. } => {
-                self.walk_inline_expression(func, *ptr);
-                self.output.push_str(" = ");
-                self.walk_inline_expression(func, *value);
+            ExpressionKind::Store {
+                ptr,
+                value,
+                offset,
+                bytes,
+                ..
+            } => {
+                self.print_store(func, expr_id, *ptr, *value, *offset, *bytes, false);
                 self.output.push_str(";\n");
             }
-            ExpressionKind::Load { ptr, .. } => {
-                self.output.push_str("(");
-                self.walk_inline_expression(func, *ptr);
-                self.output.push_str(") /* load */\n");
-            }
-            ExpressionKind::GlobalGet { id } => {
-                if let Some(g) = self.module.globals.get(id.cast()) {
-                    self.output.push_str(&g.name);
-                    self.output.push_str("\n");
-                } else {
-                    self.output.push_str(&format!("global_{}\n", id.index()));
+            ExpressionKind::Load { .. }
+            | ExpressionKind::GlobalGet { .. }
+            | ExpressionKind::LocalGet { .. }
+            | ExpressionKind::Binary { .. }
+            | ExpressionKind::Unary { .. }
+            | ExpressionKind::Const(_) => {
+                if is_return {
+                    self.output.push_str("return ");
                 }
+                self.walk_inline_value(func, expr_id);
+                self.output.push_str(";\n");
             }
             ExpressionKind::GlobalSet { id, value } => {
                 if let Some(g) = self.module.globals.get(id.cast()) {
@@ -585,15 +731,39 @@ impl<'m> RustPrinter<'m> {
                 targets,
                 default,
                 condition,
-                value: _,
+                value,
             } => {
-                self.output.push_str("match (");
+                self.output.push_str("match ");
                 self.walk_inline_expression(func, *condition);
-                self.output.push_str(") { /* targets: ");
-                self.output.push_str(&format!("{:?}", targets));
-                self.output.push_str(" default: ");
-                self.output.push_str(&format!("{:?}", default));
-                self.output.push_str(" */ }\n");
+                self.output.push_str(" {\n");
+                let old_indent = self.indent;
+                self.indent += 1;
+
+                // Group cases by target
+                let mut map = std::collections::BTreeMap::new();
+                for (i, &t) in targets.iter().enumerate() {
+                    map.entry(t).or_insert_with(Vec::new).push(i);
+                }
+
+                for (target_id, indices) in map {
+                    self.write_indent();
+                    for (i, &idx) in indices.iter().enumerate() {
+                        if i > 0 {
+                            self.output.push_str(" | ");
+                        }
+                        self.output.push_str(&format!("{}", idx));
+                    }
+                    self.output.push_str(" => ");
+                    self.print_switch_target(func, target_id, *value);
+                }
+
+                self.write_indent();
+                self.output.push_str("_ => ");
+                self.print_switch_target(func, *default, *value);
+
+                self.indent = old_indent;
+                self.write_indent();
+                self.output.push_str("}\n");
             }
             ExpressionKind::TableSet {
                 table,
@@ -873,8 +1043,12 @@ impl<'m> RustPrinter<'m> {
                 self.walk_inline_value(func, *value);
                 self.output.push_str(")");
             }
-            ExpressionKind::LocalTee { value, .. } => {
+            ExpressionKind::LocalTee { id, value } => {
+                let name = self.get_local_name(func, *id, Some(expr_id));
+                self.output.push_str("{ ");
+                self.output.push_str(&format!("{} = ", name));
                 self.walk_inline_value(func, *value);
+                self.output.push_str(&format!("; {} }}", name));
             }
             ExpressionKind::GlobalGet { id } => {
                 if let Some(g) = self.module.globals.get(id.cast()) {
@@ -888,20 +1062,38 @@ impl<'m> RustPrinter<'m> {
                 if_true,
                 if_false,
             } => {
-                self.output.push_str("(");
+                self.output.push_str("if ");
                 self.walk_inline_value(func, *condition);
-                self.output.push_str(" ? ");
+                self.output.push_str(" { ");
                 self.walk_inline_value(func, *if_true);
-                self.output.push_str(" : ");
+                self.output.push_str(" } else { ");
                 self.walk_inline_value(func, *if_false);
-                self.output.push_str(")");
+                self.output.push_str(" }");
             }
-            ExpressionKind::Load { ptr, .. } => {
-                self.output.push_str("(");
-                self.walk_inline_value(func, *ptr);
-                self.output.push_str(") /* load */");
+            ExpressionKind::Load {
+                ptr, offset, bytes, ..
+            } => {
+                self.print_load(func, expr_id, *ptr, *offset, *bytes, true);
             }
-            ExpressionKind::TupleMake { operands } => {
+            ExpressionKind::Store {
+                ptr,
+                value,
+                offset,
+                bytes,
+                ..
+            } => {
+                self.print_store(func, expr_id, *ptr, *value, *offset, *bytes, true);
+            }
+            ExpressionKind::Call {
+                target: f_id,
+                operands,
+                ..
+            } => {
+                if let Some(target) = self.module.functions.get(*f_id) {
+                    self.output.push_str(&target.name);
+                } else {
+                    self.output.push_str(&format!("func_{}", f_id.index()));
+                }
                 self.output.push_str("(");
                 for (i, id) in operands.iter().enumerate() {
                     if i > 0 {
@@ -1056,7 +1248,8 @@ impl<'m> RustPrinter<'m> {
             ExpressionKind::LocalTee { id, value } => {
                 let name = self.get_local_name(func, *id, Some(expr_id));
                 self.output.push_str("(");
-                self.output.push_str(&format!("{} = ", name));
+                self.output.push_str(&name);
+                self.output.push_str(" = ");
                 self.walk_inline_expression(func, *value);
                 self.output.push_str(")");
             }
@@ -1072,23 +1265,27 @@ impl<'m> RustPrinter<'m> {
                 if_true,
                 if_false,
             } => {
-                self.output.push_str("(");
+                self.output.push_str("if ");
                 self.walk_inline_expression(func, *condition);
-                self.output.push_str(" ? ");
+                self.output.push_str(" { ");
                 self.walk_inline_expression(func, *if_true);
-                self.output.push_str(" : ");
+                self.output.push_str(" } else { ");
                 self.walk_inline_expression(func, *if_false);
-                self.output.push_str(")");
+                self.output.push_str(" }");
             }
-            ExpressionKind::Load { ptr, .. } => {
-                self.output.push_str("(");
-                self.walk_inline_expression(func, *ptr);
-                self.output.push_str(") /* load */");
+            ExpressionKind::Load {
+                ptr, offset, bytes, ..
+            } => {
+                self.print_load(func, expr_id, *ptr, *offset, *bytes, false);
             }
-            ExpressionKind::Store { ptr, value, .. } => {
-                self.walk_inline_expression(func, *ptr);
-                self.output.push_str(" = ");
-                self.walk_inline_expression(func, *value);
+            ExpressionKind::Store {
+                ptr,
+                value,
+                offset,
+                bytes,
+                ..
+            } => {
+                self.print_store(func, expr_id, *ptr, *value, *offset, *bytes, false);
             }
             ExpressionKind::CallIndirect {
                 target, operands, ..
@@ -1155,6 +1352,41 @@ impl<'m> RustPrinter<'m> {
             _ => {
                 self.output.push_str(&format!("/* {:?} */", expr.kind));
             }
+        }
+    }
+
+    fn print_switch_target(
+        &mut self,
+        func: &Function,
+        target: ExpressionId,
+        value: Option<ExpressionId>,
+    ) {
+        let (target_name, is_loop) = if let ExpressionKind::Block { name: Some(n), .. }
+        | ExpressionKind::If { name: Some(n), .. } =
+            &self.module.expressions[target].kind
+        {
+            (Some(Self::sanitize_label(n)), false)
+        } else if let ExpressionKind::Loop { name: Some(n), .. } =
+            &self.module.expressions[target].kind
+        {
+            (Some(Self::sanitize_label(n)), true)
+        } else {
+            (None, false)
+        };
+
+        let keyword = if is_loop { "continue" } else { "break" };
+
+        if let Some(v) = value {
+            self.output.push_str(&format!("{} ", keyword));
+            if let Some(n) = target_name {
+                self.output.push_str(&format!("'{}: ", n));
+            }
+            self.walk_inline_expression(func, v);
+            self.output.push_str(";\n");
+        } else if let Some(n) = target_name {
+            self.output.push_str(&format!("{} '{};\n", keyword, n));
+        } else {
+            self.output.push_str(&format!("{};\n", keyword));
         }
     }
 }

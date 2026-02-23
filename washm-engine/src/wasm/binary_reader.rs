@@ -368,6 +368,7 @@ impl BinaryReader {
                                     .alloc(crate::ir::module::Local {
                                         name: String::new(),
                                         type_: t,
+                                        h_type: None,
                                     })
                                     .cast(),
                             );

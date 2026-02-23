@@ -2,14 +2,14 @@ use crate::analysis::call_graph::CallGraph;
 use crate::analysis::global_analysis::GlobalAnalysis;
 use crate::decompile::passes::{
     ExpressionRecombination, IdentifyBooleans, IdentifyIfElse, IdentifyLoops, IdentifyPointers,
-    NameInferencePass,
+    IdentifyStructs, NameInferencePass,
 };
 use crate::ir::module::Module;
 use crate::passes::{
-    dce::DCE, global_refining::GlobalRefining, gufa::GUFA, local_cse::LocalCSE,
-    local_subtyping::LocalSubtyping, merge_blocks::MergeBlocks,
-    optimize_instructions::OptimizeInstructions, remove_unused_names::RemoveUnusedNames,
-    rereloop::Rereloop, simplify_control_flow::SimplifyControlFlow, vacuum::Vacuum, Pass,
+    dce::DCE, global_refining::GlobalRefining, gufa::GUFA, local_subtyping::LocalSubtyping,
+    merge_blocks::MergeBlocks, optimize_instructions::OptimizeInstructions,
+    remove_unused_names::RemoveUnusedNames, rereloop::Rereloop,
+    simplify_control_flow::SimplifyControlFlow, vacuum::Vacuum, Pass,
 };
 
 /// The Lifter is responsible for running passes that "lift" low-level WASM IR
@@ -40,7 +40,8 @@ impl Lifter {
         Rereloop.run(module);
         RemoveUnusedNames.run(module);
         MergeBlocks.run(module);
-        LocalCSE.run(module);
+        // LocalCSE is currently too aggressive and adds noise.
+        // LocalCSE.run(module);
         OptimizeInstructions::default().run(module);
 
         // 2. Run global analysis to inform later passes
@@ -49,6 +50,7 @@ impl Lifter {
 
         // 3. Identify high-level types and structures
         IdentifyPointers::new().run(module);
+        IdentifyStructs::new().run(module);
         IdentifyBooleans::new().run(module);
 
         // 4. Identify control flow patterns in the structured IR
@@ -62,6 +64,10 @@ impl Lifter {
 
         // 5. Recombine expressions (inlining single-use locals)
         ExpressionRecombination::run(module);
+
+        // 5.5 Final cleanup after recombination to remove any newly redundant code
+        Vacuum.run(module);
+        MergeBlocks.run(module);
 
         // 6. Infer variable names
         NameInferencePass::new().run(module);

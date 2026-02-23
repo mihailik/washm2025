@@ -127,6 +127,7 @@ impl<'a> Visitor for CSETransformer<'a> {
                 let new_local_id = self.locals.alloc(crate::ir::module::Local {
                     name: String::new(),
                     type_,
+                    h_type: None,
                 });
 
                 // Create a local.tee to store the result of the current expression

@@ -238,6 +238,7 @@ impl<'a, 'b> Visitor for InvariantReplacer<'a, 'b> {
             let new_local = self.func.locals_mut().alloc(crate::ir::module::Local {
                 name: String::new(),
                 type_: expr_type,
+                h_type: None,
             });
 
             let mut builder = IrBuilder::new(arena);

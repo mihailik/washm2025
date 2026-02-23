@@ -3,8 +3,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-int32_t struct_get_set(int32_t v0) {
+void struct_get_set(int32_t ptr) {
     int32_t v1 = 0;
-    return ((v2 = v0) + (v3 = 1));
+    ptr = ((ptr) /* load */ + 1);
 }
-

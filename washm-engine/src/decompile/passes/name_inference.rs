@@ -61,18 +61,36 @@ impl NameInferencePass {
     }
 
     pub fn run(&mut self, module: &mut Module) {
-        for (_, func) in &module.functions {
-            if let FunctionKind::Local { body, locals, .. } = &func.kind {
+        let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
+
+        for (_, func) in functions.iter_mut() {
+            if let FunctionKind::Local {
+                body,
+                locals,
+                param_ids: _,
+                var_ids: _,
+            } = &mut func.kind
+            {
                 let mut stats: HashMap<crate::ir::LocalId, VariableStats> = HashMap::new();
                 for (id, _) in locals.iter() {
                     stats.insert(id, VariableStats::default());
                 }
 
                 let mut visitor = NameInferenceVisitor { stats: &mut stats };
-                visitor.visit(*body, &module.expressions);
+                visitor.visit(*body, arena);
 
-                // For now, apply simple names based on the highest scoring trait
-                for (_local_id, variable_stats) in stats {
+                // Use BTreeMap or vec and sort so names are stable
+                let mut sorted_stats: Vec<_> = stats.into_iter().collect();
+                sorted_stats.sort_by_key(|(id, _)| *id);
+
+                let mut name_counts = HashMap::new();
+
+                for (local_id, variable_stats) in sorted_stats {
+                    // Skip if name is already set from DWARF/Names section
+                    if !locals[local_id].name.is_empty() {
+                        continue;
+                    }
+
                     let mut max_score = 0;
                     let mut best_trait = TraitType::Index;
                     for (i, &score) in variable_stats.trait_scores.iter().enumerate() {
@@ -93,7 +111,7 @@ impl NameInferencePass {
                     }
 
                     if max_score > 0 {
-                        let _name = match best_trait {
+                        let base_name = match best_trait {
                             TraitType::Index => "idx",
                             TraitType::Buffer => "ptr",
                             TraitType::Offset => "offset",
@@ -103,10 +121,23 @@ impl NameInferencePass {
                             TraitType::Handle => "h",
                             TraitType::Accumulator => "acc",
                         };
-                        // We need a way to apply this name to all usages of this local.
-                        // In the current architecture, we can't easily annotate the local itself via expressions,
-                        // but we can add a LocalName annotation to the LocalGet/Set sites or somehow record it in the function.
-                        // For now, let's just annotate the expression itself if it's a Get/Set.
+
+                        let count = name_counts.entry(base_name).or_insert(0);
+                        let name = if *count == 0 {
+                            base_name.to_string()
+                        } else {
+                            format!("{}{}", base_name, *count)
+                        };
+                        *count += 1;
+
+                        locals[local_id].name = name;
+                        locals[local_id].h_type = match best_trait {
+                            TraitType::Buffer => {
+                                Some(crate::ir::annotation::HighLevelType::Pointer)
+                            }
+                            TraitType::Boolean => Some(crate::ir::annotation::HighLevelType::Bool),
+                            _ => None,
+                        };
                     }
                 }
             }

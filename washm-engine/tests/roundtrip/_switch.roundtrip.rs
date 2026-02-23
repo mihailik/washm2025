@@ -1,25 +1,12 @@
 // Decompiled to Rust from WebAssembly
 
+fn side_effect(p0: i32); // import from env.side_effect
+
 fn sw(v0: i32) -> i32 {
     let mut v1: i32 = 0;
     let mut v2: i32 = 0;
     {
-        if ((v3 = v2) == (v4 = 4)) {
-            v1 = ((v5 << v6)) /* load */;
-            if (v7 = ((v9 = v5) > (v10 = v4))) {
-                break;
-            } else {
-                break;
-            }
-            v1 = (v8 = 99);
-            if ((v9 = v5) > (v10 = v4)) {
-                break;
-            } else {
-                v2 = v4;
-            }
-            v1 = ((v5 << v6)) /* load */;
-            break;
-        }
-        (v11 = v1)
+        side_effect(if (v1 = (v0 < 3)) { v0 } else { 3 });
+        if v1 { ((v0 * 10) + 10) } else { 999 }
     }
 }

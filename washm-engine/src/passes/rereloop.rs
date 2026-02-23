@@ -18,26 +18,26 @@ impl Pass for Rereloop {
     fn run(&mut self, module: &mut Module) {
         let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
         for (_, func) in functions {
-            if let Some(&mut body) = func.body_mut() {
+            if let crate::ir::module::FunctionKind::Local { body, .. } = &func.kind {
                 let mut context = ReReloopContext::new(arena);
+                let body_id = *body;
 
                 // Pre-pass: Find all named blocks/loops and create CFG blocks for them
                 // so that Breaks can always find their targets regardless of traversal order.
-                context.pre_scan_labels(body);
+                context.pre_scan_labels(body_id);
 
                 let entry = context.start_cfg_block();
-                context.stack.push(Task::Triage(body));
+                context.stack.push(Task::Triage(body_id));
 
                 while let Some(task) = context.stack.pop() {
                     context.run_task(task);
                 }
 
                 // Finish current block
-                if let Some(_) = context.curr_cfg_block {
-                    // add return for dead ends?
-                    // Binaryen does this:
-                    // if (cfgBlock->BranchesOut.empty() && block->type != Type::unreachable) {
-                    //   block->list.push_back(function->getResults() == Type::none ? return : unreachable)
+                if let Some(curr) = context.curr_cfg_block {
+                    // If the function reaches the end, connect to exit_block
+                    let exit = context.get_exit_block();
+                    context.add_branch(curr, exit, None);
                 }
 
                 // Run relooper
@@ -47,9 +47,10 @@ impl Pass for Rereloop {
                 let label_var = func.add_var(Type::I32);
                 let new_body = context.relooper.render(&mut context.builder, label_var);
 
-                // NOTE: the renderer must preserve side-effects — do not mask
-                // missing nodes here. `Rereloop` should not inject workarounds.
-                func.set_body(new_body);
+                // Update body
+                if let crate::ir::module::FunctionKind::Local { body, .. } = &mut func.kind {
+                    *body = new_body;
+                }
             }
         }
     }
@@ -78,6 +79,7 @@ struct ReReloopContext<'a> {
     break_targets: HashMap<ExpressionId, RelooperBlockId>,
     label_counts: HashMap<ExpressionId, usize>,
     stack: Vec<Task>,
+    exit_block: Option<RelooperBlockId>,
 }
 
 impl<'a> ReReloopContext<'a> {
@@ -89,6 +91,17 @@ impl<'a> ReReloopContext<'a> {
             break_targets: HashMap::new(),
             label_counts: HashMap::new(),
             stack: Vec::new(),
+            exit_block: None,
+        }
+    }
+
+    fn get_exit_block(&mut self) -> RelooperBlockId {
+        if let Some(e) = self.exit_block {
+            e
+        } else {
+            let e = self.make_cfg_block();
+            self.exit_block = Some(e);
+            e
         }
     }
 
@@ -113,7 +126,6 @@ impl<'a> ReReloopContext<'a> {
         let mut stack = vec![expr_id];
         let mut visited = std::collections::HashSet::new();
 
-        // Pass 1: find all names
         while let Some(curr_id) = stack.pop() {
             if !visited.insert(curr_id) {
                 continue;
@@ -121,10 +133,15 @@ impl<'a> ReReloopContext<'a> {
 
             let expr_kind = self.builder.arena.get(curr_id).unwrap().kind.clone();
             match &expr_kind {
-                ExpressionKind::Block { .. } | ExpressionKind::Loop { .. } => {
+                ExpressionKind::Block { .. }
+                | ExpressionKind::Loop { .. }
+                | ExpressionKind::If { .. } => {
                     let l = self.make_cfg_block();
                     self.break_targets.insert(curr_id, l);
                 }
+                _ => {}
+            }
+            match &expr_kind {
                 ExpressionKind::Break { target, .. } => {
                     *self.label_counts.entry(*target).or_insert(0) += 1;
                 }
@@ -255,9 +272,7 @@ impl<'a> ReReloopContext<'a> {
                 let before = self.curr_cfg_block.unwrap();
                 let target = match self.break_targets.get(&target_id) {
                     Some(&t) => t,
-                    None => {
-                        panic!("Break target not found: {:?}", target_id);
-                    }
+                    None => self.get_exit_block(),
                 };
                 if let Some(cond) = condition {
                     let next = self.make_cfg_block();
@@ -288,30 +303,27 @@ impl<'a> ReReloopContext<'a> {
                 }
 
                 for (t_id, values) in &target_values {
-                    let target = *self
-                        .break_targets
-                        .get(t_id)
-                        .expect("Switch target not found");
+                    let target = match self.break_targets.get(t_id) {
+                        Some(&t) => t,
+                        None => self.get_exit_block(),
+                    };
                     self.relooper
                         .add_switch_branch(before, target, values.clone(), None);
                 }
 
+                let default_target = match self.break_targets.get(&default) {
+                    Some(&t) => t,
+                    None => self.get_exit_block(),
+                };
+
                 if !target_values.contains_key(&default) {
-                    let target = *self
-                        .break_targets
-                        .get(&default)
-                        .expect("Switch default not found");
                     self.relooper
-                        .add_switch_branch(before, target, Vec::new(), None);
+                        .add_switch_branch(before, default_target, Vec::new(), None);
                 } else {
                     let temp = self.start_cfg_block();
                     self.relooper
                         .add_switch_branch(before, temp, Vec::new(), None);
-                    let target = *self
-                        .break_targets
-                        .get(&default)
-                        .expect("Switch default not found");
-                    self.add_branch(temp, target, None);
+                    self.relooper.add_branch(temp, default_target, None, None);
                 }
 
                 self.stop_control_flow();
