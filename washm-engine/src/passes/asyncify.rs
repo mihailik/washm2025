@@ -458,16 +458,6 @@ impl ModuleAnalyzer {
             if analyzer.can_change_state {
                 can_change_state.insert(id);
             }
-            if analyzer.is_top_most_runtime
-                || (config.is_top_most_runtime && config.add_list.contains(&func.name))
-            {
-                is_top_most_runtime.insert(id);
-            }
-            if analyzer.is_bottom_most_runtime
-                || (config.is_bottom_most_runtime && config.add_list.contains(&func.name))
-            {
-                is_bottom_most_runtime.insert(id);
-            }
 
             if let FunctionKind::Import(import) = &func.kind {
                 let mod_name = &import.module;
@@ -586,28 +576,30 @@ impl<'a> ReadOnlyVisitor for FunctionStateAnalyzer<'a> {
         arena: &IdArena<ExpressionMarker, Expression>,
     ) {
         let expression = &arena[expr];
-        if let ExpressionKind::Call { target, .. } = &expression.kind {
-            let func = &self.module.functions[*target];
-            if let FunctionKind::Import(import) = &func.kind {
-                if import.module == "asyncify" {
-                    match import.name.as_str() {
-                        "start_unwind" | "stop_rewind" => {
-                            self.can_change_state = true;
-                            self.is_top_most_runtime = true;
+        match &expression.kind {
+            ExpressionKind::Call { target, .. } => {
+                let func = &self.module.functions[*target];
+                if let FunctionKind::Import(import) = &func.kind {
+                    if import.module == "asyncify" {
+                        match import.name.as_str() {
+                            "start_unwind" | "stop_rewind" => {
+                                self.can_change_state = true;
+                                self.is_top_most_runtime = true;
+                            }
+                            "stop_unwind" | "start_rewind" => {
+                                self.is_bottom_most_runtime = true;
+                            }
+                            _ => {}
                         }
-                        "stop_unwind" | "start_rewind" => {
-                            self.is_bottom_most_runtime = true;
-                        }
-                        _ => {}
                     }
                 }
             }
+            ExpressionKind::CallIndirect { .. } if !self.config.ignore_indirect => {
+                self.can_change_state = true;
+            }
+            _ => {}
         }
-        if matches!(expression.kind, ExpressionKind::CallIndirect { .. })
-            && !self.config.ignore_indirect
-        {
-            self.can_change_state = true;
-        }
+        self.visit_children(expr, arena);
     }
 }
 
@@ -785,9 +777,16 @@ impl<'a> AsyncifyFlow<'a> {
                     name,
                 };
             }
-            ExpressionKind::Call { target, .. } => {
+            ExpressionKind::Call {
+                target, is_return, ..
+            } => {
                 if self.analyzer.can_change_state.contains(&target) {
-                    *expr_id = self.make_call_support(*expr_id)
+                    if is_return {
+                        // For return_call, we need to stop rewinding BEFORE the tail call
+                        *expr_id = self.make_tail_call_support(*expr_id);
+                    } else {
+                        *expr_id = self.make_call_support(*expr_id);
+                    }
                 }
             }
             ExpressionKind::CallIndirect { .. } => {
@@ -907,6 +906,71 @@ impl<'a> AsyncifyFlow<'a> {
 
         let block = builder.block(Some(site_label), list, result_type);
         builder.if_("", condition, block, None, result_type)
+    }
+
+    fn make_tail_call_support(&mut self, expr_id: ExpressionId) -> ExpressionId {
+        let index = self.call_index;
+        self.call_index += 1;
+
+        let check_call_id = self.funcs.check_call_index;
+        let unwind_id = self.funcs.unwind;
+
+        let check_index = {
+            let mut builder = IrBuilder::with_annotations(self.arena, self.annotations);
+            builder.copy_location(expr_id);
+            let cidx = builder.const_(Literal::I32(index as i32));
+            builder.call(check_call_id, vec![cidx], Type::I32, false)
+        };
+
+        let state_normal = self.make_state_check(AsyncifyState::Normal, expr_id);
+
+        let condition = {
+            let mut builder = IrBuilder::with_annotations(self.arena, self.annotations);
+            builder.copy_location(expr_id);
+            builder.binary(
+                crate::ir::ops::BinaryOp::OrInt32,
+                state_normal,
+                check_index,
+                Type::I32,
+            )
+        };
+
+        let state_unwinding = self.make_state_check(AsyncifyState::Unwinding, expr_id);
+
+        let ucall = {
+            let mut builder = IrBuilder::with_annotations(self.arena, self.annotations);
+            builder.copy_location(expr_id);
+            let cidx2 = builder.const_(Literal::I32(index as i32));
+            builder.call(unwind_id, vec![cidx2], Type::NONE, false)
+        };
+        let unwind_check = {
+            let mut builder = IrBuilder::with_annotations(self.arena, self.annotations);
+            builder.copy_location(expr_id);
+            builder.if_("", state_unwinding, ucall, None, Type::NONE)
+        };
+
+        let state_rewinding = self.make_state_check(AsyncifyState::Rewinding, expr_id);
+
+        let stop_rewind_if_needed = {
+            let mut builder = IrBuilder::with_annotations(self.arena, self.annotations);
+            builder.copy_location(expr_id);
+            let sid = self.state_id;
+            let cnorm = builder.const_(Literal::I32(AsyncifyState::Normal as i32));
+            let gset = builder.global_set(sid, cnorm);
+            builder.if_("", state_rewinding, gset, None, Type::NONE)
+        };
+
+        let mut builder = IrBuilder::with_annotations(self.arena, self.annotations);
+        builder.copy_location(expr_id);
+        let mut list = Vec::new();
+        // For tail call, we MUST stop rewinding before the call,
+        // because the tail call replaces the current frame.
+        list.push(stop_rewind_if_needed);
+        list.push(expr_id);
+        list.push(unwind_check);
+
+        let block = builder.block(Option::<String>::None, list, Type::UNREACHABLE);
+        builder.if_("", condition, block, None, Type::UNREACHABLE)
     }
 }
 

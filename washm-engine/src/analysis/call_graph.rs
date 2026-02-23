@@ -90,7 +90,11 @@ struct CallGraphBuilder<'a> {
 }
 
 impl<'a> ReadOnlyVisitor for CallGraphBuilder<'a> {
-    fn visit(&mut self, expr: ExpressionId, arena: &IdArena<ExpressionMarker, Expression>) {
+    fn visit_expression(
+        &mut self,
+        expr: ExpressionId,
+        arena: &IdArena<ExpressionMarker, Expression>,
+    ) {
         match &arena[expr].kind {
             ExpressionKind::Call { target, .. } => {
                 self.graph
@@ -107,21 +111,6 @@ impl<'a> ReadOnlyVisitor for CallGraphBuilder<'a> {
             }
             ExpressionKind::CallIndirect { .. } => {
                 // TODO: Indirect calls handling
-            }
-            ExpressionKind::Return { value: Some(val) } => {
-                if let ExpressionKind::Call { target, .. } = &arena[*val].kind {
-                    self.graph
-                        .calls
-                        .get_mut(&self.caller)
-                        .unwrap()
-                        .insert(*target);
-
-                    self.graph
-                        .callers
-                        .entry(*target)
-                        .or_default()
-                        .insert(self.caller);
-                }
             }
             _ => {}
         }

@@ -109,6 +109,7 @@ pub enum ExpressionKind {
         target: ExpressionId, // Function index
         operands: Vec<ExpressionId>,
         type_id: TypeId, // Signature ID
+        is_return: bool,
     },
     MemoryGrow {
         memory: MemoryId,
@@ -994,6 +995,7 @@ impl<'a> IrBuilder<'a> {
         operands: Vec<ExpressionId>,
         type_id: TypeId,
         type_: Type,
+        is_return: bool,
     ) -> ExpressionId {
         self.alloc(
             ExpressionKind::CallIndirect {
@@ -1001,6 +1003,7 @@ impl<'a> IrBuilder<'a> {
                 target,
                 operands,
                 type_id,
+                is_return,
             },
             type_,
         )
@@ -1843,11 +1846,13 @@ impl ExpressionKind {
                 target,
                 operands,
                 type_id,
+                is_return,
             } => ExpressionKind::CallIndirect {
                 table: *table,
                 target: builder.deep_clone(*target),
                 operands: operands.iter().map(|&c| builder.deep_clone(c)).collect(),
                 type_id: *type_id,
+                is_return: *is_return,
             },
             ExpressionKind::MemoryGrow { memory, delta } => ExpressionKind::MemoryGrow {
                 memory: *memory,

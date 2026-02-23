@@ -127,6 +127,67 @@ fn test_asyncify_binaryen_sleep_parity() {
 }
 
 #[test]
+fn test_asyncify_tail_call_instrumentation() {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("tests");
+    path.push("fixtures");
+    path.push("asyncify-tail-call.wat");
+
+    let wat_content = fs::read_to_string(&path).expect("Failed to read .wat file");
+    let wasm_binary = wat::parse_str(&wat_content).expect("Failed to parse WAT");
+
+    let mut reader = BinaryReader::new();
+    let mut module = reader
+        .parse_module(&wasm_binary)
+        .expect("Failed to parse module into IR");
+
+    let mut config = AsyncifyConfig::default();
+    config.imports.push("env.sleep".to_string());
+
+    let mut asyncify = Asyncify::new(config);
+    asyncify.run(&mut module);
+
+    // Verify 'tail_sleep' was instrumented for the tail call
+    let tail_sleep_id = module
+        .get_function_by_name("tail_sleep")
+        .expect("tail_sleep missing")
+        .0;
+
+    let func = &module.functions[tail_sleep_id];
+    let body = func.body().expect("tail_sleep missing body");
+
+    use washm::collections::id_arena::IdArena;
+    use washm::ir::expression::{Expression, ExpressionId, ExpressionKind, ExpressionMarker};
+    use washm::ir::visitor::ReadOnlyVisitor;
+    struct TailCallChecker {
+        found: bool,
+    }
+    impl ReadOnlyVisitor for TailCallChecker {
+        fn visit_expression(
+            &mut self,
+            expr_id: ExpressionId,
+            arena: &IdArena<ExpressionMarker, Expression>,
+        ) {
+            if let ExpressionKind::Call {
+                is_return: true, ..
+            } = &arena[expr_id].kind
+            {
+                // Must be inside an If (the instrumentation)
+                self.found = true;
+            }
+            self.visit_children(expr_id, arena);
+        }
+    }
+
+    let mut checker = TailCallChecker { found: false };
+    checker.visit(body, &module.expressions);
+    assert!(
+        checker.found,
+        "tail_sleep should contain an instrumented return_call"
+    );
+}
+
+#[test]
 fn test_asyncify_binaryen_suite_parity() {
     let base_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")

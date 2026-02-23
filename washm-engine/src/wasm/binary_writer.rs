@@ -1973,6 +1973,7 @@ impl BinaryWriter {
                 operands,
                 type_id,
                 table,
+                is_return,
             } => {
                 for &op in operands {
                     Self::write_instructions_with_opts(
@@ -2016,10 +2017,18 @@ impl BinaryWriter {
                 let table_idx = *table_map.get(table).ok_or_else(|| {
                     WriteError::InternalError(format!("Table not found: {:?}", table))
                 })?;
-                emit_instr!(Instruction::CallIndirect {
-                    type_index: idx,
-                    table_index: table_idx,
-                });
+
+                if *is_return {
+                    emit_instr!(Instruction::ReturnCallIndirect {
+                        type_index: idx,
+                        table_index: table_idx,
+                    });
+                } else {
+                    emit_instr!(Instruction::CallIndirect {
+                        type_index: idx,
+                        table_index: table_idx,
+                    });
+                }
             }
             ExpressionKind::RefNull { type_ } => {
                 let reftype = Self::to_ref_type(*type_);

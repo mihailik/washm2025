@@ -110,7 +110,7 @@ fn create_dyncall_wrapper(
     // For now we just use a default TypeId until sig system is restored
     let type_id = TypeId::from_u32(0);
 
-    let body = builder.call_indirect(table, target, operands, type_id, results);
+    let body = builder.call_indirect(table, target, operands, type_id, results, false);
 
     Function::new(
         name.to_string(),

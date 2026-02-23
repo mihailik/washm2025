@@ -1516,7 +1516,8 @@ impl BinaryReader {
                     stack.push(select_expr);
                     value_stack.push(select_expr);
                 }
-                Operator::Call { function_index } => {
+                Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
+                    let is_return = matches!(op, Operator::ReturnCall { .. });
                     let type_idx = self
                         .all_function_types
                         .get(function_index as usize)
@@ -1548,7 +1549,7 @@ impl BinaryReader {
                             func_id,
                             operands,
                             result_type,
-                            false,
+                            is_return,
                         ),
                         offset,
                     );
@@ -1560,7 +1561,12 @@ impl BinaryReader {
                 Operator::CallIndirect {
                     type_index,
                     table_index,
+                }
+                | Operator::ReturnCallIndirect {
+                    type_index,
+                    table_index,
                 } => {
+                    let is_return = matches!(op, Operator::ReturnCallIndirect { .. });
                     let func_type = self
                         .types
                         .get(type_index as usize)
@@ -1597,6 +1603,7 @@ impl BinaryReader {
                             operands,
                             type_id,
                             result_type,
+                            is_return,
                         ),
                         offset,
                     );
