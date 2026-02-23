@@ -16,6 +16,7 @@ impl Pass for Rereloop {
     }
 
     fn run(&mut self, module: &mut Module) {
+        println!("PASS: Rereloop");
         let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
         for (_, func) in functions {
             if let crate::ir::module::FunctionKind::Local { body, .. } = &func.kind {

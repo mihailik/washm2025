@@ -12,6 +12,7 @@ impl Pass for SimplifyControlFlow {
     }
 
     fn run(&mut self, module: &mut Module) {
+        println!("PASS: SimplifyControlFlow");
         let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
         for (_, func) in functions.iter_mut() {
             if let Some(body) = func.body_mut() {

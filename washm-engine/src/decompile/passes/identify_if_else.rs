@@ -19,6 +19,7 @@ impl IdentifyIfElse {
     }
 
     pub fn run(&self, module: &mut Module) {
+        println!("PASS: IdentifyIfElse");
         let mut results = HashMap::new();
 
         for (_, func) in &module.functions {

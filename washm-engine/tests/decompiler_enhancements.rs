@@ -69,10 +69,11 @@ fn test_if_else_reconstruction() {
     let wasm = wat::parse_str(
         r#"
         (module
-            (func (export "ie") (param i32) (result i32)
-                (if (result i32) (local.get 0)
-                    (then (i32.const 1))
-                    (else (i32.const 2))
+            (import "env" "side_effect" (func $se (param i32)))
+            (func (export "ie") (param i32)
+                (if (local.get 0)
+                    (then (call $se (i32.const 1)))
+                    (else (call $se (i32.const 2)))
                 )
             )
         )
@@ -82,6 +83,7 @@ fn test_if_else_reconstruction() {
 
     let mut reader = washm::wasm::binary_reader::BinaryReader::new();
     let mut module = reader.parse_module(&wasm).expect("parse module");
+
     let mut lifter = washm::decompile::Lifter::default();
     lifter.run(&mut module);
 
@@ -93,6 +95,56 @@ fn test_if_else_reconstruction() {
         output.contains("if") && output.contains("else"),
         "Output should contain if-else"
     );
+}
+
+#[test]
+fn test_parse_if_else_leak_isolation() {
+    let wasm = wat::parse_str(
+        r#"
+        (module
+            (func $ie (param i32)
+                (local.get 0)
+                (if
+                    (then
+                        (nop)
+                    )
+                    (else
+                        (nop)
+                    )
+                )
+            )
+        )
+    "#,
+    )
+    .unwrap();
+
+    let mut reader = washm::wasm::binary_reader::BinaryReader::new();
+    let module = reader.parse_module(&wasm).expect("parse module");
+
+    // We check the IR for the "ie" function
+    for (_, func) in &module.functions {
+        if func.name == "ie" {
+            if let washm::ir::module::FunctionKind::Local { body, .. } = &func.kind {
+                use washm::ir::expression::ExpressionKind;
+                let top_block = &module.expressions[*body];
+                if let ExpressionKind::Block { list, .. } = &top_block.kind {
+                    // Check for LEAK. The list should only have 1 item: the If wrapper.
+                    // If we see 2 extra Nops (from then/else) + our If, that's a leak.
+                    assert_eq!(
+                        list.len(),
+                        1,
+                        "Leaked instructions found in top-level block. Expected 1, found {}: {:?}",
+                        list.len(),
+                        list.iter()
+                            .map(|id| format!("{:?}", module.expressions[*id].kind))
+                            .collect::<Vec<_>>()
+                    );
+                } else {
+                    panic!("Expected top-level block");
+                }
+            }
+        }
+    }
 }
 
 #[test]

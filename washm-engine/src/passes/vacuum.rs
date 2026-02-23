@@ -14,6 +14,7 @@ impl Pass for Vacuum {
     }
 
     fn run(&mut self, module: &mut Module) {
+        println!("PASS: Vacuum");
         let (arena, _, functions, _, _, _, _, _, _, _, _, _, _) = module.parts_mut();
         let mut optimizer = VacuumOptimizer {
             arena,

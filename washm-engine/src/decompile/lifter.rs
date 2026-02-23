@@ -1,12 +1,10 @@
 use crate::analysis::call_graph::CallGraph;
 use crate::analysis::global_analysis::GlobalAnalysis;
 use crate::decompile::passes::{
-    ExpressionRecombination, IdentifyBooleans, IdentifyIfElse, IdentifyLoops, IdentifyPointers,
-    IdentifyStructs, NameInferencePass,
+    ExpressionRecombination, IdentifyBooleans, IdentifyPointers, IdentifyStructs, NameInferencePass,
 };
 use crate::ir::module::Module;
 use crate::passes::{
-    dce::DCE, global_refining::GlobalRefining, gufa::GUFA, local_subtyping::LocalSubtyping,
     merge_blocks::MergeBlocks, optimize_instructions::OptimizeInstructions,
     remove_unused_names::RemoveUnusedNames, rereloop::Rereloop,
     simplify_control_flow::SimplifyControlFlow, vacuum::Vacuum, Pass,
@@ -29,14 +27,14 @@ impl Lifter {
 
     pub fn run(&mut self, module: &mut Module) {
         // 0. Preliminary optimizations and inferences
-        LocalSubtyping.run(module);
-        GlobalRefining.run(module);
-        DCE.run(module);
-        GUFA.run(module);
+        // LocalSubtyping.run(module);
+        // GlobalRefining.run(module);
+        // DCE.run(module);
+        // GUFA.run(module);
 
         // 1. Restructure control flow for cleaner decompilation
-        SimplifyControlFlow.run(module);
-        Vacuum.run(module);
+        // SimplifyControlFlow.run(module);
+        // Vacuum.run(module);
         Rereloop.run(module);
         RemoveUnusedNames.run(module);
         MergeBlocks.run(module);
@@ -53,9 +51,10 @@ impl Lifter {
         IdentifyStructs::new().run(module);
         IdentifyBooleans::new().run(module);
 
-        // 4. Identify control flow patterns in the structured IR
-        IdentifyLoops::new().run(module);
-        IdentifyIfElse::new().run(module);
+        // 4. Identify control flow patterns in the structured IR        // Previously we used pattern matching on blocks. With the Relooper,
+        // we already have high-level If/Loop nodes.
+        // IdentifyLoops::new().run(module);
+        // IdentifyIfElse::new().run(module);
 
         // Run cleanup again after structure detection to remove degenerate patterns
         Vacuum.run(module);

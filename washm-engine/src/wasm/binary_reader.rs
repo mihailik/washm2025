@@ -1103,7 +1103,35 @@ impl BinaryReader {
         label_stack: &mut Vec<Option<String>>,
         module: &mut Module,
     ) -> Result<Option<ExpressionId>> {
-        let mut stack = Vec::new();
+        struct InstructionStack {
+            scopes: Vec<Vec<ExpressionId>>,
+        }
+
+        impl InstructionStack {
+            fn new() -> Self {
+                Self {
+                    scopes: vec![Vec::new()],
+                }
+            }
+
+            fn push(&mut self, expr: ExpressionId) {
+                self.scopes.last_mut().unwrap().push(expr);
+            }
+
+            fn enter_scope(&mut self) {
+                self.scopes.push(Vec::new());
+            }
+
+            fn exit_scope(&mut self) -> Vec<ExpressionId> {
+                self.scopes.pop().expect("Balanced scopes")
+            }
+
+            fn into_inner(mut self) -> Vec<ExpressionId> {
+                self.scopes.pop().expect("Final scope")
+            }
+        }
+
+        let mut stack = InstructionStack::new();
         let mut value_stack = Vec::new();
         let mut consumed = Box::new(std::collections::HashSet::new());
 
@@ -1123,7 +1151,6 @@ impl BinaryReader {
             name: String,
             expression_id: ExpressionId,
             result_type: Type,
-            start_stack_len: usize,
             _start_value_stack_len: usize,
             start_offset: u32,
         }
@@ -1146,9 +1173,9 @@ impl BinaryReader {
                     let frame = frames.pop().unwrap();
                     // finalize the expressions that belong to this frame
                     let body_expr = {
-                        let final_stack: Vec<ExpressionId> = stack[frame.start_stack_len..]
-                            .iter()
-                            .copied()
+                        let final_stack: Vec<ExpressionId> = stack
+                            .exit_scope()
+                            .into_iter()
                             .filter(|e| !consumed.contains(e))
                             .collect();
                         if final_stack.is_empty() {
@@ -1267,9 +1294,8 @@ impl BinaryReader {
                                 // finalize the then-branch which is the current accumulated expressions
                                 let then_expr = {
                                     let final_stack: Vec<ExpressionId> = stack
-                                        [top.start_stack_len..]
-                                        .iter()
-                                        .copied()
+                                        .exit_scope()
+                                        .into_iter()
                                         .filter(|e| !consumed.contains(e))
                                         .collect();
                                     if final_stack.is_empty() {
@@ -1296,9 +1322,8 @@ impl BinaryReader {
                                 };
                                 *if_true = Some(then_expr);
                                 *seen_else = true;
-                                // start collecting else-branch expressions from current stack len
-                                top.start_stack_len = stack.len();
-                                // indicate an else was seen
+                                stack.enter_scope(); // Start a new scope for the else branch
+                                                     // indicate an else was seen
                                 self.last_op_was_else = true;
                                 continue; // continue parsing else branch
                             }
@@ -1330,12 +1355,12 @@ impl BinaryReader {
                         kind: ExpressionKind::Nop,
                     });
                     label_stack.push(Some(name.clone()));
+                    stack.enter_scope();
                     frames.push(Frame {
                         kind: FrameKind::Block,
                         name,
                         expression_id,
                         result_type,
-                        start_stack_len: stack.len(),
                         _start_value_stack_len: value_stack.len(),
                         start_offset: offset,
                     });
@@ -1348,12 +1373,12 @@ impl BinaryReader {
                         kind: ExpressionKind::Nop,
                     });
                     label_stack.push(Some(name.clone()));
+                    stack.enter_scope();
                     frames.push(Frame {
                         kind: FrameKind::Loop,
                         name,
                         expression_id,
                         result_type,
-                        start_stack_len: stack.len(),
                         _start_value_stack_len: value_stack.len(),
                         start_offset: offset,
                     });
@@ -1368,6 +1393,7 @@ impl BinaryReader {
                         kind: ExpressionKind::Nop,
                     });
                     label_stack.push(Some(name.clone()));
+                    stack.enter_scope();
                     frames.push(Frame {
                         kind: FrameKind::If {
                             condition,
@@ -1377,7 +1403,6 @@ impl BinaryReader {
                         name,
                         expression_id,
                         result_type,
-                        start_stack_len: stack.len(),
                         _start_value_stack_len: value_stack.len(),
                         start_offset: offset,
                     });
@@ -4708,6 +4733,7 @@ impl BinaryReader {
         }
 
         let mut final_stack: Vec<ExpressionId> = stack
+            .into_inner()
             .into_iter()
             .filter(|e| !consumed.contains(e))
             .collect();
