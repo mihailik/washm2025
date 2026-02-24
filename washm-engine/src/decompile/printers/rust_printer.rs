@@ -110,10 +110,6 @@ impl<'m> RustPrinter<'m> {
         expr_id: ExpressionId,
         name: &Option<String>,
     ) -> bool {
-        eprintln!(
-            "DEBUG: emit_block_label_if_needed for ID {}",
-            expr_id.index()
-        );
         if self.find_all_targets.contains(&expr_id) && !self.wrapped_targets.contains(&expr_id) {
             let label = if let Some(n) = name {
                 Self::sanitize_label(n)
@@ -285,9 +281,6 @@ impl<'m> RustPrinter<'m> {
     }
 
     fn print_function(&mut self, func: &Function) {
-        for (id, expr) in self.module.expressions.iter() {
-            eprintln!("EXPR {}: {:?}", id.index(), expr.kind);
-        }
         self.find_all_targets.clear();
         self.wrapped_targets.clear();
         if let FunctionKind::Local { body, .. } = &func.kind {

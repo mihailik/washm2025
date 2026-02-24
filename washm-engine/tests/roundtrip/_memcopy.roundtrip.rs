@@ -3,7 +3,7 @@
 fn memcopy(v0: i32, v1: i32, v2: i32) {
     let mut v3: i32 = 0;
     {
-        'block_break_18: {
+        'block_break_1: {
             if !(v2) {
                 break 'block_break_1;
             }
