@@ -1237,6 +1237,7 @@ mod tests {
             arena: &mut module.expressions,
             root: None,
             next_targets: Vec::new(),
+            targeted_ids: std::collections::HashSet::new(),
         };
         if let Some(opt_id) = optimizer.optimize(bin, false, true) {
             if !matches!(

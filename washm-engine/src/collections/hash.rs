@@ -1,15 +1,12 @@
-use ahash::AHashMap;
-use ahash::AHasher;
+use std::collections::HashMap;
 use std::hash::Hasher;
 
-pub type FastHashMap<K, V> = AHashMap<K, V>;
+pub type FastHashMap<K, V> = HashMap<K, V>;
 
-/// Compute a 64-bit AHash of a byte slice using the default AHasher keys.
+/// Compute a 64-bit hash of a byte slice.
 pub fn ahash_bytes(bytes: &[u8]) -> u64 {
-    // Use `Default` hasher for now (keys are deterministic for a given
-    // build) — callers relying on exact values should pin expected
-    // seeds or use a support function instead.
-    let mut hasher = AHasher::default();
+    use std::collections::hash_map::DefaultHasher;
+    let mut hasher = DefaultHasher::new();
     hasher.write(bytes);
     hasher.finish()
 }
