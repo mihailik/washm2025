@@ -1,6 +1,7 @@
 [package]
 name = "washm-testgen-macros"
 description = "Test generation macros for the WASHM project"
+publish = false
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
