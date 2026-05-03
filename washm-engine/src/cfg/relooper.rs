@@ -5,6 +5,17 @@ use crate::ir::expression::{
 use crate::ir::{Literal, LocalId, Type};
 use std::collections::{HashMap, HashSet};
 
+// --- RenderContext ---
+
+struct RenderContext<'a, 'b> {
+    builder: &'a mut IrBuilder<'b>,
+    label_var: LocalId,
+    block_map: &'a HashMap<u32, ExpressionId>,
+    shape_map: &'a HashMap<u32, ExpressionId>,
+    stop_at: Option<ShapeId>,
+    in_loop: bool,
+}
+
 // --- Markers & IDs ---
 
 pub struct RelooperBlockMarker;
@@ -81,6 +92,12 @@ pub struct Relooper {
     pub shape_id_counter: u32,
     pub rendered_shapes: std::cell::RefCell<HashSet<ShapeId>>,
     pub rendered_blocks: std::cell::RefCell<HashSet<RelooperBlockId>>,
+}
+
+impl Default for Relooper {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Relooper {
@@ -229,6 +246,7 @@ impl Relooper {
         }
     }
 
+    #[allow(dead_code)]
     fn is_block_empty(
         &self,
         block_id: RelooperBlockId,
@@ -537,7 +555,7 @@ impl Relooper {
             ownership.insert(entry_id, Some(entry_id));
             independent_groups
                 .entry(entry_id)
-                .or_insert_with(|| HashSet::new())
+                .or_default()
                 .insert(entry_id);
             queue.push_back(entry_id);
         }
@@ -785,7 +803,11 @@ impl Relooper {
         ret
     }
 
-    pub fn render(&mut self, builder: &mut IrBuilder, label_var: LocalId) -> ExpressionId {
+    pub fn render<'a, 'b>(
+        &mut self,
+        builder: &'a mut IrBuilder<'b>,
+        label_var: LocalId,
+    ) -> ExpressionId {
         self.rendered_shapes.borrow_mut().clear();
         self.rendered_blocks.borrow_mut().clear();
         let mut block_map = std::collections::HashMap::new();
@@ -808,75 +830,75 @@ impl Relooper {
             shape_map.insert(shape.id, expr);
         }
 
+        let mut ctx = RenderContext {
+            builder,
+            label_var,
+            in_loop: false,
+            block_map: &block_map,
+            shape_map: &shape_map,
+            stop_at: None,
+        };
+
         if let Some(root_id) = self.root {
-            let ret = self.render_shape(
-                builder, label_var, root_id, false, &block_map, &shape_map, None,
-            );
-            ret
+            self.render_shape(&mut ctx, root_id)
         } else {
-            builder.nop()
+            ctx.builder.nop()
         }
     }
 
-    fn render_shape(
-        &mut self,
-        builder: &mut IrBuilder,
-        label_var: LocalId,
-        shape_id: ShapeId,
-        in_loop: bool,
-        block_map: &std::collections::HashMap<u32, ExpressionId>,
-        shape_map: &std::collections::HashMap<u32, ExpressionId>,
-        stop_at: Option<ShapeId>,
-    ) -> ExpressionId {
-        if Some(shape_id) == stop_at {
-            return builder.nop();
+    fn render_shape(&mut self, ctx: &mut RenderContext, shape_id: ShapeId) -> ExpressionId {
+        if Some(shape_id) == ctx.stop_at {
+            return ctx.builder.nop();
         }
         // Avoid re-rendering shapes we've already done
         if let Some(shape) = self.shapes.get(shape_id) {
             if let ShapeKind::Simple { inner } = &shape.kind {
                 if self.rendered_blocks.borrow().contains(inner) {
-                    return block_map[&self.blocks[*inner].id];
+                    return ctx.block_map[&self.blocks[*inner].id];
                 }
-            } else {
-                if self.rendered_shapes.borrow().contains(&shape_id) {
-                    return shape_map[&shape.id];
-                }
+            } else if self.rendered_shapes.borrow().contains(&shape_id) {
+                return ctx.shape_map[&shape.id];
             }
         }
         self.rendered_shapes.borrow_mut().insert(shape_id);
 
         let shape_kind = self.shapes.get(shape_id).unwrap().kind.clone();
+        let shape_id_next = self.shapes.get(shape_id).unwrap().next;
+
         let mut ret = match shape_kind {
             ShapeKind::Simple { inner } => {
                 let inner_id = inner;
                 self.rendered_blocks.borrow_mut().insert(inner_id);
                 let block_id_val = self.blocks.get(inner_id).unwrap().id;
-                let vocab_id = block_map[&block_id_val];
-                let rendered = self.render_block(
-                    builder, label_var, inner_id, shape_id, in_loop, block_map, shape_map, stop_at,
-                );
+                let vocab_id = ctx.block_map[&block_id_val];
+
+                let stop_at = shape_id_next.or(ctx.stop_at);
+                let old_stop_at = ctx.stop_at;
+                ctx.stop_at = stop_at;
+                let rendered = self.render_block(ctx, inner_id, shape_id);
+                ctx.stop_at = old_stop_at;
 
                 // Update the pre-allocated ID with the rendered content.
                 // We must preserve any name (label) that was attached (e.g., as a break target).
                 let old_name =
-                    if let ExpressionKind::Block { name, .. } = &builder.arena[vocab_id].kind {
+                    if let ExpressionKind::Block { name, .. } = &ctx.builder.arena[vocab_id].kind {
                         name.clone()
                     } else {
                         None
                     };
 
                 let is_placeholder =
-                    if let ExpressionKind::Block { list, .. } = &builder.arena[vocab_id].kind {
+                    if let ExpressionKind::Block { list, .. } = &ctx.builder.arena[vocab_id].kind {
                         list.is_empty()
                     } else {
                         false
                     };
 
                 if is_placeholder {
-                    builder.arena[vocab_id] = builder.arena[rendered].clone();
+                    ctx.builder.arena[vocab_id] = ctx.builder.arena[rendered].clone();
                 } else {
                     let mut new_list = vec![rendered];
-                    if let ExpressionKind::Block { list, .. } = &builder.arena[vocab_id].kind {
+                    if let ExpressionKind::Block { list, .. } = &ctx.builder.arena[vocab_id].kind {
                         for &e in list {
                             if e != rendered {
                                 new_list.push(e);
@@ -885,14 +907,14 @@ impl Relooper {
                     } else {
                         new_list.push(vocab_id);
                     }
-                    builder.arena[vocab_id].kind = ExpressionKind::Block {
+                    ctx.builder.arena[vocab_id].kind = ExpressionKind::Block {
                         name: old_name.clone(),
                         list: new_list,
                     };
                 }
 
                 if let Some(n) = old_name {
-                    match &mut builder.arena[vocab_id].kind {
+                    match &mut ctx.builder.arena[vocab_id].kind {
                         ExpressionKind::Block { name, .. }
                         | ExpressionKind::If { name, .. }
                         | ExpressionKind::Loop { name, .. } => {
@@ -909,55 +931,28 @@ impl Relooper {
                 let mut sorted_keys: Vec<_> = inner_map.keys().cloned().collect();
                 sorted_keys.sort();
                 let shape_id_val = self.shapes.get(shape_id).unwrap().id;
-                let vocab_id = shape_map[&shape_id_val];
+                let vocab_id = ctx.shape_map[&shape_id_val];
                 let inner_map_clone = inner_map.clone();
-                let rendered = self.render_multiple_recursive(
-                    builder,
-                    label_var,
-                    &sorted_keys,
-                    &inner_map_clone,
-                    0,
-                    in_loop,
-                    block_map,
-                    shape_map,
-                    stop_at,
-                );
+                let rendered =
+                    self.render_multiple_recursive(ctx, &sorted_keys, &inner_map_clone, 0);
 
                 let old_name =
-                    if let ExpressionKind::Block { name, .. } = &builder.arena[vocab_id].kind {
+                    if let ExpressionKind::Block { name, .. } = &ctx.builder.arena[vocab_id].kind {
                         name.clone()
                     } else {
                         None
                     };
 
-                let is_placeholder =
-                    if let ExpressionKind::Block { list, .. } = &builder.arena[vocab_id].kind {
-                        list.is_empty()
+                if let ExpressionKind::Block { list, .. } = &mut ctx.builder.arena[vocab_id].kind {
+                    if list.is_empty() {
+                        ctx.builder.arena[vocab_id] = ctx.builder.arena[rendered].clone();
                     } else {
-                        false
-                    };
-
-                if is_placeholder {
-                    builder.arena[vocab_id] = builder.arena[rendered].clone();
-                } else {
-                    let mut new_list = vec![rendered];
-                    if let ExpressionKind::Block { list, .. } = &builder.arena[vocab_id].kind {
-                        for &e in list {
-                            if e != rendered {
-                                new_list.push(e);
-                            }
-                        }
-                    } else {
-                        new_list.push(vocab_id);
+                        list.push(rendered);
                     }
-                    builder.arena[vocab_id].kind = ExpressionKind::Block {
-                        name: old_name.clone(),
-                        list: new_list,
-                    };
                 }
 
                 if let Some(n) = old_name {
-                    match &mut builder.arena[vocab_id].kind {
+                    match &mut ctx.builder.arena[vocab_id].kind {
                         ExpressionKind::Block { name, .. }
                         | ExpressionKind::If { name, .. }
                         | ExpressionKind::Loop { name, .. } => {
@@ -971,148 +966,74 @@ impl Relooper {
                 vocab_id
             }
             ShapeKind::Loop { inner, .. } => {
-                let inner_id = inner;
-                let body = self.render_shape(
-                    builder, label_var, inner_id, true, block_map, shape_map, None,
-                );
                 let shape_id_val = self.shapes.get(shape_id).unwrap().id;
-                let vocab_id = shape_map[&shape_id_val];
+                let vocab_id = ctx.shape_map[&shape_id_val];
+
+                let old_in_loop = ctx.in_loop;
+                ctx.in_loop = true;
+                let body = self.render_shape(ctx, inner);
+                ctx.in_loop = old_in_loop;
 
                 let old_name =
-                    if let ExpressionKind::Block { name, .. } = &builder.arena[vocab_id].kind {
+                    if let ExpressionKind::Block { name, .. } = &ctx.builder.arena[vocab_id].kind {
                         name.clone()
                     } else {
                         None
                     };
 
-                let is_placeholder =
-                    if let ExpressionKind::Block { list, .. } = &builder.arena[vocab_id].kind {
-                        list.is_empty()
-                    } else {
-                        false
-                    };
-
-                if is_placeholder {
-                    builder.arena[vocab_id] = Expression {
-                        kind: ExpressionKind::Loop {
-                            name: Some(format!("shape$continue${}", shape_id_val)),
-                            body,
-                        },
-                        type_: Type::from(builder.arena[body].type_),
-                    };
-                } else {
-                    let loop_expr = builder.arena.alloc(Expression {
-                        kind: ExpressionKind::Loop {
-                            name: Some(format!("shape$continue${}", shape_id_val)),
-                            body,
-                        },
-                        type_: Type::from(builder.arena[body].type_),
-                    });
-
-                    let mut new_list = vec![loop_expr];
-                    if let ExpressionKind::Block { list, .. } = &builder.arena[vocab_id].kind {
-                        for &e in list {
-                            if e != loop_expr {
-                                new_list.push(e);
-                            }
-                        }
-                    } else {
-                        new_list.push(vocab_id);
-                    }
-                    builder.arena[vocab_id].kind = ExpressionKind::Block {
-                        name: old_name.clone(),
-                        list: new_list,
-                    };
-                }
-
+                let rendered =
+                    ctx.builder
+                        .loop_(None as Option<&str>, body, crate::ir::BlockType::Empty);
                 if let Some(n) = old_name {
-                    if let ExpressionKind::Loop { name, .. } = &mut builder.arena[vocab_id].kind {
+                    if let ExpressionKind::Loop { name, .. } = &mut ctx.builder.arena[rendered].kind
+                    {
                         if name.is_none() {
                             *name = Some(n);
                         }
                     }
                 }
-                vocab_id
+                rendered
             }
         };
 
-        ret = self.handle_followup_multiples(
-            builder, label_var, ret, shape_id, in_loop, block_map, shape_map, stop_at,
-        );
+        ret = self.handle_followup_multiples(ctx, ret, shape_id);
 
-        let next_id = self.shapes.get(shape_id).unwrap().next;
-        if let Some(nid) = next_id {
-            if Some(nid) == stop_at {
-                return ret;
+        if let Some(next_id) = shape_id_next {
+            if Some(next_id) != ctx.stop_at {
+                let next_rendered = self.render_shape(ctx, next_id);
+                ret = ctx.builder.block(
+                    None as Option<&str>,
+                    vec![ret, next_rendered],
+                    crate::ir::BlockType::Empty,
+                );
             }
-            let next_expr = self.render_shape(
-                builder, label_var, nid, in_loop, block_map, shape_map, stop_at,
-            );
-            // If the next expression is already our current result (due to map reuse)
-            // or is contained within it, do not append it to avoid duplication.
-            if next_expr == ret || self.expr_contains(builder, ret, next_expr) {
-                return ret;
-            }
-            if self.expr_contains(builder, next_expr, ret) {
-                return next_expr;
-            }
-
-            let next_type = builder.arena[next_expr].type_;
-            builder.block(
-                None as Option<&str>,
-                vec![ret, next_expr],
-                crate::ir::BlockType::from(next_type),
-            )
-        } else {
-            ret
         }
+
+        ret
     }
 
     fn render_multiple_recursive(
         &mut self,
-        builder: &mut IrBuilder,
-        label_var: LocalId,
+        ctx: &mut RenderContext,
         keys: &[u32],
         inner_map: &HashMap<u32, ShapeId>,
         index: usize,
-        in_loop: bool,
-        block_map: &std::collections::HashMap<u32, ExpressionId>,
-        shape_map: &std::collections::HashMap<u32, ExpressionId>,
-        stop_at: Option<ShapeId>,
     ) -> ExpressionId {
         if index >= keys.len() {
-            return builder.nop();
+            return ctx.builder.nop();
         }
 
         let id = keys[index];
         let body_shape_id = inner_map[&id];
-        let condition = self.make_check_label(builder, label_var, id);
-        let if_true = self.render_shape(
-            builder,
-            label_var,
-            body_shape_id,
-            in_loop,
-            block_map,
-            shape_map,
-            stop_at,
-        );
+        let condition = self.make_check_label(ctx.builder, ctx.label_var, id);
+        let if_true = self.render_shape(ctx, body_shape_id);
         let if_false = if index + 1 < keys.len() {
-            Some(self.render_multiple_recursive(
-                builder,
-                label_var,
-                keys,
-                inner_map,
-                index + 1,
-                in_loop,
-                block_map,
-                shape_map,
-                stop_at,
-            ))
+            Some(self.render_multiple_recursive(ctx, keys, inner_map, index + 1))
         } else {
             None
         };
 
-        builder.if_(
+        ctx.builder.if_(
             None as Option<&str>,
             condition,
             if_true,
@@ -1123,14 +1044,9 @@ impl Relooper {
 
     fn render_block(
         &mut self,
-        builder: &mut IrBuilder,
-        label_var: LocalId,
+        ctx: &mut RenderContext,
         block_id: RelooperBlockId,
         parent_shape_id: ShapeId,
-        in_loop: bool,
-        block_map: &std::collections::HashMap<u32, ExpressionId>,
-        shape_map: &std::collections::HashMap<u32, ExpressionId>,
-        stop_at: Option<ShapeId>,
     ) -> ExpressionId {
         let (
             block_code,
@@ -1151,11 +1067,11 @@ impl Relooper {
         };
         let mut list = Vec::new();
 
-        if is_checked_multiple_entry && in_loop {
-            list.push(self.make_set_label(builder, label_var, 0));
+        if is_checked_multiple_entry && ctx.in_loop {
+            list.push(self.make_set_label(ctx.builder, ctx.label_var, 0));
         }
 
-        let block_expr = builder.arena.get(block_code).unwrap();
+        let block_expr = ctx.builder.arena.get(block_code).unwrap();
         if let ExpressionKind::Block {
             list: inner_list, ..
         } = &block_expr.kind
@@ -1168,9 +1084,11 @@ impl Relooper {
         if processed_branches_out.is_empty() {
             let ty = list
                 .last()
-                .map(|&id| builder.arena[id].type_)
+                .map(|&id| ctx.builder.arena[id].type_)
                 .unwrap_or(Type::NONE);
-            return builder.block(None as Option<&str>, list, crate::ir::BlockType::from(ty));
+            return ctx
+                .builder
+                .block(None as Option<&str>, list, crate::ir::BlockType::from(ty));
         }
 
         let mut set_label = true;
@@ -1199,19 +1117,8 @@ impl Relooper {
         }
 
         if let Some(switch_cond) = switch_condition {
-            let rendered = self.render_switch(
-                builder,
-                label_var,
-                block_id,
-                switch_cond,
-                list,
-                set_label,
-                &fused_info,
-                in_loop,
-                block_map,
-                shape_map,
-                stop_at,
-            );
+            let rendered =
+                self.render_switch(ctx, block_id, switch_cond, list, set_label, &fused_info);
             return rendered;
         }
 
@@ -1273,32 +1180,19 @@ impl Relooper {
                 || target_branch_code.is_some()
             {
                 let is_in_if_chain = !is_default || remaining_conditions.is_some();
-                let mut content = self.render_branch(
-                    builder,
-                    label_var,
-                    branch_id,
-                    target_id,
-                    block_map,
-                    shape_map,
-                    set_curr_label,
-                    is_in_if_chain,
-                );
+                let mut content =
+                    self.render_branch(ctx, branch_id, target_id, set_curr_label, is_in_if_chain);
                 if has_fused_content {
                     let (fused_m_id, fused_map) = fused_info.as_ref().unwrap();
                     let fused_shape_id = fused_map[&target_block_id_val];
                     let fused_next_stop = self.shapes.get(*fused_m_id).unwrap().next;
                     // Branches should stop at the multiple's join point or our outer boundary.
-                    let target_stop = fused_next_stop.or(stop_at);
-                    let fused_rendered = self.render_shape(
-                        builder,
-                        label_var,
-                        fused_shape_id,
-                        in_loop,
-                        block_map,
-                        shape_map,
-                        target_stop,
-                    );
-                    content = builder.block(
+                    let target_stop = fused_next_stop.or(ctx.stop_at);
+                    let old_stop_at = ctx.stop_at;
+                    ctx.stop_at = target_stop;
+                    let fused_rendered = self.render_shape(ctx, fused_shape_id);
+                    ctx.stop_at = old_stop_at;
+                    content = ctx.builder.block(
                         None as Option<&str>,
                         vec![content, fused_rendered],
                         crate::ir::BlockType::Empty,
@@ -1310,7 +1204,7 @@ impl Relooper {
             if let Some(content) = curr_content {
                 if is_default {
                     let now = if let Some(rem) = remaining_conditions {
-                        builder.if_(
+                        ctx.builder.if_(
                             None as Option<&str>,
                             rem,
                             content,
@@ -1322,7 +1216,9 @@ impl Relooper {
                     };
 
                     if let Some(c_if) = curr_if {
-                        if let ExpressionKind::If { if_false, .. } = &mut builder.arena[c_if].kind {
+                        if let ExpressionKind::If { if_false, .. } =
+                            &mut ctx.builder.arena[c_if].kind
+                        {
                             *if_false = Some(now);
                         }
                     } else {
@@ -1330,7 +1226,7 @@ impl Relooper {
                     }
                 } else {
                     let cond = target_branch_condition.unwrap();
-                    let now = builder.if_(
+                    let now = ctx.builder.if_(
                         None as Option<&str>,
                         cond,
                         content,
@@ -1338,7 +1234,9 @@ impl Relooper {
                         crate::ir::BlockType::Empty,
                     );
                     if let Some(c_if) = curr_if {
-                        if let ExpressionKind::If { if_false, .. } = &mut builder.arena[c_if].kind {
+                        if let ExpressionKind::If { if_false, .. } =
+                            &mut ctx.builder.arena[c_if].kind
+                        {
                             *if_false = Some(now);
                         }
                         curr_if = Some(now);
@@ -1349,9 +1247,12 @@ impl Relooper {
                 }
             } else if !is_default {
                 let cond = target_branch_condition.unwrap();
-                let now = builder.unary(crate::ir::ops::UnaryOp::EqZInt32, cond, Type::I32);
+                let now = ctx
+                    .builder
+                    .unary(crate::ir::ops::UnaryOp::EqZInt32, cond, Type::I32);
                 remaining_conditions = Some(if let Some(rem) = remaining_conditions {
-                    builder.binary(crate::ir::ops::BinaryOp::AndInt32, rem, now, Type::I32)
+                    ctx.builder
+                        .binary(crate::ir::ops::BinaryOp::AndInt32, rem, now, Type::I32)
                 } else {
                     now
                 });
@@ -1370,22 +1271,18 @@ impl Relooper {
             // No root but has targets
         }
 
-        builder.block(None as Option<&str>, list, crate::ir::BlockType::Empty)
+        ctx.builder
+            .block(None as Option<&str>, list, crate::ir::BlockType::Empty)
     }
 
     fn render_switch(
         &mut self,
-        builder: &mut IrBuilder,
-        label_var: LocalId,
+        ctx: &mut RenderContext,
         block_id: RelooperBlockId,
         condition: ExpressionId,
         mut list: Vec<ExpressionId>,
         set_label: bool,
         fused_info: &Option<(ShapeId, HashMap<u32, ShapeId>)>,
-        in_loop: bool,
-        block_map: &std::collections::HashMap<u32, ExpressionId>,
-        shape_map: &std::collections::HashMap<u32, ExpressionId>,
-        stop_at: Option<ShapeId>,
     ) -> ExpressionId {
         let (processed_branches, block_id_val) = {
             let block = self.blocks.get(block_id).unwrap();
@@ -1397,12 +1294,12 @@ impl Relooper {
         // In Binaryen, the switch is rendered by nesting blocks.
         // We'll mimic this.
 
-        let leave_id = builder.arena.alloc(Expression {
+        let leave_id = ctx.builder.arena.alloc(Expression {
             kind: ExpressionKind::Nop, // placeholder name will be set later
             type_: Type::NONE,
         });
 
-        let mut current_outer = builder.arena.alloc(Expression {
+        let mut current_outer = ctx.builder.arena.alloc(Expression {
             kind: ExpressionKind::Block {
                 name: None,
                 list: Vec::new(),
@@ -1416,7 +1313,7 @@ impl Relooper {
 
         for (&_target_id, &branch_id) in &processed_branches {
             let branch = self.branches.get(branch_id).unwrap();
-            if branch.switch_values.as_ref().map_or(true, |v| v.is_empty()) {
+            if branch.switch_values.as_ref().is_none_or(|v| v.is_empty()) {
                 switch_default_name = format!("{}$default", base);
                 break;
             }
@@ -1437,9 +1334,8 @@ impl Relooper {
                 let b = self.branches.get(branch_id).unwrap();
                 (b.switch_values.is_some(), b.switch_values.clone())
             };
-            let is_default = branch_has_switch_values
-                && has_switch_values.as_ref().unwrap().is_empty()
-                || !branch_has_switch_values;
+            let is_default =
+                !branch_has_switch_values || has_switch_values.as_ref().unwrap().is_empty();
 
             let mut curr_name = if is_default {
                 format!("{}$default", base)
@@ -1470,12 +1366,9 @@ impl Relooper {
                 || branch_code.is_some()
             {
                 let mut content = self.render_branch(
-                    builder,
-                    label_var,
+                    ctx,
                     branch_id,
                     target_id,
-                    block_map,
-                    shape_map,
                     set_curr_label,
                     false, // multiple case is never a condition chain in this sense
                 );
@@ -1484,17 +1377,12 @@ impl Relooper {
                     let fused_shape_id = fused_map[&target_block_id_val];
                     let fused_next_stop = self.shapes.get(*fused_m_id).unwrap().next;
                     // Use more restrictive stop boundary
-                    let target_stop = fused_next_stop.or(stop_at);
-                    let fused_rendered = self.render_shape(
-                        builder,
-                        label_var,
-                        fused_shape_id,
-                        in_loop,
-                        block_map,
-                        shape_map,
-                        target_stop,
-                    );
-                    content = builder.block(
+                    let target_stop = fused_next_stop.or(ctx.stop_at);
+                    let old_stop_at = ctx.stop_at;
+                    ctx.stop_at = target_stop;
+                    let fused_rendered = self.render_shape(ctx, fused_shape_id);
+                    ctx.stop_at = old_stop_at;
+                    content = ctx.builder.block(
                         None as Option<&str>,
                         vec![content, fused_rendered],
                         crate::ir::BlockType::Empty,
@@ -1508,7 +1396,7 @@ impl Relooper {
             }
 
             if let Some(content) = curr_content {
-                let next_outer = builder.arena.alloc(Expression {
+                let next_outer = ctx.builder.arena.alloc(Expression {
                     kind: ExpressionKind::Block {
                         name: None,
                         list: vec![current_outer, content],
@@ -1517,12 +1405,14 @@ impl Relooper {
                 });
 
                 // Name the old outer so it can be jumped to
-                if let ExpressionKind::Block { name, .. } = &mut builder.arena[current_outer].kind {
+                if let ExpressionKind::Block { name, .. } =
+                    &mut ctx.builder.arena[current_outer].kind
+                {
                     *name = Some(curr_name.clone());
                 }
 
-                if builder.arena[content].type_ != Type::UNREACHABLE {
-                    let br = builder.arena.alloc(Expression {
+                if ctx.builder.arena[content].type_ != Type::UNREACHABLE {
+                    let br = ctx.builder.arena.alloc(Expression {
                         kind: ExpressionKind::Break {
                             target: leave_id,
                             condition: None,
@@ -1530,7 +1420,8 @@ impl Relooper {
                         },
                         type_: Type::NONE,
                     });
-                    if let ExpressionKind::Block { list, .. } = &mut builder.arena[next_outer].kind
+                    if let ExpressionKind::Block { list, .. } =
+                        &mut ctx.builder.arena[next_outer].kind
                     {
                         list.push(br);
                     }
@@ -1557,14 +1448,15 @@ impl Relooper {
         }
 
         // Finalize leave block
-        builder.arena[leave_id].kind = ExpressionKind::Block {
+        ctx.builder.arena[leave_id].kind = ExpressionKind::Block {
             name: Some(leave_name.clone()),
             list: vec![current_outer],
         };
 
         // If current_outer (or one of its ancestors) hasn't been named, and it's inner_switch_block,
         // name it with the default name so it can be targeted.
-        if let ExpressionKind::Block { name, .. } = &mut builder.arena[inner_switch_block].kind {
+        if let ExpressionKind::Block { name, .. } = &mut ctx.builder.arena[inner_switch_block].kind
+        {
             if name.is_none() {
                 *name = Some(switch_default_name.clone());
             }
@@ -1578,11 +1470,11 @@ impl Relooper {
             if !visited.insert(sid) {
                 continue;
             }
-            let name = if let ExpressionKind::Block { name, .. } = &builder.arena[sid].kind {
+            let name = if let ExpressionKind::Block { name, .. } = &ctx.builder.arena[sid].kind {
                 name.clone()
-            } else if let ExpressionKind::If { name, .. } = &builder.arena[sid].kind {
+            } else if let ExpressionKind::If { name, .. } = &ctx.builder.arena[sid].kind {
                 name.clone()
-            } else if let ExpressionKind::Loop { name, .. } = &builder.arena[sid].kind {
+            } else if let ExpressionKind::Loop { name, .. } = &ctx.builder.arena[sid].kind {
                 name.clone()
             } else {
                 None
@@ -1593,7 +1485,7 @@ impl Relooper {
             }
 
             // Explicitly handle all IR types that can have children
-            match &builder.arena[sid].kind {
+            match &ctx.builder.arena[sid].kind {
                 ExpressionKind::Block { list, .. } => {
                     for &child in list {
                         search_stack.push(child);
@@ -1671,7 +1563,7 @@ impl Relooper {
                 }
                 _ => {
                     // Fallback for others (like Nop, Const, LocalGet etc have no children)
-                    builder.arena[sid].kind.for_each_child(|child| {
+                    ctx.builder.arena[sid].kind.for_each_child(|child| {
                         search_stack.push(child);
                     });
                 }
@@ -1693,24 +1585,23 @@ impl Relooper {
             )
         });
 
-        let switch_expr = builder.switch(table_ids, default_id, condition, None);
+        let switch_expr = ctx.builder.switch(table_ids, default_id, condition, None);
         // Put switch inside the inner_switch_block
-        if let ExpressionKind::Block { list, .. } = &mut builder.arena[inner_switch_block].kind {
+        if let ExpressionKind::Block { list, .. } = &mut ctx.builder.arena[inner_switch_block].kind
+        {
             list.push(switch_expr);
         }
 
         list.push(leave_id);
-        builder.block(None as Option<&str>, list, crate::ir::BlockType::Empty)
+        ctx.builder
+            .block(None as Option<&str>, list, crate::ir::BlockType::Empty)
     }
 
     fn render_branch(
         &mut self,
-        builder: &mut IrBuilder,
-        label_var: LocalId,
+        ctx: &mut RenderContext,
         branch_id: RelooperBranchId,
         target_id: RelooperBlockId,
-        block_map: &std::collections::HashMap<u32, ExpressionId>,
-        shape_map: &std::collections::HashMap<u32, ExpressionId>,
         set_label: bool,
         is_in_if_chain: bool,
     ) -> ExpressionId {
@@ -1720,7 +1611,7 @@ impl Relooper {
         };
         let (target_id_val, target_expr_id) = {
             let target = self.blocks.get(target_id).unwrap();
-            (target.id, block_map[&target.id])
+            (target.id, ctx.block_map[&target.id])
         };
         let mut list = Vec::new();
 
@@ -1729,13 +1620,13 @@ impl Relooper {
         }
 
         if set_label {
-            list.push(self.make_set_label(builder, label_var, target_id_val));
+            list.push(self.make_set_label(ctx.builder, ctx.label_var, target_id_val));
         }
 
         match branch_type {
             BranchType::Direct => {
                 if is_in_if_chain {
-                    let br = builder.arena.alloc(Expression {
+                    let br = ctx.builder.arena.alloc(Expression {
                         kind: ExpressionKind::Break {
                             target: target_expr_id,
                             condition: None,
@@ -1747,7 +1638,7 @@ impl Relooper {
                 }
             }
             BranchType::Break => {
-                let br = builder.arena.alloc(Expression {
+                let br = ctx.builder.arena.alloc(Expression {
                     kind: ExpressionKind::Break {
                         target: target_expr_id,
                         condition: None,
@@ -1760,8 +1651,8 @@ impl Relooper {
             BranchType::Continue => {
                 let ancestor_id = branch_ancestor.unwrap();
                 let ancestor_id_val = self.shapes.get(ancestor_id).unwrap().id;
-                let ancestor_expr_id = shape_map[&ancestor_id_val];
-                let br = builder.arena.alloc(Expression {
+                let ancestor_expr_id = ctx.shape_map[&ancestor_id_val];
+                let br = ctx.builder.arena.alloc(Expression {
                     kind: ExpressionKind::Break {
                         target: ancestor_expr_id,
                         condition: None,
@@ -1773,7 +1664,8 @@ impl Relooper {
             }
         }
 
-        builder.block(None as Option<&str>, list, crate::ir::BlockType::Empty)
+        ctx.builder
+            .block(None as Option<&str>, list, crate::ir::BlockType::Empty)
     }
 
     fn make_check_label(
@@ -1792,43 +1684,17 @@ impl Relooper {
         builder.local_set(label_var, val)
     }
 
-    fn expr_contains(&self, builder: &IrBuilder, root: ExpressionId, target: ExpressionId) -> bool {
-        let mut stack = vec![root];
-        while let Some(eid) = stack.pop() {
-            if eid == target {
-                return true;
-            }
-            // Push children for traversal
-            match &builder.arena[eid].kind {
-                ExpressionKind::Block { list, .. } => {
-                    for &c in list {
-                        stack.push(c);
-                    }
-                }
-                kind => {
-                    kind.for_each_child(|child| stack.push(child));
-                }
-            }
-        }
-        false
-    }
-
     fn handle_followup_multiples(
         &mut self,
-        builder: &mut IrBuilder,
-        label_var: LocalId,
+        ctx: &mut RenderContext,
         ret: ExpressionId,
         shape_id: ShapeId,
-        in_loop: bool,
-        block_map: &std::collections::HashMap<u32, ExpressionId>,
-        shape_map: &std::collections::HashMap<u32, ExpressionId>,
-        stop_at: Option<ShapeId>,
     ) -> ExpressionId {
         let mut curr_expr = ret;
 
         // while Parent->Next is Multiple
         while let Some(next_id) = self.shapes.get(shape_id).unwrap().next {
-            if Some(next_id) == stop_at {
+            if Some(next_id) == ctx.stop_at {
                 break;
             }
             let next_shape_kind = self.shapes.get(next_id).unwrap().kind.clone();
@@ -1843,17 +1709,9 @@ impl Relooper {
                 let mut list = vec![curr_expr];
                 for id in sorted_ids {
                     let body_shape_id = inner_map[&id];
-                    let condition = self.make_check_label(builder, label_var, id);
-                    let body_rendered = self.render_shape(
-                        builder,
-                        label_var,
-                        body_shape_id,
-                        in_loop,
-                        block_map,
-                        shape_map,
-                        stop_at,
-                    );
-                    list.push(builder.if_(
+                    let condition = self.make_check_label(ctx.builder, ctx.label_var, id);
+                    let body_rendered = self.render_shape(ctx, body_shape_id);
+                    list.push(ctx.builder.if_(
                         None as Option<&str>,
                         condition,
                         body_rendered,
@@ -1861,7 +1719,9 @@ impl Relooper {
                         crate::ir::BlockType::Empty,
                     ));
                 }
-                curr_expr = builder.block(None as Option<&str>, list, crate::ir::BlockType::Empty);
+                curr_expr =
+                    ctx.builder
+                        .block(None as Option<&str>, list, crate::ir::BlockType::Empty);
             } else {
                 break;
             }
@@ -1874,8 +1734,10 @@ impl Relooper {
             match next_shape_kind {
                 ShapeKind::Simple { inner } => {
                     let target_block_id = self.blocks.get(inner).unwrap().id;
-                    let vocab_id = block_map[&target_block_id];
-                    if let ExpressionKind::Block { name, .. } = &mut builder.arena[vocab_id].kind {
+                    let vocab_id = ctx.block_map[&target_block_id];
+                    if let ExpressionKind::Block { name, .. } =
+                        &mut ctx.builder.arena[vocab_id].kind
+                    {
                         if name.is_none() {
                             *name = Some(format!("block$break${}", target_block_id));
                         }
@@ -1884,9 +1746,9 @@ impl Relooper {
                 ShapeKind::Loop { entries, .. } => {
                     for entry_id in entries {
                         let target_block_id = self.blocks.get(entry_id).unwrap().id;
-                        let vocab_id = block_map[&target_block_id];
+                        let vocab_id = ctx.block_map[&target_block_id];
                         if let ExpressionKind::Block { name, .. } =
-                            &mut builder.arena[vocab_id].kind
+                            &mut ctx.builder.arena[vocab_id].kind
                         {
                             if name.is_none() {
                                 *name = Some(format!("block$break${}", target_block_id));

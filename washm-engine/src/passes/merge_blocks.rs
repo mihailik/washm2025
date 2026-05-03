@@ -38,6 +38,7 @@ impl MergeBlocks {
         expr_id: ExpressionId,
     ) -> std::collections::HashSet<ExpressionId> {
         struct TargetCollector<'a> {
+            #[allow(dead_code)]
             arena: &'a IdArena<ExpressionMarker, Expression>,
             targets: std::collections::HashSet<ExpressionId>,
         }
@@ -200,7 +201,7 @@ impl BlockMerger {
                             | ExpressionKind::Loop { .. }
                             | ExpressionKind::Return { .. }
                             | ExpressionKind::Switch { .. }
-                            | ExpressionKind::If { .. } => return true,
+                            | ExpressionKind::If { .. } => true,
                             ExpressionKind::Block { list, .. } => {
                                 for &c in list {
                                     if contains_control_flow(arena, c, seen) {

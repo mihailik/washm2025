@@ -66,9 +66,7 @@ pub fn roundtrip_tests(_attr: TokenStream, item: TokenStream) -> TokenStream {
             let parsed = syn::parse2(test_fn.clone()).unwrap_or_else(|e| {
                 panic!(
                     "Failed to generate roundtrip tests for {}: {}\nTOKENS:\n{}",
-                    path_str,
-                    e,
-                    test_fn.to_string()
+                    path_str, e, test_fn
                 )
             });
             content.push(parsed);

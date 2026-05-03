@@ -15,7 +15,7 @@ fn memcopy_survives_rereloop() {
     let wasm_path = temp_wasm.path();
 
     let out = Command::new("rustc")
-        .args(&[
+        .args([
             "--target",
             "wasm32-unknown-unknown",
             "-O",
@@ -37,7 +37,7 @@ fn memcopy_survives_rereloop() {
     let mut module = reader.parse_module(&wasm_bytes).expect("parse");
 
     // Run lifter (full pipeline used by tests)
-    let mut lifter = Lifter::default();
+    let mut lifter = Lifter;
     lifter.run(&mut module);
 
     // Search for MemoryCopy reachable from the function body

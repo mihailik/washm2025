@@ -2,7 +2,6 @@ use washm::ir::annotation::DebugLocation;
 use washm::passes::asyncify::{Asyncify, AsyncifyConfig};
 use washm::passes::Pass;
 use washm::wasm::binary_reader::BinaryReader;
-use washm::wasm::binary_writer::BinaryWriter;
 
 #[test]
 fn test_asyncify_preserves_debug_location() {

@@ -55,7 +55,7 @@ fn debug_line_emitted() {
         if let wasmparser::Payload::CustomSection(s) = payload {
             if s.name() == ".debug_line" {
                 found = true;
-                assert!(s.data().len() > 0, ".debug_line section is empty");
+                assert!(!s.data().is_empty(), ".debug_line section is empty");
             }
         }
     }

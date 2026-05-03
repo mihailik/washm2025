@@ -29,6 +29,7 @@ impl SimplifyControlFlow {
         expr_id: ExpressionId,
     ) -> std::collections::HashSet<ExpressionId> {
         struct TargetCollector<'a> {
+            #[allow(dead_code)]
             arena: &'a IdArena<ExpressionMarker, Expression>,
             targets: std::collections::HashSet<ExpressionId>,
         }
@@ -170,11 +171,9 @@ impl Visitor for ControlFlowSimplifier {
             let if_true_id = *if_true;
             let if_false_id = *if_false_id;
 
-            if self.is_terminator(if_true_id, arena) {
-                if !self.is_terminator(if_false_id, arena) {
-                    // This is only actionable if we're a child of a block,
-                    // which is handled by the block visit above.
-                }
+            if self.is_terminator(if_true_id, arena) && !self.is_terminator(if_false_id, arena) {
+                // This is only actionable if we're a child of a block,
+                // which is handled by the block visit above.
             }
         }
     }

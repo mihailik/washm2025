@@ -20,23 +20,12 @@ pub enum TraitType {
 
 /// Compact representation of variable usage and hints.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct VariableStats {
     pub trait_scores: [u8; 8],
     pub name_hint_id: u32,
     pub hint_confidence: u8,
     _padding: [u8; 3],
-}
-
-impl Default for VariableStats {
-    fn default() -> Self {
-        Self {
-            trait_scores: [0; 8],
-            name_hint_id: 0,
-            hint_confidence: 0,
-            _padding: [0; 3],
-        }
-    }
 }
 
 /// A synthesized identity for a variable after all passes.

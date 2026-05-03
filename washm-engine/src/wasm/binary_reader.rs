@@ -655,100 +655,77 @@ impl BinaryReader {
                             reader.data(),
                             reader.data_offset(),
                         ));
-                        for subsection in name_reader {
-                            if let Ok(subsection) = subsection {
-                                match subsection {
-                                    Name::Function(map) => {
-                                        for entry in map {
-                                            if let Ok(naming) = entry {
-                                                if let Some(&id) =
-                                                    self.func_ids.get(naming.index as usize)
+                        for subsection in name_reader.flatten() {
+                            match subsection {
+                                Name::Function(map) => {
+                                    for naming in map.into_iter().flatten() {
+                                        if let Some(&id) = self.func_ids.get(naming.index as usize)
+                                        {
+                                            if let Some(f) = module.functions.get_mut(id) {
+                                                let new_name = naming.name.to_string();
+                                                if f.name.is_empty() || f.name.starts_with("func_")
                                                 {
-                                                    if let Some(f) = module.functions.get_mut(id) {
-                                                        let new_name = naming.name.to_string();
-                                                        if f.name.is_empty()
-                                                            || f.name.starts_with("func_")
-                                                        {
-                                                            f.name = new_name;
-                                                        }
-                                                    }
+                                                    f.name = new_name;
                                                 }
                                             }
                                         }
                                     }
-                                    Name::Global(map) => {
-                                        for entry in map {
-                                            if let Ok(naming) = entry {
-                                                if let Some(&id) =
-                                                    self.global_ids.get(naming.index as usize)
-                                                {
-                                                    if let Some(g) = module.globals.get_mut(id) {
-                                                        g.name = naming.name.to_string();
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Name::Table(map) => {
-                                        for entry in map {
-                                            if let Ok(naming) = entry {
-                                                if let Some(&id) =
-                                                    self.table_ids.get(naming.index as usize)
-                                                {
-                                                    if let Some(t) = module.tables.get_mut(id) {
-                                                        t.name = naming.name.to_string();
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Name::Memory(map) => {
-                                        for entry in map {
-                                            if let Ok(naming) = entry {
-                                                if let Some(&id) =
-                                                    self.memory_ids.get(naming.index as usize)
-                                                {
-                                                    if let Some(m) = module.memories.get_mut(id) {
-                                                        m.name = naming.name.to_string();
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Name::Local(map) => {
-                                        for entry in map {
-                                            if let Ok(naming) = entry {
-                                                if let Some(&id) =
-                                                    self.func_ids.get(naming.index as usize)
-                                                {
-                                                    if let Some(f) = module.functions.get_mut(id) {
-                                                        if let crate::ir::module::FunctionKind::Local {
-                                                            locals,
-                                                            ..
-                                                        } = &mut f.kind
-                                                        {
-                                                            for l_naming in naming.names {
-                                                                if let Ok(l) = l_naming {
-                                                                    let l_id =
-                                                                        crate::ir::LocalId::from_u32(
-                                                                            l.index,
-                                                                        );
-                                                                    if let Some(local) =
-                                                                        locals.get_mut(l_id)
-                                                                    {
-                                                                        local.name =
-                                                                            l.name.to_string();
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    _ => {}
                                 }
+                                Name::Global(map) => {
+                                    for naming in map.into_iter().flatten() {
+                                        if let Some(&id) =
+                                            self.global_ids.get(naming.index as usize)
+                                        {
+                                            if let Some(g) = module.globals.get_mut(id) {
+                                                g.name = naming.name.to_string();
+                                            }
+                                        }
+                                    }
+                                }
+                                Name::Table(map) => {
+                                    for naming in map.into_iter().flatten() {
+                                        if let Some(&id) = self.table_ids.get(naming.index as usize)
+                                        {
+                                            if let Some(t) = module.tables.get_mut(id) {
+                                                t.name = naming.name.to_string();
+                                            }
+                                        }
+                                    }
+                                }
+                                Name::Memory(map) => {
+                                    for naming in map.into_iter().flatten() {
+                                        if let Some(&id) =
+                                            self.memory_ids.get(naming.index as usize)
+                                        {
+                                            if let Some(m) = module.memories.get_mut(id) {
+                                                m.name = naming.name.to_string();
+                                            }
+                                        }
+                                    }
+                                }
+                                Name::Local(map) => {
+                                    for naming in map.into_iter().flatten() {
+                                        if let Some(&id) = self.func_ids.get(naming.index as usize)
+                                        {
+                                            if let Some(f) = module.functions.get_mut(id) {
+                                                if let crate::ir::module::FunctionKind::Local {
+                                                    locals,
+                                                    ..
+                                                } = &mut f.kind
+                                                {
+                                                    for l in naming.names.into_iter().flatten() {
+                                                        let l_id =
+                                                            crate::ir::LocalId::from_u32(l.index);
+                                                        if let Some(local) = locals.get_mut(l_id) {
+                                                            local.name = l.name.to_string();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -922,12 +899,12 @@ impl BinaryReader {
                                                         let new_idx =
                                                             module.debug_filenames.len() as u32;
                                                         let mut name_found = String::new();
-                                                        if let Some(file_entry) = header.file(local_idx_raw.into()) {
+                                                        if let Some(file_entry) = header.file(local_idx_raw) {
                                                             let mut path = String::new();
                                                             let dir_idx = file_entry.directory_index();
                                                             if dir_idx > 0 {
                                                                 if let Some(dir_attr) =
-                                                                    header.directory(dir_idx.into())
+                                                                    header.directory(dir_idx)
                                                                 {
                                                                     if let Ok(dir_name) = dwarf
                                                                         .attr_string(
@@ -976,18 +953,17 @@ impl BinaryReader {
                                                     address,
                                                     global_idx
                                                 );
-                                                let local_func_idx = match body_starts
-                                                    .binary_search(&(address as u64))
-                                                {
-                                                    Ok(idx) => idx,
-                                                    Err(idx) => {
-                                                        if idx > 0 {
-                                                            idx - 1
-                                                        } else {
-                                                            continue;
+                                                let local_func_idx =
+                                                    match body_starts.binary_search(&{ address }) {
+                                                        Ok(idx) => idx,
+                                                        Err(idx) => {
+                                                            if idx > 0 {
+                                                                idx - 1
+                                                            } else {
+                                                                continue;
+                                                            }
                                                         }
-                                                    }
-                                                };
+                                                    };
                                                 let func_idx = local_func_idx + num_imports;
                                                 log::debug!(
                                                     "Row belongs to local_func_idx={} func_idx={}",
@@ -1650,7 +1626,7 @@ impl BinaryReader {
                                 self.current_func_local_ids.len()
                             );
                             self.current_func_local_ids
-                                .get(0)
+                                .first()
                                 .copied()
                                 .unwrap_or(crate::ir::module::LocalId::null())
                         });

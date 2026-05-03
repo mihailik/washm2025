@@ -86,7 +86,7 @@ fn name_and_producers_sections_survive() {
     for payload in Parser::new(0).parse_all(&out) {
         let payload = payload.expect("parser");
         if let wasmparser::Payload::CustomSection(s) = payload {
-            if s.name() == "producers" && s.data() == &[0xAA] {
+            if s.name() == "producers" && s.data() == [0xAA] {
                 has_producers = true;
             }
         }

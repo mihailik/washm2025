@@ -15,8 +15,21 @@ fn test_string_ops() {
     assert_eq!(s, "HELLO");
 }
 
+fn test_coverage_handshake() {
+    let dummy_ptr = 0x12345678u32;
+    crate::bridges::host::set_coverage_ptr(dummy_ptr)
+        .expect("Failed to write to /dev/host/washm/coverage_ptr");
+    let read_ptr = crate::bridges::host::get_coverage_ptr();
+    assert_eq!(dummy_ptr, read_ptr, "Coverage pointer handshake failed");
+    println!(
+        "Coverage Handshake Successful: Shared PTR is 0x{:X}",
+        read_ptr
+    );
+}
+
 // Registration function called explicitly
 pub fn register_example_tests() {
     register_test("test_basic_math", test_basic_math);
     register_test("test_string_ops", test_string_ops);
+    register_test("test_coverage_handshake", test_coverage_handshake);
 }

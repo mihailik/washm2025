@@ -39,6 +39,7 @@ impl Vacuum {
         expr_id: ExpressionId,
     ) -> std::collections::HashSet<ExpressionId> {
         struct TargetCollector<'a> {
+            #[allow(dead_code)]
             arena: &'a IdArena<ExpressionMarker, Expression>,
             targets: std::collections::HashSet<ExpressionId>,
         }
@@ -80,6 +81,7 @@ impl Vacuum {
 struct VacuumOptimizer<'a> {
     arena: &'a mut IdArena<ExpressionMarker, Expression>,
     // Root expression id for the current function being processed.
+    #[allow(dead_code)]
     root: Option<ExpressionId>,
     // Stack of expressions that are reachable via fallthrough from the current point.
     // A break to any of these is redundant.
@@ -295,10 +297,10 @@ impl<'a> VacuumOptimizer<'a> {
                 let list_len = list.len();
                 let mut processed_list = Vec::with_capacity(list_len);
 
-                for i in 0..list_len {
+                for (i, item_id) in list.iter().copied().enumerate() {
                     // An instruction is at the "end" of this block if nothing follows it
                     // effectively (only Nops or nothing at all).
-                    let is_last = i == list_len - 1;
+                    let is_last = i == list.len() - 1;
                     let mut current_targets = if is_last {
                         self.next_targets.clone()
                     } else {
@@ -310,7 +312,7 @@ impl<'a> VacuumOptimizer<'a> {
                     }
 
                     let saved_targets = std::mem::replace(&mut self.next_targets, current_targets);
-                    let mut item = list[i];
+                    let mut item = item_id;
                     self.process(&mut item);
                     processed_list.push(item);
                     self.next_targets = saved_targets;
@@ -388,13 +390,11 @@ impl<'a> VacuumOptimizer<'a> {
                     return;
                 }
 
-                if final_name.is_none() && !is_targeted {
-                    if new_list.len() == 1 {
-                        let child_id = new_list[0];
-                        *expr_id = child_id;
-                        self.process(expr_id);
-                        return;
-                    }
+                if final_name.is_none() && !is_targeted && new_list.len() == 1 {
+                    let child_id = new_list[0];
+                    *expr_id = child_id;
+                    self.process(expr_id);
+                    return;
                 }
 
                 self.arena[*expr_id].kind = ExpressionKind::Block {
@@ -588,44 +588,42 @@ impl<'a> VacuumOptimizer<'a> {
                     name,
                     condition,
                     if_true,
-                    if_false,
+                    if_false: Some(false_id),
                 } = self.arena[value].kind.clone()
                 {
-                    if let Some(false_id) = if_false {
-                        if self.arena[if_true].type_ == Type::UNREACHABLE
-                            && self.arena[false_id].type_.is_concrete()
-                        {
-                            // make a new drop for the false arm and replace the if's false with it
-                            let new_drop = self.arena.alloc(Expression::new(
-                                ExpressionKind::Drop { value: false_id },
-                                Type::NONE,
-                            ));
-                            self.arena[value].kind = ExpressionKind::If {
-                                name: name.clone(),
-                                condition,
-                                if_true,
-                                if_false: Some(new_drop),
-                            };
-                            self.arena[value].type_ = Type::NONE;
-                            *expr_id = value;
-                            return;
-                        } else if self.arena[false_id].type_ == Type::UNREACHABLE
-                            && self.arena[if_true].type_.is_concrete()
-                        {
-                            let new_drop = self.arena.alloc(Expression::new(
-                                ExpressionKind::Drop { value: if_true },
-                                Type::NONE,
-                            ));
-                            self.arena[value].kind = ExpressionKind::If {
-                                name: name.clone(),
-                                condition,
-                                if_true: new_drop,
-                                if_false: None,
-                            };
-                            self.arena[value].type_ = Type::NONE;
-                            *expr_id = value;
-                            return;
-                        }
+                    if self.arena[if_true].type_ == Type::UNREACHABLE
+                        && self.arena[false_id].type_.is_concrete()
+                    {
+                        // make a new drop for the false arm and replace the if's false with it
+                        let new_drop = self.arena.alloc(Expression::new(
+                            ExpressionKind::Drop { value: false_id },
+                            Type::NONE,
+                        ));
+                        self.arena[value].kind = ExpressionKind::If {
+                            name: name.clone(),
+                            condition,
+                            if_true,
+                            if_false: Some(new_drop),
+                        };
+                        self.arena[value].type_ = Type::NONE;
+                        *expr_id = value;
+                        return;
+                    } else if self.arena[false_id].type_ == Type::UNREACHABLE
+                        && self.arena[if_true].type_.is_concrete()
+                    {
+                        let new_drop = self.arena.alloc(Expression::new(
+                            ExpressionKind::Drop { value: if_true },
+                            Type::NONE,
+                        ));
+                        self.arena[value].kind = ExpressionKind::If {
+                            name: name.clone(),
+                            condition,
+                            if_true: new_drop,
+                            if_false: None,
+                        };
+                        self.arena[value].type_ = Type::NONE;
+                        *expr_id = value;
+                        return;
                     }
                 }
 
@@ -847,6 +845,7 @@ impl<'a> VacuumOptimizer<'a> {
     }
 
     /// Does the subtree rooted at `expr_id` contain a MemoryCopy node?
+    #[allow(dead_code)]
     fn contains_memory_copy(&self, expr_id: ExpressionId) -> bool {
         if matches!(self.arena[expr_id].kind, ExpressionKind::MemoryCopy { .. }) {
             return true;

@@ -51,7 +51,7 @@ fn writer_emits_custom_sections_roundtrip() {
     for payload in Parser::new(0).parse_all(&out) {
         let payload = payload.expect("parser");
         if let wasmparser::Payload::CustomSection(s) = payload {
-            if s.name() == "meta" && s.data() == &[9, 8, 7] {
+            if s.name() == "meta" && s.data() == [9, 8, 7] {
                 found = true;
                 break;
             }

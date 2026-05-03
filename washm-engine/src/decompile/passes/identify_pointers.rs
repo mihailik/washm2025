@@ -47,14 +47,11 @@ impl IdentifyPointers {
             .annotations
             .insert(expr, Annotation::Type(HighLevelType::Pointer));
 
-        match &module.expressions[expr].kind {
-            ExpressionKind::Binary { op, left, .. } => {
-                if *op == BinaryOp::AddInt32 || *op == BinaryOp::SubInt32 {
-                    // In pointer arithmetic, usually the first operand is the pointer
-                    self.propagate_pointer(*left, module);
-                }
+        if let ExpressionKind::Binary { op, left, .. } = &module.expressions[expr].kind {
+            if *op == BinaryOp::AddInt32 || *op == BinaryOp::SubInt32 {
+                // In pointer arithmetic, usually the first operand is the pointer
+                self.propagate_pointer(*left, module);
             }
-            _ => {}
         }
     }
 }

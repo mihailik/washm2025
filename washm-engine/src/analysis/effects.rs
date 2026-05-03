@@ -412,8 +412,6 @@ impl EffectAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::expression::IrBuilder;
-    use crate::ir::{Literal, Type};
 
     #[test]
     fn test_effect_none() {

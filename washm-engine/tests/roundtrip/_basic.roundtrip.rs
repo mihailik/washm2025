@@ -15,13 +15,20 @@ fn factorial(v0: i32) -> i32 {
         if (v0 < 1) {
             break 'block_break_2;
         }
+        v3 = 8;
         v1 = 1;
         v2 = 1;
         loop {
             v1 = (v2 * v1);
-            if !(({ v2 = (v2 + 1); v2 } <= v0)) {
+            if ({ v2 = (v2 + 1); v2 } <= v0) {
+                break 'L66;
+            } else {
                 break 'block_break_9;
             }
+        }
+        if (v3 == 8) {
+            v1 = 1;
+            v2 = 1;
         }
     }
     {

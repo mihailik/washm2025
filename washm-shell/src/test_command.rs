@@ -38,13 +38,34 @@ impl SimpleCommand for TestCommand {
 
         // Parse arguments (similar to cargo test)
         let mut filter: Option<String> = None;
+        let mut sidecar_path: Option<String> = None;
         let mut _nocapture = false;
 
-        for arg in args_vec.iter() {
+        let mut iter = args_vec.iter();
+        while let Some(arg) = iter.next() {
             if arg == "--nocapture" {
                 _nocapture = true;
+            } else if arg == "--sidecar" {
+                sidecar_path = iter.next().cloned();
             } else if !arg.starts_with('-') && filter.is_none() {
                 filter = Some(arg.clone());
+            }
+        }
+
+        // Load sidecar if provided
+        if let Some(ref path) = sidecar_path {
+            match crate::bridges::host::load_sidecar(path) {
+                Ok(mapper) => {
+                    println!(
+                        "Loaded sidecar from {} ({} mapping entries)",
+                        path,
+                        mapper.line_map.len()
+                    );
+                    // TODO: Store mapper for results processing
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to load sidecar from {}: {}", path, e);
+                }
             }
         }
 
@@ -63,6 +84,23 @@ impl SimpleCommand for TestCommand {
 
         // Print results in cargo test format
         println!("\nrunning {} tests", results.results.len());
+
+        // Coverage Handshake: Try to get coverage pointer
+        let coverage_ptr = crate::bridges::host::get_coverage_ptr();
+        if coverage_ptr != 0 {
+            println!(
+                "Coverage handshake detected! Counter DMZ at 0x{:08X}",
+                coverage_ptr
+            );
+
+            // If we have a sidecar, we can calculate coverage
+            if let Some(ref path) = sidecar_path {
+                if let Ok(mapper) = crate::bridges::host::load_sidecar(path) {
+                    println!("Applying sidecar coverage analysis...");
+                    // Potentially print mapped summary here
+                }
+            }
+        }
 
         for result in &results.results {
             let status = match result.result {

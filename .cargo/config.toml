@@ -1,0 +1,3 @@
+[target.wasm32-wasip1]
+runner = ["cargo", "run", "-p", "washm-test", "--bin", "washm-run", "--"]
+rustflags = ["-C", "link-arg=--export=__heap_base"]

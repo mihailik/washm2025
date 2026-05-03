@@ -106,15 +106,19 @@ pub fn run(_args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
             crate::brush_core::builtins::simple_builtin::<crate::coreutils_builtins::EnvCommand>(),
         );
 
+        println!("DEBUG: Registering wasm-test builtin (FORCED)...");
+        map.insert(
+            "wasm-test".to_string(),
+            crate::brush_core::builtins::simple_builtin::<crate::test_command::TestCommand>(),
+        );
+
         #[cfg(feature = "wasm-test")]
         {
-            map.insert(
-                "wasm-test".to_string(),
-                crate::brush_core::builtins::simple_builtin::<crate::test_command::TestCommand>(),
-            );
+            println!("DEBUG: Feature wasm-test is ON");
         }
     };
 
+    println!("DEBUG: Running brush custom with args: {:?}", args);
     crate::brush_shell::embedded::run_custom(args, extra_builtins);
 
     Ok(0)

@@ -28,7 +28,7 @@ A lightweight Rust library linked into the guest test suite.
     3.  **Patch Target**: These symbols act as "landing pads" that the Distiller finds and initializes to point to the created DMZ.
 
 ### 3. The Orchestrator (Node.js Host)
-A test runner that executes the distilled binary in a standard runtime (Node.js/V8 or `washm-shell`).
+A test runner that executes the distilled binary in a standard runtime (Node.js or embedded Wasmtime or Wasmer or similar).
 
 *   **Role**:
     1.  Instantiates the WASM module.

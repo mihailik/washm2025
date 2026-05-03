@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::io;
 
 thread_local! {
-    static LABEL_ID_STACK: RefCell<Vec<Option<ExpressionId>>> = RefCell::new(Vec::new());
+    static LABEL_ID_STACK: RefCell<Vec<Option<ExpressionId>>> = const { RefCell::new(Vec::new()) };
 }
 use wasm_encoder::{
     AbstractHeapType, CodeSection, ConstExpr, DataCountSection, DataSection, ElementSection,
@@ -48,6 +48,22 @@ impl InstructionEncoder for ConstExprEncoder {
         instr.encode(&mut self.bytes);
         self
     }
+}
+
+struct WriteContext<'a, E: InstructionEncoder> {
+    encoder: &'a mut E,
+    arena: &'a IdArena<ExpressionMarker, Expression>,
+    scope_stack: &'a mut Vec<ExpressionId>,
+    func_map: &'a std::collections::HashMap<FuncId, u32>,
+    global_map: &'a std::collections::HashMap<GlobalId, u32>,
+    type_id_map: &'a std::collections::HashMap<TypeId, u32>,
+    data_map: &'a std::collections::HashMap<DataId, u32>,
+    element_map: &'a std::collections::HashMap<ElementId, u32>,
+    table_map: &'a std::collections::HashMap<TableId, u32>,
+    memory_map: &'a std::collections::HashMap<MemoryId, u32>,
+    local_map: &'a std::collections::HashMap<crate::ir::LocalId, u32>,
+    func_bytes: &'a mut Option<&'a mut Vec<u8>>,
+    expr_offsets_out: &'a mut Option<&'a mut std::collections::HashMap<ExpressionId, u32>>,
 }
 
 pub struct BinaryWriter {
@@ -149,11 +165,8 @@ impl BinaryWriter {
     fn find_code_section_body_starts(bytes: &[u8]) -> Option<Vec<usize>> {
         let mut results = Vec::new();
         for payload in wasmparser::Parser::new(0).parse_all(bytes) {
-            match payload {
-                Ok(wasmparser::Payload::CodeSectionEntry(body)) => {
-                    results.push(body.range().start);
-                }
-                _ => {}
+            if let Ok(wasmparser::Payload::CodeSectionEntry(body)) = payload {
+                results.push(body.range().start);
             }
         }
         if results.is_empty() {
@@ -554,22 +567,29 @@ impl BinaryWriter {
             for (_, global) in module.globals.iter() {
                 if let crate::ir::module::GlobalKind::Local { init } = &global.kind {
                     let mut init_expr_encoder = ConstExprEncoder::new();
-                    Self::write_instructions(
-                        &mut init_expr_encoder,
-                        &module.expressions,
-                        *init,
-                        &mut vec![],
-                        &func_map,
-                        &global_map,
-                        &type_id_map,
-                        &data_map,
-                        &element_map,
-                        &table_map,
-                        &memory_map,
-                        &std::collections::HashMap::new(),
-                        None,
-                        None,
-                    )?;
+                    {
+                        let mut fb: Option<&mut Vec<u8>> = None;
+                        let mut eo: Option<&mut std::collections::HashMap<ExpressionId, u32>> =
+                            None;
+                        let mut scope_stack = Vec::new(); // Local scope stack for const expr
+                        let dummy_local_map = std::collections::HashMap::new();
+                        let mut ctx = WriteContext {
+                            encoder: &mut init_expr_encoder,
+                            arena: &module.expressions,
+                            scope_stack: &mut scope_stack,
+                            func_map: &func_map,
+                            global_map: &global_map,
+                            type_id_map: &type_id_map,
+                            data_map: &data_map,
+                            element_map: &element_map,
+                            table_map: &table_map,
+                            memory_map: &memory_map,
+                            local_map: &dummy_local_map,
+                            func_bytes: &mut fb,
+                            expr_offsets_out: &mut eo,
+                        };
+                        Self::write_instructions(&mut ctx, *init)?;
+                    }
                     let init_expr = init_expr_encoder.finish();
                     globals.global(
                         wasm_encoder::GlobalType {
@@ -643,22 +663,28 @@ impl BinaryWriter {
             let mut elements = ElementSection::new();
             for (_, segment) in &module.elements {
                 let mut offset_expr_encoder = ConstExprEncoder::new();
-                Self::write_instructions(
-                    &mut offset_expr_encoder,
-                    &module.expressions,
-                    segment.offset,
-                    &mut vec![],
-                    &func_map,
-                    &global_map,
-                    &type_id_map,
-                    &data_map,
-                    &element_map,
-                    &table_map,
-                    &memory_map,
-                    &std::collections::HashMap::new(),
-                    None,
-                    None,
-                )?;
+                {
+                    let mut fb: Option<&mut Vec<u8>> = None;
+                    let mut eo: Option<&mut std::collections::HashMap<ExpressionId, u32>> = None;
+                    let mut scope_stack = Vec::new();
+                    let dummy_local_map = std::collections::HashMap::new();
+                    let mut ctx = WriteContext {
+                        encoder: &mut offset_expr_encoder,
+                        arena: &module.expressions,
+                        scope_stack: &mut scope_stack,
+                        func_map: &func_map,
+                        global_map: &global_map,
+                        type_id_map: &type_id_map,
+                        data_map: &data_map,
+                        element_map: &element_map,
+                        table_map: &table_map,
+                        memory_map: &memory_map,
+                        local_map: &dummy_local_map,
+                        func_bytes: &mut fb,
+                        expr_offsets_out: &mut eo,
+                    };
+                    Self::write_instructions(&mut ctx, segment.offset)?;
+                }
                 let offset_expr = offset_expr_encoder.finish();
                 let func_indices: Vec<u32> = segment
                     .func_indices
@@ -741,22 +767,26 @@ impl BinaryWriter {
                     if let Some(body_expr) = func.body() {
                         if !body_expr.is_null() {
                             let mut scope_stack = Vec::new();
-                            Self::write_instructions(
-                                &mut func_encoder,
-                                &module.expressions,
-                                body_expr,
-                                &mut scope_stack,
-                                &func_map,
-                                &global_map,
-                                &type_id_map,
-                                &data_map,
-                                &element_map,
-                                &table_map,
-                                &memory_map,
-                                &local_map,
-                                Some(&mut func_bytes),
-                                Some(&mut expr_offsets),
-                            )?;
+                            {
+                                let mut fb = Some(&mut func_bytes);
+                                let mut eo = Some(&mut expr_offsets);
+                                let mut ctx = WriteContext {
+                                    encoder: &mut func_encoder,
+                                    arena: &module.expressions,
+                                    scope_stack: &mut scope_stack,
+                                    func_map: &func_map,
+                                    global_map: &global_map,
+                                    type_id_map: &type_id_map,
+                                    data_map: &data_map,
+                                    element_map: &element_map,
+                                    table_map: &table_map,
+                                    memory_map: &memory_map,
+                                    local_map: &local_map,
+                                    func_bytes: &mut fb,
+                                    expr_offsets_out: &mut eo,
+                                };
+                                Self::write_instructions(&mut ctx, body_expr)?;
+                            }
                         }
                     }
 
@@ -780,22 +810,28 @@ impl BinaryWriter {
             let mut data = DataSection::new();
             for (_, segment) in &module.data {
                 let mut offset_expr_encoder = ConstExprEncoder::new();
-                Self::write_instructions(
-                    &mut offset_expr_encoder,
-                    &module.expressions,
-                    segment.offset,
-                    &mut vec![],
-                    &func_map,
-                    &global_map,
-                    &type_id_map,
-                    &data_map,
-                    &element_map,
-                    &table_map,
-                    &memory_map,
-                    &std::collections::HashMap::new(),
-                    None,
-                    None,
-                )?;
+                {
+                    let mut fb: Option<&mut Vec<u8>> = None;
+                    let mut eo: Option<&mut std::collections::HashMap<ExpressionId, u32>> = None;
+                    let mut scope_stack = Vec::new();
+                    let dummy_local_map = std::collections::HashMap::new();
+                    let mut ctx = WriteContext {
+                        encoder: &mut offset_expr_encoder,
+                        arena: &module.expressions,
+                        scope_stack: &mut scope_stack,
+                        func_map: &func_map,
+                        global_map: &global_map,
+                        type_id_map: &type_id_map,
+                        data_map: &data_map,
+                        element_map: &element_map,
+                        table_map: &table_map,
+                        memory_map: &memory_map,
+                        local_map: &dummy_local_map,
+                        func_bytes: &mut fb,
+                        expr_offsets_out: &mut eo,
+                    };
+                    Self::write_instructions(&mut ctx, segment.offset)?;
+                }
                 let offset_expr = offset_expr_encoder.finish();
                 data.active(
                     *memory_map.get(&segment.memory_index).unwrap(),
@@ -982,7 +1018,7 @@ impl BinaryWriter {
                 .collect();
 
             if generated_nonempty.is_empty() {
-                // No regenerated DWARF content — re-emit original DWARF sections we previously skipped
+                // No regenerated DWARF content â€” re-emit original DWARF sections we previously skipped
                 for (name, data) in original_dwarf_sections {
                     log::debug!(
                         "BinaryWriter: re-emitting original DWARF section {} ({} bytes)",
@@ -1020,7 +1056,7 @@ impl BinaryWriter {
             }
         } else {
             log::debug!("BinaryWriter: NO code section body_starts found!");
-            // No code bodies to regenerate DWARF from — re-emit original DWARF sections
+            // No code bodies to regenerate DWARF from â€” re-emit original DWARF sections
             // that were preserved above.
             for (name, data) in original_dwarf_sections {
                 log::debug!(
@@ -1036,71 +1072,27 @@ impl BinaryWriter {
         Ok(temp_bytes)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn write_instructions<E: InstructionEncoder>(
-        encoder: &mut E,
-        arena: &IdArena<ExpressionMarker, Expression>,
+        ctx: &mut WriteContext<E>,
         id: ExpressionId,
-        scope_stack: &mut Vec<ExpressionId>,
-        func_map: &std::collections::HashMap<FuncId, u32>,
-        global_map: &std::collections::HashMap<GlobalId, u32>,
-        type_id_map: &std::collections::HashMap<TypeId, u32>,
-        data_map: &std::collections::HashMap<DataId, u32>,
-        element_map: &std::collections::HashMap<ElementId, u32>,
-        table_map: &std::collections::HashMap<TableId, u32>,
-        memory_map: &std::collections::HashMap<MemoryId, u32>,
-        local_map: &std::collections::HashMap<crate::ir::LocalId, u32>,
-        // Optional additional output for raw function bytes and expression offsets
-        func_bytes: Option<&mut Vec<u8>>,
-        expr_offsets_out: Option<&mut std::collections::HashMap<ExpressionId, u32>>,
     ) -> Result<()> {
-        let mut fb = func_bytes;
-        let mut eo = expr_offsets_out;
-        return Self::write_instructions_with_opts(
-            encoder,
-            arena,
-            id,
-            scope_stack,
-            func_map,
-            global_map,
-            type_id_map,
-            data_map,
-            element_map,
-            table_map,
-            memory_map,
-            local_map,
-            &mut fb,
-            &mut eo,
-        );
+        Self::write_expr(ctx, id)
     }
 
-    fn write_instructions_with_opts<E: InstructionEncoder>(
-        encoder: &mut E,
-        arena: &IdArena<ExpressionMarker, Expression>,
+    fn write_expr<E: InstructionEncoder>(
+        ctx: &mut WriteContext<E>,
         id: ExpressionId,
-        scope_stack: &mut Vec<ExpressionId>,
-        func_map: &std::collections::HashMap<FuncId, u32>,
-        global_map: &std::collections::HashMap<GlobalId, u32>,
-        type_id_map: &std::collections::HashMap<TypeId, u32>,
-        data_map: &std::collections::HashMap<DataId, u32>,
-        element_map: &std::collections::HashMap<ElementId, u32>,
-        table_map: &std::collections::HashMap<TableId, u32>,
-        memory_map: &std::collections::HashMap<MemoryId, u32>,
-        local_map: &std::collections::HashMap<crate::ir::LocalId, u32>,
-        // Optional additional output for raw function bytes and expression offsets
-        func_bytes: &mut Option<&mut Vec<u8>>,
-        expr_offsets_out: &mut Option<&mut std::collections::HashMap<ExpressionId, u32>>,
     ) -> Result<()> {
-        let expr = &arena[id];
+        let expr = &ctx.arena[id];
 
         // Cycle detection: fail early instead of recursing infinitely
         thread_local! {
-            static WRITE_STACK: std::cell::RefCell<Vec<ExpressionId>> = std::cell::RefCell::new(Vec::new());
+            static WRITE_STACK: std::cell::RefCell<Vec<ExpressionId>> = const { std::cell::RefCell::new(Vec::new()) };
         }
         struct WriteGuard(Option<ExpressionId>);
         impl Drop for WriteGuard {
             fn drop(&mut self) {
-                if let Some(_) = self.0 {
+                if self.0.is_some() {
                     WRITE_STACK.with(|s| {
                         let mut v = s.borrow_mut();
                         v.pop();
@@ -1121,7 +1113,7 @@ impl BinaryWriter {
         let _guard = WriteGuard(Some(id));
 
         // If requested, record offset of this expression relative to function body
-        if let (Some(bytes), Some(map)) = (func_bytes.as_mut(), expr_offsets_out.as_mut()) {
+        if let (Some(bytes), Some(map)) = (ctx.func_bytes.as_mut(), ctx.expr_offsets_out.as_mut()) {
             map.insert(id, bytes.len() as u32);
         }
 
@@ -1129,8 +1121,8 @@ impl BinaryWriter {
         macro_rules! emit_instr {
             ($instr:expr) => {{
                 let instr = $instr;
-                encoder.instruction(&instr);
-                if let Some(b) = func_bytes.as_mut() {
+                ctx.encoder.instruction(&instr);
+                if let Some(b) = ctx.func_bytes.as_mut() {
                     instr.encode(b);
                 }
             }};
@@ -1158,121 +1150,44 @@ impl BinaryWriter {
             },
             ExpressionKind::LocalGet { id } => {
                 let id = *id;
-                let idx = local_map.get(&id).ok_or_else(|| {
+                let idx = ctx.local_map.get(&id).ok_or_else(|| {
                     WriteError::InternalError(format!("Local not found: {:?}", id))
                 })?;
                 emit_instr!(Instruction::LocalGet(*idx));
             }
             ExpressionKind::LocalSet { id, value } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *value,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                let idx = local_map.get(id).ok_or_else(|| {
+                Self::write_expr(ctx, *value)?;
+                let idx = ctx.local_map.get(id).ok_or_else(|| {
                     WriteError::InternalError(format!("Local not found: {:?}", id))
                 })?;
                 emit_instr!(Instruction::LocalSet(*idx));
             }
             ExpressionKind::LocalTee { id, value } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *value,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                let idx = local_map.get(id).ok_or_else(|| {
+                Self::write_expr(ctx, *value)?;
+                let idx = ctx.local_map.get(id).ok_or_else(|| {
                     WriteError::InternalError(format!("Local not found: {:?}", id))
                 })?;
                 emit_instr!(Instruction::LocalTee(*idx));
             }
             ExpressionKind::GlobalGet { id } => {
                 let id = *id;
-                let idx = global_map.get(&id).ok_or_else(|| {
+                let idx = ctx.global_map.get(&id).ok_or_else(|| {
                     WriteError::UnsupportedFeature(format!("Global not found: {:?}", id))
                 })?;
                 emit_instr!(Instruction::GlobalGet(*idx));
             }
             ExpressionKind::GlobalSet { id, value } => {
                 let id = *id;
-                let value = *value;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    value,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                let idx = global_map.get(&id).ok_or_else(|| {
+
+                Self::write_expr(ctx, *value)?;
+                let idx = ctx.global_map.get(&id).ok_or_else(|| {
                     WriteError::UnsupportedFeature(format!("Global not found: {:?}", id))
                 })?;
                 emit_instr!(Instruction::GlobalSet(*idx));
             }
             ExpressionKind::Binary { op, left, right } => {
-                let left = *left;
-                let right = *right;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    left,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    right,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *left)?;
+                Self::write_expr(ctx, *right)?;
 
                 let instr = match op {
                     BinaryOp::AddInt32 => Instruction::I32Add,
@@ -1358,23 +1273,7 @@ impl BinaryWriter {
                 emit_instr!(instr);
             }
             ExpressionKind::Unary { op, value } => {
-                let value = *value;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    value,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *value)?;
                 let instr = match op {
                     UnaryOp::EqZInt32 => Instruction::I32Eqz,
                     UnaryOp::EqZInt64 => Instruction::I64Eqz,
@@ -1432,51 +1331,20 @@ impl BinaryWriter {
                 emit_instr!(instr);
             }
             ExpressionKind::Block { name: _, list } => {
-                scope_stack.push(id);
+                ctx.scope_stack.push(id);
                 emit_instr!(Instruction::Block(Self::to_block_type(expr.type_)));
                 for &child in list {
-                    Self::write_instructions_with_opts(
-                        encoder,
-                        arena,
-                        child,
-                        scope_stack,
-                        func_map,
-                        global_map,
-                        type_id_map,
-                        data_map,
-                        element_map,
-                        table_map,
-                        memory_map,
-                        local_map,
-                        func_bytes,
-                        expr_offsets_out,
-                    )?;
+                    Self::write_expr(ctx, child)?;
                 }
                 emit_instr!(Instruction::End);
-                scope_stack.pop();
+                ctx.scope_stack.pop();
             }
             ExpressionKind::Loop { name: _, body } => {
-                let body = *body;
-                scope_stack.push(id);
+                ctx.scope_stack.push(id);
                 emit_instr!(Instruction::Loop(Self::to_block_type(expr.type_)));
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    body,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *body)?;
                 emit_instr!(Instruction::End);
-                scope_stack.pop();
+                ctx.scope_stack.pop();
             }
             ExpressionKind::If {
                 name: _,
@@ -1484,144 +1352,52 @@ impl BinaryWriter {
                 if_true,
                 if_false,
             } => {
-                let condition = *condition;
-                let if_true = *if_true;
-                let if_false = if_false.as_ref().map(|f| *f);
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    condition,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                scope_stack.push(id);
+                let if_false = if_false.as_ref();
+                Self::write_expr(ctx, *condition)?;
+                ctx.scope_stack.push(id);
                 emit_instr!(Instruction::If(Self::to_block_type(expr.type_)));
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    if_true,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *if_true)?;
                 if let Some(f) = if_false {
                     emit_instr!(Instruction::Else);
-                    Self::write_instructions_with_opts(
-                        encoder,
-                        arena,
-                        f,
-                        scope_stack,
-                        func_map,
-                        global_map,
-                        type_id_map,
-                        data_map,
-                        element_map,
-                        table_map,
-                        memory_map,
-                        local_map,
-                        func_bytes,
-                        expr_offsets_out,
-                    )?;
+                    Self::write_expr(ctx, *f)?;
                 }
                 emit_instr!(Instruction::End);
-                scope_stack.pop();
+                ctx.scope_stack.pop();
             }
             ExpressionKind::Break {
                 target,
                 condition,
                 value,
             } => {
-                let target = *target;
-                let condition = condition.as_ref().map(|c| *c);
-                let value = value.as_ref().map(|v| *v);
+                let condition = condition.as_ref();
+                let value = value.as_ref();
                 if let Some(v) = value {
-                    Self::write_instructions_with_opts(
-                        encoder,
-                        arena,
-                        v,
-                        scope_stack,
-                        func_map,
-                        global_map,
-                        type_id_map,
-                        data_map,
-                        element_map,
-                        table_map,
-                        memory_map,
-                        local_map,
-                        func_bytes,
-                        expr_offsets_out,
-                    )?;
+                    Self::write_expr(ctx, *v)?;
                 }
 
-                let depth = scope_stack
+                let depth = ctx
+                    .scope_stack
                     .iter()
                     .rev()
-                    .position(|&x| x == target)
+                    .position(|&x| x == *target)
                     .ok_or_else(|| {
                         WriteError::LabelNotFound(format!(
                             "Target {:?} not in scope stack: {:?}",
-                            target, scope_stack
+                            target, ctx.scope_stack
                         ))
                     })? as u32;
 
                 if let Some(c) = condition {
-                    Self::write_instructions_with_opts(
-                        encoder,
-                        arena,
-                        c,
-                        scope_stack,
-                        func_map,
-                        global_map,
-                        type_id_map,
-                        data_map,
-                        element_map,
-                        table_map,
-                        memory_map,
-                        local_map,
-                        func_bytes,
-                        expr_offsets_out,
-                    )?;
+                    Self::write_expr(ctx, *c)?;
                     emit_instr!(Instruction::BrIf(depth));
                 } else {
                     emit_instr!(Instruction::Br(depth));
                 }
             }
             ExpressionKind::Return { value } => {
-                let value = value.as_ref().map(|v| *v);
+                let value = value.as_ref();
                 if let Some(v) = value {
-                    Self::write_instructions_with_opts(
-                        encoder,
-                        arena,
-                        v,
-                        scope_stack,
-                        func_map,
-                        global_map,
-                        type_id_map,
-                        data_map,
-                        element_map,
-                        table_map,
-                        memory_map,
-                        local_map,
-                        func_bytes,
-                        expr_offsets_out,
-                    )?;
+                    Self::write_expr(ctx, *v)?;
                 }
                 emit_instr!(Instruction::Return);
             }
@@ -1629,23 +1405,7 @@ impl BinaryWriter {
                 emit_instr!(Instruction::Unreachable);
             }
             ExpressionKind::Drop { value } => {
-                let value = *value;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    value,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *value)?;
                 emit_instr!(Instruction::Drop);
             }
             ExpressionKind::Select {
@@ -1653,57 +1413,9 @@ impl BinaryWriter {
                 if_true,
                 if_false,
             } => {
-                let condition = *condition;
-                let if_true = *if_true;
-                let if_false = *if_false;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    if_true,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    if_false,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    condition,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *if_true)?;
+                Self::write_expr(ctx, *if_false)?;
+                Self::write_expr(ctx, *condition)?;
                 emit_instr!(Instruction::Select);
             }
             ExpressionKind::Load {
@@ -1714,32 +1426,11 @@ impl BinaryWriter {
                 ptr,
                 memory,
             } => {
-                let ptr = *ptr;
-                let offset = *offset;
-                let align = *align;
-                let bytes = *bytes;
-                let signed = *signed;
-                let memory = *memory;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    ptr,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *ptr)?;
                 let memarg = MemArg {
-                    offset: offset as u64,
-                    align,
-                    memory_index: *memory_map.get(&memory).ok_or_else(|| {
+                    offset: *offset as u64,
+                    align: *align,
+                    memory_index: *ctx.memory_map.get(memory).ok_or_else(|| {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
                 };
@@ -1773,52 +1464,16 @@ impl BinaryWriter {
                 value,
                 memory,
             } => {
-                let ptr = *ptr;
-                let value = *value;
-                let offset = *offset;
-                let align = *align;
-                let bytes = *bytes;
-                let memory = *memory;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    ptr,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    value,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *ptr)?;
+                Self::write_expr(ctx, *value)?;
                 let memarg = MemArg {
-                    offset: offset as u64,
-                    align,
-                    memory_index: *memory_map.get(&memory).ok_or_else(|| {
+                    offset: *offset as u64,
+                    align: *align,
+                    memory_index: *ctx.memory_map.get(memory).ok_or_else(|| {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
                 };
-                let val_type = arena[value].type_;
+                let val_type = ctx.arena[*value].type_;
                 let instr = match (val_type, bytes) {
                     (Type::I32, 4) => Instruction::I32Store(memarg),
                     (Type::I32, 1) => Instruction::I32Store8(memarg),
@@ -1842,24 +1497,9 @@ impl BinaryWriter {
                 is_return,
             } => {
                 for &op in operands {
-                    Self::write_instructions_with_opts(
-                        encoder,
-                        arena,
-                        op,
-                        scope_stack,
-                        func_map,
-                        global_map,
-                        type_id_map,
-                        data_map,
-                        element_map,
-                        table_map,
-                        memory_map,
-                        local_map,
-                        func_bytes,
-                        expr_offsets_out,
-                    )?;
+                    Self::write_expr(ctx, op)?;
                 }
-                let idx = func_map.get(target).ok_or_else(|| {
+                let idx = ctx.func_map.get(target).ok_or_else(|| {
                     WriteError::UnsupportedFeature(format!("Function not found: {:?}", target))
                 })?;
                 if *is_return {
@@ -1878,42 +1518,13 @@ impl BinaryWriter {
                 value,
             } => {
                 if let Some(v) = value {
-                    Self::write_instructions_with_opts(
-                        encoder,
-                        arena,
-                        *v,
-                        scope_stack,
-                        func_map,
-                        global_map,
-                        type_id_map,
-                        data_map,
-                        element_map,
-                        table_map,
-                        memory_map,
-                        local_map,
-                        func_bytes,
-                        expr_offsets_out,
-                    )?;
+                    Self::write_expr(ctx, *v)?;
                 }
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *condition,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *condition)?;
                 let mut target_depths = Vec::new();
                 for &target in targets {
-                    let depth = scope_stack
+                    let depth = ctx
+                        .scope_stack
                         .iter()
                         .rev()
                         .position(|&x| x == target)
@@ -1925,7 +1536,8 @@ impl BinaryWriter {
                         })? as u32;
                     target_depths.push(depth);
                 }
-                let default_target_depth = scope_stack
+                let default_target_depth = ctx
+                    .scope_stack
                     .iter()
                     .rev()
                     .position(|&x| x == *default)
@@ -1941,29 +1553,14 @@ impl BinaryWriter {
                 ));
             }
             ExpressionKind::MemorySize { memory } => {
-                let idx = *memory_map.get(memory).ok_or_else(|| {
+                let idx = *ctx.memory_map.get(memory).ok_or_else(|| {
                     WriteError::InternalError(format!("Memory not found: {:?}", memory))
                 })?;
                 emit_instr!(Instruction::MemorySize(idx));
             }
             ExpressionKind::MemoryGrow { delta, memory } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *delta,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                let idx = *memory_map.get(memory).ok_or_else(|| {
+                Self::write_expr(ctx, *delta)?;
+                let idx = *ctx.memory_map.get(memory).ok_or_else(|| {
                     WriteError::InternalError(format!("Memory not found: {:?}", memory))
                 })?;
                 emit_instr!(Instruction::MemoryGrow(idx));
@@ -1976,56 +1573,27 @@ impl BinaryWriter {
                 is_return,
             } => {
                 for &op in operands {
-                    Self::write_instructions_with_opts(
-                        encoder,
-                        arena,
-                        op,
-                        scope_stack,
-                        func_map,
-                        global_map,
-                        type_id_map,
-                        data_map,
-                        element_map,
-                        table_map,
-                        memory_map,
-                        local_map,
-                        func_bytes,
-                        expr_offsets_out,
-                    )?;
+                    Self::write_expr(ctx, op)?;
                 }
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *target,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *target)?;
 
-                let idx = *type_id_map
+                let idx = ctx
+                    .type_id_map
                     .get(type_id)
                     .ok_or_else(|| WriteError::InternalError("TypeId not in map".to_string()))?;
 
-                let table_idx = *table_map.get(table).ok_or_else(|| {
+                let table_idx = *ctx.table_map.get(table).ok_or_else(|| {
                     WriteError::InternalError(format!("Table not found: {:?}", table))
                 })?;
 
                 if *is_return {
                     emit_instr!(Instruction::ReturnCallIndirect {
-                        type_index: idx,
+                        type_index: *idx,
                         table_index: table_idx,
                     });
                 } else {
                     emit_instr!(Instruction::CallIndirect {
-                        type_index: idx,
+                        type_index: *idx,
                         table_index: table_idx,
                     });
                 }
@@ -2035,63 +1603,18 @@ impl BinaryWriter {
                 emit_instr!(Instruction::RefNull(reftype.heap_type));
             }
             ExpressionKind::RefIsNull { value } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *value,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *value)?;
                 emit_instr!(Instruction::RefIsNull);
             }
             ExpressionKind::RefFunc { func } => {
-                let idx = func_map.get(func).ok_or_else(|| {
+                let idx = ctx.func_map.get(func).ok_or_else(|| {
                     WriteError::UnsupportedFeature(format!("Function not found: {:?}", func))
                 })?;
                 emit_instr!(Instruction::RefFunc(*idx));
             }
             ExpressionKind::RefEq { left, right } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *left,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *right,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *left)?;
+                Self::write_expr(ctx, *right)?;
                 emit_instr!(Instruction::RefEq);
             }
             ExpressionKind::MemoryFill {
@@ -2100,56 +1623,11 @@ impl BinaryWriter {
                 size,
                 memory,
             } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *dest,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *value,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *size,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *dest)?;
+                Self::write_expr(ctx, *value)?;
+                Self::write_expr(ctx, *size)?;
                 emit_instr!(Instruction::MemoryFill(
-                    *memory_map.get(memory).ok_or_else(|| {
+                    *ctx.memory_map.get(memory).ok_or_else(|| {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
                 ));
@@ -2161,62 +1639,17 @@ impl BinaryWriter {
                 dest_memory,
                 src_memory,
             } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *dest,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *src,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *size,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *dest)?;
+                Self::write_expr(ctx, *src)?;
+                Self::write_expr(ctx, *size)?;
                 emit_instr!(Instruction::MemoryCopy {
-                    src_mem: *memory_map.get(src_memory).ok_or_else(|| {
+                    src_mem: *ctx.memory_map.get(src_memory).ok_or_else(|| {
                         WriteError::InternalError(format!(
                             "Source memory not found: {:?}",
                             src_memory
                         ))
                     })?,
-                    dst_mem: *memory_map.get(dest_memory).ok_or_else(|| {
+                    dst_mem: *ctx.memory_map.get(dest_memory).ok_or_else(|| {
                         WriteError::InternalError(format!(
                             "Destination memory not found: {:?}",
                             dest_memory
@@ -2231,175 +1664,80 @@ impl BinaryWriter {
                 size,
                 memory,
             } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *dest,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *offset,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *size,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *dest)?;
+                Self::write_expr(ctx, *offset)?;
+                Self::write_expr(ctx, *size)?;
                 emit_instr!(Instruction::MemoryInit {
-                    mem: *memory_map.get(memory).ok_or_else(|| {
+                    mem: *ctx.memory_map.get(memory).ok_or_else(|| {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
-                    data_index: *data_map.get(segment).ok_or_else(|| {
+                    data_index: *ctx.data_map.get(segment).ok_or_else(|| {
                         WriteError::InternalError(format!("Data segment not found: {:?}", segment))
                     })?,
                 });
             }
             ExpressionKind::DataDrop { segment } => {
-                emit_instr!(Instruction::DataDrop(*data_map.get(segment).ok_or_else(
-                    || WriteError::InternalError(format!("Data segment not found: {:?}", segment)),
-                )?));
+                emit_instr!(Instruction::DataDrop(
+                    *ctx.data_map
+                        .get(segment)
+                        .ok_or_else(|| WriteError::InternalError(format!(
+                            "Data segment not found: {:?}",
+                            segment
+                        )),)?
+                ));
             }
             ExpressionKind::TableGet { table, index } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *index,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                emit_instr!(Instruction::TableGet(*table_map.get(table).ok_or_else(
-                    || WriteError::InternalError(format!("Table not found: {:?}", table)),
-                )?));
+                Self::write_expr(ctx, *index)?;
+                emit_instr!(Instruction::TableGet(
+                    *ctx.table_map
+                        .get(table)
+                        .ok_or_else(|| WriteError::InternalError(format!(
+                            "Table not found: {:?}",
+                            table
+                        )),)?
+                ));
             }
             ExpressionKind::TableSet {
                 table,
                 index,
                 value,
             } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *index,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *value,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                emit_instr!(Instruction::TableSet(*table_map.get(table).ok_or_else(
-                    || WriteError::InternalError(format!("Table not found: {:?}", table)),
-                )?));
+                Self::write_expr(ctx, *index)?;
+                Self::write_expr(ctx, *value)?;
+                emit_instr!(Instruction::TableSet(
+                    *ctx.table_map
+                        .get(table)
+                        .ok_or_else(|| WriteError::InternalError(format!(
+                            "Table not found: {:?}",
+                            table
+                        )),)?
+                ));
             }
             ExpressionKind::TableSize { table } => {
-                emit_instr!(Instruction::TableSize(*table_map.get(table).ok_or_else(
-                    || WriteError::InternalError(format!("Table not found: {:?}", table)),
-                )?));
+                emit_instr!(Instruction::TableSize(
+                    *ctx.table_map
+                        .get(table)
+                        .ok_or_else(|| WriteError::InternalError(format!(
+                            "Table not found: {:?}",
+                            table
+                        )),)?
+                ));
             }
             ExpressionKind::TableGrow {
                 table,
                 delta,
                 value,
             } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *value,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *delta,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                emit_instr!(Instruction::TableGrow(*table_map.get(table).ok_or_else(
-                    || WriteError::InternalError(format!("Table not found: {:?}", table)),
-                )?));
+                Self::write_expr(ctx, *value)?;
+                Self::write_expr(ctx, *delta)?;
+                emit_instr!(Instruction::TableGrow(
+                    *ctx.table_map
+                        .get(table)
+                        .ok_or_else(|| WriteError::InternalError(format!(
+                            "Table not found: {:?}",
+                            table
+                        )),)?
+                ));
             }
             ExpressionKind::TableFill {
                 table,
@@ -2407,57 +1745,17 @@ impl BinaryWriter {
                 value,
                 size,
             } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *dest,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *value,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *size,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                emit_instr!(Instruction::TableFill(*table_map.get(table).ok_or_else(
-                    || WriteError::InternalError(format!("Table not found: {:?}", table)),
-                )?));
+                Self::write_expr(ctx, *dest)?;
+                Self::write_expr(ctx, *value)?;
+                Self::write_expr(ctx, *size)?;
+                emit_instr!(Instruction::TableFill(
+                    *ctx.table_map
+                        .get(table)
+                        .ok_or_else(|| WriteError::InternalError(format!(
+                            "Table not found: {:?}",
+                            table
+                        )),)?
+                ));
             }
             ExpressionKind::TableCopy {
                 dest_table,
@@ -2466,62 +1764,17 @@ impl BinaryWriter {
                 src,
                 size,
             } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *dest,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *src,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *size,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *dest)?;
+                Self::write_expr(ctx, *src)?;
+                Self::write_expr(ctx, *size)?;
                 emit_instr!(Instruction::TableCopy {
-                    src_table: *table_map.get(src_table).ok_or_else(|| {
+                    src_table: *ctx.table_map.get(src_table).ok_or_else(|| {
                         WriteError::InternalError(format!(
                             "Source table not found: {:?}",
                             src_table
                         ))
                     })?,
-                    dst_table: *table_map.get(dest_table).ok_or_else(|| {
+                    dst_table: *ctx.table_map.get(dest_table).ok_or_else(|| {
                         WriteError::InternalError(format!(
                             "Destination table not found: {:?}",
                             dest_table
@@ -2536,59 +1789,14 @@ impl BinaryWriter {
                 offset,
                 size,
             } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *dest,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *offset,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *size,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *dest)?;
+                Self::write_expr(ctx, *offset)?;
+                Self::write_expr(ctx, *size)?;
                 emit_instr!(Instruction::TableInit {
-                    table: *table_map.get(table).ok_or_else(|| {
+                    table: *ctx.table_map.get(table).ok_or_else(|| {
                         WriteError::InternalError(format!("Table not found: {:?}", table))
                     })?,
-                    elem_index: *element_map.get(segment).ok_or_else(|| {
+                    elem_index: *ctx.element_map.get(segment).ok_or_else(|| {
                         WriteError::InternalError(format!(
                             "Element segment not found: {:?}",
                             segment
@@ -2598,7 +1806,7 @@ impl BinaryWriter {
             }
             ExpressionKind::ElemDrop { segment } => {
                 emit_instr!(Instruction::ElemDrop(
-                    *element_map.get(segment).ok_or_else(|| {
+                    *ctx.element_map.get(segment).ok_or_else(|| {
                         WriteError::InternalError(format!(
                             "Element segment not found: {:?}",
                             segment
@@ -2614,52 +1822,22 @@ impl BinaryWriter {
                 value,
                 memory,
             } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *ptr,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *value,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *ptr)?;
+                Self::write_expr(ctx, *value)?;
                 let arg = MemArg {
                     offset: *offset as u64,
-                    align: match *bytes {
+                    align: match bytes {
                         1 => 0,
                         2 => 1,
                         4 => 2,
                         8 => 3,
                         _ => 0,
                     },
-                    memory_index: *memory_map.get(memory).ok_or_else(|| {
+                    memory_index: *ctx.memory_map.get(memory).ok_or_else(|| {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
                 };
-                let ty = arena[*value].type_;
+                let ty = ctx.arena[*value].type_;
                 match op {
                     AtomicOp::Add => {
                         if ty == Type::I32 {
@@ -2743,68 +1921,23 @@ impl BinaryWriter {
                 replacement,
                 memory,
             } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *ptr,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *expected,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *replacement,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *ptr)?;
+                Self::write_expr(ctx, *expected)?;
+                Self::write_expr(ctx, *replacement)?;
                 let arg = MemArg {
                     offset: *offset as u64,
-                    align: match *bytes {
+                    align: match bytes {
                         1 => 0,
                         2 => 1,
                         4 => 2,
                         8 => 3,
                         _ => 0,
                     },
-                    memory_index: *memory_map.get(memory).ok_or_else(|| {
+                    memory_index: *ctx.memory_map.get(memory).ok_or_else(|| {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
                 };
-                let ty = arena[*expected].type_;
+                let ty = ctx.arena[*expected].type_;
                 if ty == Type::I32 {
                     emit_instr!(Instruction::I32AtomicRmwCmpxchg(arg));
                 } else if ty == Type::I64 {
@@ -2823,58 +1956,13 @@ impl BinaryWriter {
                 expected_type,
                 memory,
             } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *ptr,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *expected,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *timeout,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *ptr)?;
+                Self::write_expr(ctx, *expected)?;
+                Self::write_expr(ctx, *timeout)?;
                 let arg = MemArg {
                     offset: 0,
                     align: if *expected_type == Type::I32 { 2 } else { 3 },
-                    memory_index: *memory_map.get(memory).ok_or_else(|| {
+                    memory_index: *ctx.memory_map.get(memory).ok_or_else(|| {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
                 };
@@ -2890,42 +1978,12 @@ impl BinaryWriter {
                 }
             }
             ExpressionKind::AtomicNotify { ptr, count, memory } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *ptr,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *count,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *ptr)?;
+                Self::write_expr(ctx, *count)?;
                 emit_instr!(Instruction::MemoryAtomicNotify(MemArg {
                     offset: 0,
                     align: 2,
-                    memory_index: *memory_map.get(memory).ok_or_else(|| {
+                    memory_index: *ctx.memory_map.get(memory).ok_or_else(|| {
                         WriteError::InternalError(format!("Memory not found: {:?}", memory))
                     })?,
                 }));
@@ -2934,22 +1992,7 @@ impl BinaryWriter {
                 emit_instr!(Instruction::AtomicFence);
             }
             ExpressionKind::RefAs { op, value } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *value,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *value)?;
                 match op {
                     RefAsOp::NonNull => {
                         emit_instr!(Instruction::RefAsNonNull);
@@ -2970,41 +2013,11 @@ impl BinaryWriter {
             }
             ExpressionKind::TupleMake { operands } => {
                 for operand in operands {
-                    Self::write_instructions_with_opts(
-                        encoder,
-                        arena,
-                        *operand,
-                        scope_stack,
-                        func_map,
-                        global_map,
-                        type_id_map,
-                        data_map,
-                        element_map,
-                        table_map,
-                        memory_map,
-                        local_map,
-                        func_bytes,
-                        expr_offsets_out,
-                    )?;
+                    Self::write_expr(ctx, *operand)?;
                 }
             }
             ExpressionKind::TupleExtract { tuple, index } => {
-                Self::write_instructions_with_opts(
-                    encoder,
-                    arena,
-                    *tuple,
-                    scope_stack,
-                    func_map,
-                    global_map,
-                    type_id_map,
-                    data_map,
-                    element_map,
-                    table_map,
-                    memory_map,
-                    local_map,
-                    func_bytes,
-                    expr_offsets_out,
-                )?;
+                Self::write_expr(ctx, *tuple)?;
                 // WASM doesn't have a tuple.extract opcode in the same way,
                 // but some implementations use local.get/set for components.
                 // For now, this requires a specific instruction if supported by the target.
@@ -3033,7 +2046,7 @@ impl BinaryWriter {
         // Provide more context to help diagnose missing labels
         let names: Vec<String> = scope_stack
             .iter()
-            .map(|o| match o {
+            .map(|o: &Option<String>| match o {
                 Some(s) => s.clone(),
                 None => "<none>".to_string(),
             })
@@ -3814,10 +2827,10 @@ mod tests {
                     let stderr = String::from_utf8_lossy(&result.stderr);
                     panic!("wasmtime compilation failed:\n{}", stderr);
                 }
-                println!("✓ Module compiled successfully with wasmtime!");
+                println!("âœ“ Module compiled successfully with wasmtime!");
             }
             Err(e) => {
-                println!("⚠ Could not run wasmtime ({}), skipping validation", e);
+                println!("âš  Could not run wasmtime ({}), skipping validation", e);
             }
         }
 
@@ -4089,10 +3102,10 @@ mod tests {
                     let stderr = String::from_utf8_lossy(&result.stderr);
                     panic!("wasmtime compilation failed:\n{}", stderr);
                 }
-                println!("✓ Multi-function module compiled successfully with wasmtime!");
+                println!("âœ“ Multi-function module compiled successfully with wasmtime!");
             }
             Err(e) => {
-                println!("⚠ Could not run wasmtime ({}), skipping validation", e);
+                println!("âš  Could not run wasmtime ({}), skipping validation", e);
             }
         }
 

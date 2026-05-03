@@ -13,7 +13,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-washm = "0.4.0"
+washm = "0.5.0"
 ```
 
 ## Features

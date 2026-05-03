@@ -31,6 +31,12 @@ pub struct TestResults {
     pub ignored: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct SourceMapper {
+    /// Maps binary offset to (source_file, line_number)
+    pub line_map: std::collections::BTreeMap<u32, (String, u64)>,
+}
+
 pub struct Test {
     pub name: &'static str,
     pub test_fn: fn(),

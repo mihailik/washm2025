@@ -1,0 +1,39 @@
+[package]
+name = "washm-test"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Self-instrumenting WASM test runner and coverage distiller"
+readme = "README.md"
+
+[dev-dependencies]
+washm-test-guest = { path = "../washm-test-guest" }
+
+[dependencies]
+walrus = "0.19"
+gimli = "0.28"
+object = "0.36"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.10"
+wasmparser = "0.112"
+wasmtime = "22"
+wasi-common = "22"
+
+[[bin]]
+name = "washm-distill"
+path = "src/main.rs"
+
+[[bin]]
+name = "washm-run"
+path = "src/runner.rs"
+
+[[bin]]
+name = "wasi-test"
+path = "src/wasi_test.rs"

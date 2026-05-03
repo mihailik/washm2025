@@ -259,13 +259,13 @@ impl Pattern {
     }
 }
 
+pub type ReplacementFn = dyn Fn(&MatchEnv, &mut IdArena<ExpressionMarker, Expression>) -> Option<ExpressionId>
+    + Sync
+    + Send;
+
 pub struct Rule {
     pub pattern: Pattern,
-    pub replacement: Box<
-        dyn Fn(&MatchEnv, &mut IdArena<ExpressionMarker, Expression>) -> Option<ExpressionId>
-            + Sync
-            + Send,
-    >,
+    pub replacement: Box<ReplacementFn>,
 }
 
 pub struct PatternMatcher {

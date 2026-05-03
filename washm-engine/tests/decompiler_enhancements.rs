@@ -26,7 +26,7 @@ fn test_match_reconstruction() {
 
     let mut reader = washm::wasm::binary_reader::BinaryReader::new();
     let mut module = reader.parse_module(&wasm).expect("parse module");
-    let mut lifter = washm::decompile::Lifter::default();
+    let mut lifter = washm::decompile::Lifter;
     lifter.run(&mut module);
 
     let mut printer = washm::decompile::printers::RustPrinter::new(&module);
@@ -54,7 +54,7 @@ fn test_loop_with_break() {
 
     let mut reader = washm::wasm::binary_reader::BinaryReader::new();
     let mut module = reader.parse_module(&wasm).expect("parse module");
-    let mut lifter = washm::decompile::Lifter::default();
+    let mut lifter = washm::decompile::Lifter;
     lifter.run(&mut module);
 
     let mut printer = washm::decompile::printers::RustPrinter::new(&module);
@@ -84,7 +84,7 @@ fn test_if_else_reconstruction() {
     let mut reader = washm::wasm::binary_reader::BinaryReader::new();
     let mut module = reader.parse_module(&wasm).expect("parse module");
 
-    let mut lifter = washm::decompile::Lifter::default();
+    let mut lifter = washm::decompile::Lifter;
     lifter.run(&mut module);
 
     let mut printer = washm::decompile::printers::RustPrinter::new(&module);

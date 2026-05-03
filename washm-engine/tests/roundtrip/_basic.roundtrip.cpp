@@ -17,14 +17,23 @@ int32_t factorial(int32_t v0) {
         if ((v0 < 1)) {
             goto block_break_2_end;
         }
+        v3 = 8;
         v1 = 1;
         v2 = 1;
-        /* loop: shape$continue$4 */ while (1) {
+        while (1) {
             {
                 v1 = (v2 * v1);
-                if (!(((v2 = (v2 + 1)) <= v0))) {
+                if (((v2 = (v2 + 1)) <= v0)) {
+                    /* break */;
+                } else {
                     goto block_break_9_end;
                 }
+            }
+        }
+        if ((v3 == 8)) {
+            {
+                v1 = 1;
+                v2 = 1;
             }
         }
         /* block: block$break$2 */ {

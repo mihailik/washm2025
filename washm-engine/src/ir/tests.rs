@@ -1418,7 +1418,7 @@ fn test_type_section_deduplication() {
     for i in 0..3 {
         let body = {
             let mut builder = IrBuilder::new(&mut module.expressions);
-            builder.const_(Literal::I32(i as i32))
+            builder.const_(Literal::I32(i))
         };
         let func = Function::new(format!("f{}", i), Type::I32, Type::I32, vec![], body);
         module.add_function(func);
@@ -1584,7 +1584,7 @@ fn test_function_section_many_functions() {
         let body = {
             let mut builder = IrBuilder::new(&mut module.expressions);
             match result_type {
-                t if t == Type::I32 => builder.const_(Literal::I32(i as i32)),
+                t if t == Type::I32 => builder.const_(Literal::I32(i)),
                 t if t == Type::I64 => builder.const_(Literal::I64(i as i64)),
                 t if t == Type::F64 => builder.const_(Literal::F64(i as f64)),
                 _ => builder.nop(),
@@ -1734,7 +1734,7 @@ fn test_function_section_all_value_type_combinations() {
 
             let body = {
                 let mut builder = IrBuilder::new(&mut module.expressions);
-                builder.const_(lit.clone())
+                builder.const_(*lit)
             };
             let func = Function::new(
                 format!("f_{}_{}", i, j),
@@ -1918,8 +1918,7 @@ fn test_function_section_type_ordering() {
             let mut builder = IrBuilder::new(&mut module.expressions);
             builder.const_(lit)
         };
-        let func =
-            Function::with_type_idx(format!("f{}", i).into(), i.into(), typ, typ, vec![], body);
+        let func = Function::with_type_idx(format!("f{}", i), i.into(), typ, typ, vec![], body);
         module.add_function(func);
     }
 
@@ -2193,7 +2192,7 @@ fn test_function_section_mixed_signatures() {
     for (i, (param, result, lit, _desc)) in signatures.iter().enumerate() {
         let body = {
             let mut builder = IrBuilder::new(&mut module.expressions);
-            builder.const_(lit.clone())
+            builder.const_(*lit)
         };
         let func = Function::new(format!("f{}", i), *param, *result, vec![], body);
         module.add_function(func);
@@ -2364,7 +2363,7 @@ fn test_code_section_all_const_types() {
 
         let body = {
             let mut builder = IrBuilder::new(&mut module.expressions);
-            builder.const_(lit.clone())
+            builder.const_(*lit)
         };
         let func = Function::new("const_test".to_string(), Type::NONE, *typ, vec![], body);
         module.add_function(func);

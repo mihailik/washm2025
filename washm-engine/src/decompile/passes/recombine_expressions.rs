@@ -46,7 +46,7 @@ impl UsageAnalyzer {
             crate::ir::expression::ExpressionMarker,
             crate::ir::expression::Expression,
         >,
-        annotations: &crate::ir::annotation::AnnotationStore,
+        _annotations: &crate::ir::annotation::AnnotationStore,
     ) {
         match &arena[expr_id].kind {
             ExpressionKind::LocalSet { id, .. } | ExpressionKind::LocalTee { id, .. } => {
@@ -60,7 +60,7 @@ impl UsageAnalyzer {
         }
         arena[expr_id]
             .kind
-            .for_each_child(|child_id| self.visit(child_id, arena, annotations));
+            .for_each_child(|child_id| self.visit(child_id, arena, _annotations));
     }
 }
 

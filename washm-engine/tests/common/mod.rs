@@ -106,7 +106,7 @@ fn generate_roundtrip_outputs(source_path_str: &str) -> (String, String, PathBuf
         .expect("Failed to parse WASM module");
 
     // 3. Decompile
-    let mut lifter = Lifter::default();
+    let mut lifter = Lifter;
     lifter.run(&mut module);
 
     let rust_out = RustPrinter::new(&module).print();

@@ -52,20 +52,16 @@ pub fn emit_dwarf_sections(
             if let Some(loc) = module.annotations.get_location(*expr_id) {
                 let addr = body_start + rel_off as u64;
                 rows.push((addr, loc.file_index, loc.line));
-                if !file_table.contains_key(&loc.file_index) {
+                file_table.entry(loc.file_index).or_insert_with(|| {
                     let fname = module
                         .debug_filenames
                         .get(loc.file_index as usize)
                         .filter(|s| !s.is_empty())
                         .cloned()
                         .unwrap_or_else(|| format!("file{}", loc.file_index));
-                    let fid = line_program.add_file(
-                        gw::LineString::String(fname.into_bytes()),
-                        dir_id,
-                        None,
-                    );
-                    file_table.insert(loc.file_index, fid);
-                }
+
+                    line_program.add_file(gw::LineString::String(fname.into_bytes()), dir_id, None)
+                });
             }
         }
         if rows.is_empty() {
@@ -89,9 +85,9 @@ pub fn emit_dwarf_sections(
         // is absolute and will match offsets recorded by the reader.
         let base = body_start;
         line_program.begin_sequence(Some(gw::Address::Constant(base)));
-        for (_i, (addr, file_index, line)) in rows.into_iter().enumerate() {
+        for (addr, file_index, line) in rows.into_iter() {
             // addr is absolute; we want relative offset inside function body (row.address_offset)
-            let rel = addr - (body_start as u64);
+            let rel = addr - body_start;
             let fid = *file_table.get(&file_index).unwrap();
             let row = line_program.row();
             row.address_offset = rel;

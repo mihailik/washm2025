@@ -35,7 +35,7 @@ gimli = "0.31"
 
 [dev-dependencies]
 env_logger = "0.10"
-washm-testgen-macros = { path = "testgen-macros", version = "0.4.1" }
+washm-testgen-macros = { path = "testgen-macros", version = "0.5.0" }
 tempfile = "3.8"
 similar = { version = "2.2", features = ["inline"] }
 proptest = { version = "1.9.0", default-features = false, features = ["std", "alloc"] }

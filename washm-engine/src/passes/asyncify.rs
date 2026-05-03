@@ -962,12 +962,9 @@ impl<'a> AsyncifyFlow<'a> {
 
         let mut builder = IrBuilder::with_annotations(self.arena, self.annotations);
         builder.copy_location(expr_id);
-        let mut list = Vec::new();
         // For tail call, we MUST stop rewinding before the call,
         // because the tail call replaces the current frame.
-        list.push(stop_rewind_if_needed);
-        list.push(expr_id);
-        list.push(unwind_check);
+        let list = vec![stop_rewind_if_needed, expr_id, unwind_check];
 
         let block = builder.block(Option::<String>::None, list, Type::UNREACHABLE);
         builder.if_("", condition, block, None, Type::UNREACHABLE)

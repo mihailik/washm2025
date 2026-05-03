@@ -476,24 +476,25 @@ impl Module {
             &mut self.annotations,
         )
     }
+}
 
-    pub fn parts_mut(
-        &mut self,
-    ) -> (
-        &mut IdArena<ExpressionMarker, Expression>,
-        &mut IdArena<TypeMarker, FuncType>,
-        &mut IdArena<FuncMarker, Function>,
-        &mut IdArena<GlobalMarker, Global>,
-        &mut Vec<Export>,
-        &mut Vec<Import>,
-        &mut IdArena<TableMarker, Table>,
-        &mut IdArena<MemoryMarker, Memory>,
-        &mut IdArena<ElementMarker, ElementSegment>,
-        &mut IdArena<DataMarker, DataSegment>,
-        &mut IdArena<TagMarker, Tag>,
-        &mut Vec<String>,
-        &mut AnnotationStore,
-    ) {
+pub type ModulePartsMut<'a> = (
+    &'a mut IdArena<ExpressionMarker, Expression>,
+    &'a mut IdArena<TypeMarker, FuncType>,
+    &'a mut IdArena<FuncMarker, Function>,
+    &'a mut IdArena<GlobalMarker, Global>,
+    &'a mut Vec<Export>,
+    &'a mut Vec<Import>,
+    &'a mut IdArena<TableMarker, Table>,
+    &'a mut IdArena<MemoryMarker, Memory>,
+    &'a mut IdArena<ElementMarker, ElementSegment>,
+    &'a mut IdArena<DataMarker, DataSegment>,
+    &'a mut IdArena<TagMarker, Tag>,
+    &'a mut Vec<String>,
+    &'a mut AnnotationStore,
+);
+impl Module {
+    pub fn parts_mut(&mut self) -> ModulePartsMut<'_> {
         (
             &mut self.expressions,
             &mut self.types,

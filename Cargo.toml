@@ -6,10 +6,12 @@ members = [
   "washm-engine/testgen-macros",
   "washm-opt",
   "washm-shell",
+  "washm-test",
+  "washm-test-guest",
 ]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 authors = ["Oleg Mihailik <mihailik@gmail.com>"]
 license = "MIT"
@@ -20,12 +22,12 @@ homepage = "https://github.com/mavity/washm"
 opt-level = "z"
 codegen-units = 1
 panic = "unwind"
-debug = false
-strip = true
+debug = true
+strip = false
 
 [profile.dev]
 panic = "unwind"
-debug = false
+debug = true
 
 [profile.dev.package.washm]
 debug = 1

@@ -2150,15 +2150,13 @@ impl ExpressionKind {
                     .iter()
                     .map(|&c| builder.deep_clone(c))
                     .collect(),
-                delegate: delegate.clone(),
+                delegate: *delegate,
             },
             ExpressionKind::Throw { tag, operands } => ExpressionKind::Throw {
                 tag: tag.clone(),
                 operands: operands.iter().map(|&c| builder.deep_clone(c)).collect(),
             },
-            ExpressionKind::Rethrow { target } => ExpressionKind::Rethrow {
-                target: target.clone(),
-            },
+            ExpressionKind::Rethrow { target } => ExpressionKind::Rethrow { target: *target },
             ExpressionKind::TupleMake { operands } => ExpressionKind::TupleMake {
                 operands: operands.iter().map(|&c| builder.deep_clone(c)).collect(),
             },

@@ -1,6 +1,6 @@
 use crate::ir::expression::{ExpressionId, ExpressionKind};
 use crate::ir::module::{Function, FunctionKind, Module};
-use crate::ir::{Literal, Type};
+use crate::ir::Type;
 
 /// The RustPrinter converts the annotated IR into human-readable Rust code.
 pub struct RustPrinter<'m> {
@@ -16,6 +16,16 @@ pub struct RustPrinter<'m> {
 struct LoopContext {
     break_target: Option<ExpressionId>,
     continue_target: Option<ExpressionId>,
+}
+
+struct StoreArgs<'a> {
+    func: &'a Function,
+    expr_id: ExpressionId,
+    ptr: ExpressionId,
+    value: ExpressionId,
+    offset: u32,
+    bytes: u32,
+    is_inline: bool,
 }
 
 impl<'m> RustPrinter<'m> {
@@ -87,7 +97,7 @@ impl<'m> RustPrinter<'m> {
             }
         }
         // Label must not start with a digit
-        if out.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+        if out.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             out = format!("L{}", out);
         }
         out
@@ -214,7 +224,7 @@ impl<'m> RustPrinter<'m> {
                     .push_str(&format!("//   {} : ({}) -> ({})\n", name, params, results));
             }
         }
-        self.output.push_str("\n");
+        self.output.push('\n');
     }
 
     fn format_type_list(&self, ty: Type) -> String {
@@ -407,7 +417,7 @@ impl<'m> RustPrinter<'m> {
             }
         }
 
-        self.output.push_str(")");
+        self.output.push(')');
 
         if func.results != Type::NONE {
             self.output.push_str(" -> ");
@@ -515,7 +525,7 @@ impl<'m> RustPrinter<'m> {
             if offset > 0 {
                 self.output.push_str(&format!(" + {}", offset));
             }
-            self.output.push_str(")");
+            self.output.push(')');
         }
 
         if !is_inline {
@@ -523,16 +533,16 @@ impl<'m> RustPrinter<'m> {
         }
     }
 
-    fn print_store(
-        &mut self,
-        func: &Function,
-        _expr_id: ExpressionId,
-        ptr: ExpressionId,
-        value: ExpressionId,
-        offset: u32,
-        bytes: u32,
-        is_inline: bool,
-    ) {
+    fn print_store(&mut self, args: StoreArgs) {
+        let StoreArgs {
+            func,
+            expr_id: _expr_id,
+            ptr,
+            value,
+            offset,
+            bytes,
+            is_inline,
+        } = args;
         let mut handled = false;
 
         // Try to handle as struct access via annotations
@@ -758,10 +768,10 @@ impl<'m> RustPrinter<'m> {
                     }
                     self.output.push_str("if ");
                     if inverted {
-                        self.output.push_str("!");
+                        self.output.push('!');
                     }
                     self.render_boolean_condition(func, condition);
-                    self.output.push_str(" ");
+                    self.output.push(' ');
                 } else {
                     self.emit_block_label_if_needed(func, expr_id, block_name);
                 }
@@ -801,11 +811,11 @@ impl<'m> RustPrinter<'m> {
                         }
                         self.walk_inline_expression(func, op_id);
                     }
-                    self.output.push_str(")");
+                    self.output.push(')');
                     if is_statement && !is_return {
                         self.output.push_str(";\n");
                     } else {
-                        self.output.push_str("\n");
+                        self.output.push('\n');
                     }
                 }
             }
@@ -829,7 +839,7 @@ impl<'m> RustPrinter<'m> {
 
                 self.indent -= 1;
                 self.write_indent();
-                self.output.push_str("}");
+                self.output.push('}');
 
                 if let Some(f) = if_false {
                     // Omit printing `else` when the branch is an explicit NOP
@@ -847,7 +857,7 @@ impl<'m> RustPrinter<'m> {
                                 self.walk_body(func, *f);
                                 self.indent -= 1;
                                 self.write_indent();
-                                self.output.push_str("}");
+                                self.output.push('}');
                             }
                         }
                     }
@@ -856,7 +866,7 @@ impl<'m> RustPrinter<'m> {
                 if has_label {
                     self.output.push_str(" }");
                 }
-                self.output.push_str("\n");
+                self.output.push('\n');
             }
             ExpressionKind::Loop { name, body } => {
                 self.emit_block_label_if_needed(func, expr_id, name);
@@ -988,7 +998,7 @@ impl<'m> RustPrinter<'m> {
                 if is_statement {
                     self.output.push_str(";\n");
                 } else {
-                    self.output.push_str("\n");
+                    self.output.push('\n');
                 }
             }
             ExpressionKind::Store {
@@ -998,7 +1008,15 @@ impl<'m> RustPrinter<'m> {
                 bytes,
                 ..
             } => {
-                self.print_store(func, expr_id, *ptr, *value, *offset, *bytes, false);
+                self.print_store(StoreArgs {
+                    func,
+                    expr_id,
+                    ptr: *ptr,
+                    value: *value,
+                    offset: *offset,
+                    bytes: *bytes,
+                    is_inline: false,
+                });
                 self.output.push_str(";\n");
             }
             ExpressionKind::Load { .. }
@@ -1014,7 +1032,7 @@ impl<'m> RustPrinter<'m> {
                 if is_statement {
                     self.output.push_str(";\n");
                 } else {
-                    self.output.push_str("\n");
+                    self.output.push('\n');
                 }
             }
             ExpressionKind::GlobalSet { id, value } => {
@@ -1033,18 +1051,18 @@ impl<'m> RustPrinter<'m> {
                     self.output.push_str("return ");
                 }
                 self.walk_inline_expression(func, *target);
-                self.output.push_str("(");
+                self.output.push('(');
                 for (i, op) in operands.iter().enumerate() {
                     if i > 0 {
                         self.output.push_str(", ");
                     }
                     self.walk_inline_expression(func, *op);
                 }
-                self.output.push_str(")");
+                self.output.push(')');
                 if is_statement {
                     self.output.push_str(";\n");
                 } else {
-                    self.output.push_str("\n");
+                    self.output.push('\n');
                 }
             }
             ExpressionKind::Try {
@@ -1055,21 +1073,21 @@ impl<'m> RustPrinter<'m> {
                 self.walk_body(func, *body);
                 self.indent -= 1;
                 self.write_indent();
-                self.output.push_str("}");
+                self.output.push('}');
                 for &cb in catch_bodies {
                     self.output.push_str(" /* catch */ {\n");
                     self.indent += 1;
                     self.walk_body(func, cb);
                     self.indent -= 1;
                     self.write_indent();
-                    self.output.push_str("}");
+                    self.output.push('}');
                 }
-                self.output.push_str("\n");
+                self.output.push('\n');
             }
             ExpressionKind::Return { value } => {
                 self.output.push_str("return");
                 if let Some(v) = value {
-                    self.output.push_str(" ");
+                    self.output.push(' ');
                     self.walk_inline_expression(func, *v);
                 }
                 self.output.push_str(";\n");
@@ -1131,8 +1149,8 @@ impl<'m> RustPrinter<'m> {
                 self.output
                     .push_str(&format!("/* table.grow {} */ ", table.index()));
                 self.walk_inline_expression(func, *value);
-                self.output.push_str(";");
-                self.output.push_str("\n");
+                self.output.push(';');
+                self.output.push('\n');
             }
             ExpressionKind::TableFill {
                 table,
@@ -1168,7 +1186,7 @@ impl<'m> RustPrinter<'m> {
                 self.walk_inline_value(func, *src);
                 self.output.push_str(", ");
                 self.walk_inline_value(func, *size);
-                self.output.push_str(")");
+                self.output.push(')');
                 if is_statement {
                     self.output.push_str(";\n");
                 }
@@ -1182,7 +1200,7 @@ impl<'m> RustPrinter<'m> {
                 self.walk_inline_value(func, *value);
                 self.output.push_str(", ");
                 self.walk_inline_value(func, *size);
-                self.output.push_str(")");
+                self.output.push(')');
                 if is_statement {
                     self.output.push_str(";\n");
                 }
@@ -1209,7 +1227,7 @@ impl<'m> RustPrinter<'m> {
                 value,
             } => {
                 self.walk_inline_expression(func, *ptr);
-                self.output.push_str("[");
+                self.output.push('[');
                 self.walk_inline_expression(func, *index);
                 self.output.push_str("] = ");
                 self.walk_inline_expression(func, *value);
@@ -1353,7 +1371,7 @@ impl<'m> RustPrinter<'m> {
                     _ => "?",
                 };
 
-                self.output.push_str("(");
+                self.output.push('(');
                 if commutative {
                     if let (Some(li), Some(ri)) = (left_local_idx, right_local_idx) {
                         if li <= ri {
@@ -1375,7 +1393,7 @@ impl<'m> RustPrinter<'m> {
                     self.output.push_str(&format!(" {} ", op_str));
                     self.walk_inline_value(func, *right);
                 }
-                self.output.push_str(")");
+                self.output.push(')');
             }
             ExpressionKind::Unary { op, value } => {
                 let op_str = match op {
@@ -1388,7 +1406,7 @@ impl<'m> RustPrinter<'m> {
                 };
                 self.output.push_str(&format!("{}(", op_str));
                 self.walk_inline_value(func, *value);
-                self.output.push_str(")");
+                self.output.push(')');
             }
             ExpressionKind::LocalTee { id, value } => {
                 let name = self.get_local_name(func, *id, Some(expr_id));
@@ -1429,7 +1447,15 @@ impl<'m> RustPrinter<'m> {
                 bytes,
                 ..
             } => {
-                self.print_store(func, expr_id, *ptr, *value, *offset, *bytes, true);
+                self.print_store(StoreArgs {
+                    func,
+                    expr_id,
+                    ptr: *ptr,
+                    value: *value,
+                    offset: *offset,
+                    bytes: *bytes,
+                    is_inline: true,
+                });
             }
             ExpressionKind::Call {
                 target: f_id,
@@ -1441,14 +1467,14 @@ impl<'m> RustPrinter<'m> {
                 } else {
                     self.output.push_str(&format!("func_{}", f_id.index()));
                 }
-                self.output.push_str("(");
+                self.output.push('(');
                 for (i, id) in operands.iter().enumerate() {
                     if i > 0 {
                         self.output.push_str(", ");
                     }
                     self.walk_inline_value(func, *id);
                 }
-                self.output.push_str(")");
+                self.output.push(')');
             }
             ExpressionKind::RefFunc { func } => {
                 if let Some(f) = self.module.functions.get(*func) {
@@ -1460,7 +1486,7 @@ impl<'m> RustPrinter<'m> {
             ExpressionKind::TableGet { table, index } => {
                 self.output.push_str(&format!("table_{}[", table.index()));
                 self.walk_inline_value(func, *index);
-                self.output.push_str("]");
+                self.output.push(']');
             }
             ExpressionKind::TupleExtract { tuple, index } => {
                 self.output.push_str("/* tuple.extract */ ");
@@ -1473,7 +1499,7 @@ impl<'m> RustPrinter<'m> {
             ExpressionKind::RefIsNull { value } => {
                 self.output.push_str("(/* ref.is_null */ ");
                 self.walk_inline_value(func, *value);
-                self.output.push_str(")");
+                self.output.push(')');
             }
             ExpressionKind::RefEq { left, right } => {
                 self.walk_inline_value(func, *left);
@@ -1517,7 +1543,7 @@ impl<'m> RustPrinter<'m> {
                 self.output.push_str(&name);
             }
             ExpressionKind::Binary { op, left, right } => {
-                self.output.push_str("(");
+                self.output.push('(');
                 self.walk_inline_expression(func, *left);
                 let op_str = match op {
                     crate::ir::ops::BinaryOp::AddInt32 | crate::ir::ops::BinaryOp::AddInt64 => "+",
@@ -1577,7 +1603,7 @@ impl<'m> RustPrinter<'m> {
                 };
                 self.output.push_str(&format!(" {} ", op_str));
                 self.walk_inline_expression(func, *right);
-                self.output.push_str(")");
+                self.output.push(')');
             }
             ExpressionKind::Unary { op, value } => {
                 let op_str = match op {
@@ -1590,15 +1616,15 @@ impl<'m> RustPrinter<'m> {
                     _ => "unary",
                 };
                 if op_str == "!" {
-                    self.output.push_str("!");
+                    self.output.push('!');
                 } else {
                     self.output.push_str(&format!("{}(", op_str));
                 }
-                self.output.push_str("(");
+                self.output.push('(');
                 self.walk_inline_expression(func, *value);
-                self.output.push_str(")");
+                self.output.push(')');
                 if op_str != "!" {
-                    self.output.push_str(")");
+                    self.output.push(')');
                 }
             }
             ExpressionKind::LocalTee { id, value } => {
@@ -1641,30 +1667,38 @@ impl<'m> RustPrinter<'m> {
                 bytes,
                 ..
             } => {
-                self.print_store(func, expr_id, *ptr, *value, *offset, *bytes, false);
+                self.print_store(StoreArgs {
+                    func,
+                    expr_id,
+                    ptr: *ptr,
+                    value: *value,
+                    offset: *offset,
+                    bytes: *bytes,
+                    is_inline: false,
+                });
             }
             ExpressionKind::CallIndirect {
                 target, operands, ..
             } => {
                 self.walk_inline_expression(func, *target);
-                self.output.push_str("(");
+                self.output.push('(');
                 for (i, op) in operands.iter().enumerate() {
                     if i > 0 {
                         self.output.push_str(", ");
                     }
                     self.walk_inline_expression(func, *op);
                 }
-                self.output.push_str(")");
+                self.output.push(')');
             }
             ExpressionKind::TupleMake { operands } => {
-                self.output.push_str("(");
+                self.output.push('(');
                 for (i, id) in operands.iter().enumerate() {
                     if i > 0 {
                         self.output.push_str(", ");
                     }
                     self.walk_inline_expression(func, *id);
                 }
-                self.output.push_str(")");
+                self.output.push(')');
             }
             ExpressionKind::RefFunc { func } => {
                 if let Some(f) = self.module.functions.get(*func) {
@@ -1689,9 +1723,9 @@ impl<'m> RustPrinter<'m> {
                 signed: _,
             } => {
                 self.walk_inline_expression(func, *ptr);
-                self.output.push_str("[");
+                self.output.push('[');
                 self.walk_inline_expression(func, *index);
-                self.output.push_str("]");
+                self.output.push(']');
             }
             ExpressionKind::ArrayLen { ptr } => {
                 self.walk_inline_expression(func, *ptr);
@@ -1700,7 +1734,7 @@ impl<'m> RustPrinter<'m> {
             ExpressionKind::I31Get { i31, signed: _ } => {
                 self.output.push_str("i31_get(");
                 self.walk_inline_expression(func, *i31);
-                self.output.push_str(")");
+                self.output.push(')');
             }
             ExpressionKind::Pop { type_: _ } => {
                 self.output.push_str("/* pop */");

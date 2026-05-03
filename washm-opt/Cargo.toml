@@ -5,7 +5,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-washm = { path = "../washm-engine", version = "0.4.1" }
+washm = { path = "../washm-engine", version = "0.5.0" }
 clap = { version = "4.5", features = ["derive"] }
 anyhow = "1.0"
 wast = "244.0.0"

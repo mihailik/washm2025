@@ -1,0 +1,14 @@
+[package]
+name = "washm-test-guest"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight guest library for washm-test coverage"
+
+[dependencies]
+# Minimal dependencies for guest environment
+
+[profile.dev]
+debug = true
+
+[profile.release]
+debug = true

@@ -74,6 +74,7 @@ mod test_command;
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
 pub extern "C" fn washm_init() {
+    println!("DEBUG: washm_init start");
     // 0. Initialize TTY bridge first (so it's the inner layer)
     let _ = bridges::tty::ensure_bridge();
 

@@ -69,6 +69,23 @@ pub fn startup_pwd() -> String {
         .to_string()
 }
 
+pub fn set_coverage_ptr(ptr: u32) -> Result<(), std::io::Error> {
+    std::fs::write("/dev/host/washm/coverage_ptr", ptr.to_string())
+}
+
+pub fn get_coverage_ptr() -> u32 {
+    std::fs::read_to_string("/dev/host/washm/coverage_ptr")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+pub fn load_sidecar(path: &str) -> Result<crate::test_harness::SourceMapper, std::io::Error> {
+    let content = std::fs::read_to_string(path)?;
+    serde_json::from_str(&content)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 // Environment variables are now provided by the host at instantiation time (WASI env).
 // The protocol no longer injects environment variables post-startup, so this helper has been removed.
 
