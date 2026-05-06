@@ -1,0 +1,79 @@
+﻿on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+name: continuous-integration
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-latest, macos-latest, windows-latest]
+        flags:
+          - ""
+          - "--features bashisms"
+          - "--features helix"
+          - "--features sqlite"
+          - "--features system_clipboard"
+          - "--all-features"
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Test lib
+        run: cargo test --lib ${{ matrix.flags }}
+
+  doc-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Doctests
+        run: cargo test --doc
+
+  wasm-and-no-default:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: rustup target add wasm32-unknown-unknown
+      - name: Check no-default-features
+        run: cargo check --no-default-features
+      - name: Check wasm32 no-default-features
+        run: cargo check --target wasm32-unknown-unknown --no-default-features
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Build docs
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps
+
+  publish-dryrun-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check package contents
+        shell: bash
+        run: |
+          PACKAGE_LIST=$(cargo package --list)
+          for path in "engine_branch.rs" "event_source_branch.rs" "external_printer_branch.rs" "temp_columnar.txt" "dummy_crossterm/" "dummy_fdlock/" "examples/wasm-repl-demo/" "docs/" ".playwright-mcp/" "UX_TESTING.md"; do
+            if echo "$PACKAGE_LIST" | grep -q "$path"; then
+              echo "Error: $path found in cargo package --list"
+              exit 1
+            fi
+          done

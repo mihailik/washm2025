@@ -1,0 +1,12 @@
+{
+  "name": "reedline-wasm-demo-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test.js",
+    "serve": "npx --yes http-server -p 8080 -c-1 .."
+  },
+  "dependencies": {
+    "typescript": "^5.5.0"
+  }
+}
