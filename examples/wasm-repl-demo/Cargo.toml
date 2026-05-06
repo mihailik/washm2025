@@ -1,0 +1,17 @@
+﻿[package]
+name = "reedline_wasm_demo"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+reedline = { path = "../../", default-features = false }
+futures-executor = "0.3"
+nu-ansi-term = "0.50.0"
+
+[patch.crates-io]
+crossterm = { path = "../../dummy_crossterm" }
+fd-lock = { path = "../../dummy_fdlock" }

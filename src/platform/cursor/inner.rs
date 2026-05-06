@@ -1,0 +1,9 @@
+//! Reedline-owned cursor-style definitions used when the
+//! `crossterm-backend` feature is disabled. Phase C will populate.
+
+compile_error!(
+    "src/platform/cursor/inner.rs has not been populated yet (Phase C). \
+     Build with the `crossterm-backend` feature enabled (default) for now."
+);
+
+pub enum SetCursorStyle {}
